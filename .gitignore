@@ -1,0 +1,43 @@
+# Ralph Loop 운영 산출물 — 절대 커밋되면 안 됨
+.ralph/
+.ralph.log
+state/lock
+state/current_ticket
+state/failures.log
+state/auto_merge.log
+state/cron.log
+state/reservations/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 외부 도구 잔여물
+.playwright-mcp/
+pdf-state.png
+pdf-zoom-test*.png
+zoom-*.png
+fit-*.png
+scrollbar-*.png
+
+# OCR 임시 산출물 (분석용으로 만들어졌던 것)
+outputs/ocr/
+
+# 비밀
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# 의존성/빌드 산출물 (프로젝트가 추가될 때 보강)
+node_modules/
+dist/
+build/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+target/

@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oneul-shindang.app/schema/fortune.v1.1.json",
+  "title": "오늘신당 운세 결과 스키마 v1.1",
+  "description": "LLM이 생성하는 오늘의 운세 결과 구조. v1.1은 narration 배열을 LLM 출력에서 제거하고, scores_line 한 문장만 LLM이 생성한다. 서버는 scores_line과 구조화 필드로 TTS narration을 조립한다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "meta", "scores", "scores_line", "summary", "advice", "lucky", "avoid", "blessing"],
+  "properties": {
+    "schema_version": {
+      "const": "fortune.v1.1"
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["date", "character_id", "topic", "tone", "locale", "seed_hash", "content_version"],
+      "properties": {
+        "date": { "type": "string", "format": "date", "description": "운세 기준 날짜 (KST)" },
+        "character_id": { "type": "string", "enum": ["hongyeon", "sowol", "gangrim"], "description": "무당 캐릭터 ID. 베타는 hongyeon 고정" },
+        "topic": { "type": "string", "enum": ["total", "love", "money", "work", "relationship"], "description": "사용자 선택 주제" },
+        "tone": { "type": "string", "enum": ["bright", "calm", "firm"], "description": "캐릭터 톤. hongyeon=bright" },
+        "locale": { "type": "string", "const": "ko-KR" },
+        "seed_hash": { "type": "string", "minLength": 8, "description": "date+birth_profile_hash(HMAC)+topic+character_id 기반 seed. 원본 생년월일/출생시간은 포함하지 않는다(§12)" },
+        "content_version": { "type": "string", "const": "prompt.v1.1", "description": "프롬프트/콘텐츠 정책 버전" }
+      }
+    },
+    "scores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["love", "money", "work", "relationship", "condition"],
+      "description": "분야별 점수 0-100",
+      "properties": {
+        "love": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "money": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "work": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "relationship": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "condition": { "type": "integer", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "scores_line": {
+      "type": "string",
+      "description": "분야별 점수 흐름을 홍연 말투로 설명하는 짧은 1문장. 서버 조립 narration의 scores 세그먼트로 사용한다.",
+      "minLength": 12,
+      "maxLength": 120
+    },
+    "summary": {
+      "type": "array",
+      "description": "총평 정확히 2문장 (개인화)",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": { "type": "string", "minLength": 8, "maxLength": 120 }
+    },
+    "advice": {
+      "type": "string",
+      "description": "오늘의 조언 1개. 오늘 바로 실천 가능한 작은 행동(§9)",
+      "minLength": 8,
+      "maxLength": 140
+    },
+    "lucky": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["color", "item"],
+      "properties": {
+        "color": { "type": "string", "minLength": 1, "maxLength": 24, "description": "행운 색상. 색상 사전(고정 풀)에서 선택 → 부분 캐시 가능" },
+        "item": { "type": "string", "minLength": 1, "maxLength": 30, "description": "행운 아이템. 아이템 사전(고정 풀)에서 선택 → 부분 캐시 가능" }
+      }
+    },
+    "avoid": {
+      "type": "string",
+      "description": "피해야 할 행동. 불안 조장/강요 금지(§9, §21)",
+      "minLength": 6,
+      "maxLength": 120
+    },
+    "blessing": {
+      "type": "string",
+      "description": "캐릭터 축원 문장. 캐릭터별 사전 합성 풀에서 선택 → presynth 가능",
+      "minLength": 6,
+      "maxLength": 120
+    }
+  }
+}

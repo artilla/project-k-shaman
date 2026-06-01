@@ -1,0 +1,512 @@
+[
+  {
+    "seed": "h_love_001",
+    "topic": "love",
+    "version": "A",
+    "voice": "coral",
+    "pred_sec_slow": 50.8,
+    "actual_sec": 44.21,
+    "actual_cost_usd": 0.01105,
+    "segments": {
+      "greeting": {
+        "type": "presynth",
+        "sec": 5.71,
+        "cost_usd": 0.00143
+      },
+      "summary": {
+        "type": "personalized",
+        "sec": 7.75,
+        "cost_usd": 0.00194
+      },
+      "scores": {
+        "type": "personalized",
+        "sec": 7.85,
+        "cost_usd": 0.00196
+      },
+      "advice": {
+        "type": "personalized",
+        "sec": 5.26,
+        "cost_usd": 0.00131
+      },
+      "lucky": {
+        "type": "semi",
+        "sec": 5.86,
+        "cost_usd": 0.00146
+      },
+      "avoid": {
+        "type": "personalized",
+        "sec": 6.17,
+        "cost_usd": 0.00154
+      },
+      "blessing": {
+        "type": "presynth",
+        "sec": 5.06,
+        "cost_usd": 0.00127
+      },
+      "ending": {
+        "type": "presynth",
+        "sec": 5.45,
+        "cost_usd": 0.00136
+      }
+    }
+  },
+  {
+    "seed": "h_love_001",
+    "topic": "love",
+    "version": "B",
+    "voice": "coral",
+    "pred_sec_slow": 48.3,
+    "actual_sec": 41.16,
+    "actual_cost_usd": 0.01029,
+    "segments": {
+      "greeting": {
+        "type": "presynth",
+        "sec": 5.62,
+        "cost_usd": 0.0014
+      },
+      "summary": {
+        "type": "personalized",
+        "sec": 8.3,
+        "cost_usd": 0.00208
+      },
+      "scores": {
+        "type": "personalized",
+        "sec": 6.31,
+        "cost_usd": 0.00158
+      },
+      "advice": {
+        "type": "personalized",
+        "sec": 5.4,
+        "cost_usd": 0.00135
+      },
+      "lucky": {
+        "type": "semi",
+        "sec": 5.52,
+        "cost_usd": 0.00138
+      },
+      "avoid": {
+        "type": "personalized",
+        "sec": 6.12,
+        "cost_usd": 0.00153
+      },
+      "blessing": {
+        "type": "presynth",
+        "sec": 5.81,
+        "cost_usd": 0.00145
+      },
+      "ending": {
+        "type": "presynth",
+        "sec": 5.26,
+        "cost_usd": 0.00131
+      }
+    }
+  },
+  {
+    "seed": "h_money_001",
+    "topic": "money",
+    "version": "A",
+    "voice": "coral",
+    "pred_sec_slow": 46.8,
+    "actual_sec": 40.92,
+    "actual_cost_usd": 0.01023,
+    "segments": {
+      "greeting": {
+        "type": "presynth",
+        "sec": 6.65,
+        "cost_usd": 0.00166
+      },
+      "summary": {
+        "type": "personalized",
+        "sec": 7.8,
+        "cost_usd": 0.00195
+      },
+      "scores": {
+        "type": "personalized",
+        "sec": 7.15,
+        "cost_usd": 0.00179
+      },
+      "advice": {
+        "type": "personalized",
+        "sec": 5.11,
+        "cost_usd": 0.00128
+      },
+      "lucky": {
+        "type": "semi",
+        "sec": 4.8,
+        "cost_usd": 0.0012
+      },
+      "avoid": {
+        "type": "personalized",
+        "sec": 5.3,
+        "cost_usd": 0.00133
+      },
+      "blessing": {
+        "type": "presynth",
+        "sec": 5.35,
+        "cost_usd": 0.00134
+      },
+      "ending": {
+        "type": "presynth",
+        "sec": 5.52,
+        "cost_usd": 0.00138
+      }
+    }
+  },
+  {
+    "seed": "h_money_001",
+    "topic": "money",
+    "version": "B",
+    "voice": "coral",
+    "pred_sec_slow": 45.2,
+    "actual_sec": 39.46,
+    "actual_cost_usd": 0.00986,
+    "segments": {
+      "greeting": {
+        "type": "presynth",
+        "sec": 7.15,
+        "cost_usd": 0.00179
+      },
+      "summary": {
+        "type": "personalized",
+        "sec": 8.4,
+        "cost_usd": 0.0021
+      },
+      "scores": {
+        "type": "personalized",
+        "sec": 7.42,
+        "cost_usd": 0.00185
+      },
+      "advice": {
+        "type": "personalized",
+        "sec": 4.15,
+        "cost_usd": 0.00104
+      },
+      "lucky": {
+        "type": "semi",
+        "sec": 5.21,
+        "cost_usd": 0.0013
+      },
+      "avoid": {
+        "type": "personalized",
+        "sec": 5.57,
+        "cost_usd": 0.00139
+      },
+      "blessing": {
+        "type": "presynth",
+        "sec": 5.52,
+        "cost_usd": 0.00138
+      },
+      "ending": {
+        "type": "presynth",
+        "sec": 5.3,
+        "cost_usd": 0.00133
+      }
+    }
+  },
+  {
+    "seed": "h_work_001",
+    "topic": "work",
+    "version": "A",
+    "voice": "coral",
+    "pred_sec_slow": 47.9,
+    "actual_sec": 46.01,
+    "actual_cost_usd": 0.0115,
+    "segments": {
+      "greeting": {
+        "type": "presynth",
+        "sec": 5.52,
+        "cost_usd": 0.00138
+      },
+      "summary": {
+        "type": "personalized",
+        "sec": 7.46,
+        "cost_usd": 0.00187
+      },
+      "scores": {
+        "type": "personalized",
+        "sec": 7.32,
+        "cost_usd": 0.00183
+      },
+      "advice": {
+        "type": "personalized",
+        "sec": 5.26,
+        "cost_usd": 0.00131
+      },
+      "lucky": {
+        "type": "semi",
+        "sec": 5.71,
+        "cost_usd": 0.00143
+      },
+      "avoid": {
+        "type": "personalized",
+        "sec": 6.0,
+        "cost_usd": 0.0015
+      },
+      "blessing": {
+        "type": "presynth",
+        "sec": 4.7,
+        "cost_usd": 0.00118
+      },
+      "ending": {
+        "type": "presynth",
+        "sec": 5.71,
+        "cost_usd": 0.00143
+      }
+    }
+  },
+  {
+    "seed": "h_work_001",
+    "topic": "work",
+    "version": "B",
+    "voice": "coral",
+    "pred_sec_slow": 46.3,
+    "actual_sec": 40.06,
+    "actual_cost_usd": 0.01001,
+    "segments": {
+      "greeting": {
+        "type": "presynth",
+        "sec": 5.9,
+        "cost_usd": 0.00148
+      },
+      "summary": {
+        "type": "personalized",
+        "sec": 7.2,
+        "cost_usd": 0.0018
+      },
+      "scores": {
+        "type": "personalized",
+        "sec": 6.22,
+        "cost_usd": 0.00155
+      },
+      "advice": {
+        "type": "personalized",
+        "sec": 4.97,
+        "cost_usd": 0.00124
+      },
+      "lucky": {
+        "type": "semi",
+        "sec": 5.26,
+        "cost_usd": 0.00131
+      },
+      "avoid": {
+        "type": "personalized",
+        "sec": 6.46,
+        "cost_usd": 0.00161
+      },
+      "blessing": {
+        "type": "presynth",
+        "sec": 5.11,
+        "cost_usd": 0.00128
+      },
+      "ending": {
+        "type": "presynth",
+        "sec": 4.42,
+        "cost_usd": 0.0011
+      }
+    }
+  },
+  {
+    "seed": "h_rel_001",
+    "topic": "relationship",
+    "version": "A",
+    "voice": "coral",
+    "pred_sec_slow": 47.4,
+    "actual_sec": 41.71,
+    "actual_cost_usd": 0.01043,
+    "segments": {
+      "greeting": {
+        "type": "presynth",
+        "sec": 6.41,
+        "cost_usd": 0.0016
+      },
+      "summary": {
+        "type": "personalized",
+        "sec": 8.81,
+        "cost_usd": 0.0022
+      },
+      "scores": {
+        "type": "personalized",
+        "sec": 7.06,
+        "cost_usd": 0.00176
+      },
+      "advice": {
+        "type": "personalized",
+        "sec": 5.06,
+        "cost_usd": 0.00127
+      },
+      "lucky": {
+        "type": "semi",
+        "sec": 5.35,
+        "cost_usd": 0.00134
+      },
+      "avoid": {
+        "type": "personalized",
+        "sec": 4.25,
+        "cost_usd": 0.00106
+      },
+      "blessing": {
+        "type": "presynth",
+        "sec": 4.92,
+        "cost_usd": 0.00123
+      },
+      "ending": {
+        "type": "presynth",
+        "sec": 4.75,
+        "cost_usd": 0.00119
+      }
+    }
+  },
+  {
+    "seed": "h_rel_001",
+    "topic": "relationship",
+    "version": "B",
+    "voice": "coral",
+    "pred_sec_slow": 46.8,
+    "actual_sec": 38.45,
+    "actual_cost_usd": 0.00961,
+    "segments": {
+      "greeting": {
+        "type": "presynth",
+        "sec": 7.8,
+        "cost_usd": 0.00195
+      },
+      "summary": {
+        "type": "personalized",
+        "sec": 8.76,
+        "cost_usd": 0.00219
+      },
+      "scores": {
+        "type": "personalized",
+        "sec": 7.32,
+        "cost_usd": 0.00183
+      },
+      "advice": {
+        "type": "personalized",
+        "sec": 5.11,
+        "cost_usd": 0.00128
+      },
+      "lucky": {
+        "type": "semi",
+        "sec": 5.45,
+        "cost_usd": 0.00136
+      },
+      "avoid": {
+        "type": "personalized",
+        "sec": 4.32,
+        "cost_usd": 0.00108
+      },
+      "blessing": {
+        "type": "presynth",
+        "sec": 5.26,
+        "cost_usd": 0.00131
+      },
+      "ending": {
+        "type": "presynth",
+        "sec": 4.85,
+        "cost_usd": 0.00121
+      }
+    }
+  },
+  {
+    "seed": "h_total_001",
+    "topic": "total",
+    "version": "A",
+    "voice": "coral",
+    "pred_sec_slow": 47.4,
+    "actual_sec": 37.75,
+    "actual_cost_usd": 0.00944,
+    "segments": {
+      "greeting": {
+        "type": "presynth",
+        "sec": 7.01,
+        "cost_usd": 0.00175
+      },
+      "summary": {
+        "type": "personalized",
+        "sec": 7.56,
+        "cost_usd": 0.00189
+      },
+      "scores": {
+        "type": "personalized",
+        "sec": 7.42,
+        "cost_usd": 0.00185
+      },
+      "advice": {
+        "type": "personalized",
+        "sec": 5.26,
+        "cost_usd": 0.00131
+      },
+      "lucky": {
+        "type": "semi",
+        "sec": 5.02,
+        "cost_usd": 0.00125
+      },
+      "avoid": {
+        "type": "personalized",
+        "sec": 4.42,
+        "cost_usd": 0.0011
+      },
+      "blessing": {
+        "type": "presynth",
+        "sec": 4.8,
+        "cost_usd": 0.0012
+      },
+      "ending": {
+        "type": "presynth",
+        "sec": 4.7,
+        "cost_usd": 0.00118
+      }
+    }
+  },
+  {
+    "seed": "h_total_001",
+    "topic": "total",
+    "version": "B",
+    "voice": "coral",
+    "pred_sec_slow": 45.9,
+    "actual_sec": 38.11,
+    "actual_cost_usd": 0.00953,
+    "segments": {
+      "greeting": {
+        "type": "presynth",
+        "sec": 6.65,
+        "cost_usd": 0.00166
+      },
+      "summary": {
+        "type": "personalized",
+        "sec": 7.61,
+        "cost_usd": 0.0019
+      },
+      "scores": {
+        "type": "personalized",
+        "sec": 5.62,
+        "cost_usd": 0.0014
+      },
+      "advice": {
+        "type": "personalized",
+        "sec": 5.52,
+        "cost_usd": 0.00138
+      },
+      "lucky": {
+        "type": "semi",
+        "sec": 4.61,
+        "cost_usd": 0.00115
+      },
+      "avoid": {
+        "type": "personalized",
+        "sec": 5.62,
+        "cost_usd": 0.0014
+      },
+      "blessing": {
+        "type": "presynth",
+        "sec": 5.06,
+        "cost_usd": 0.00127
+      },
+      "ending": {
+        "type": "presynth",
+        "sec": 4.75,
+        "cost_usd": 0.00119
+      }
+    }
+  }
+]

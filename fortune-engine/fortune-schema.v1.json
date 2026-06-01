@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://oneul-shindang.app/schema/fortune.v1.json",
+  "title": "오늘신당 운세 결과 스키마 v1",
+  "description": "LLM이 생성하는 오늘의 운세 결과 구조. narration 배열의 각 세그먼트는 캐싱 계층(§11)과 직접 연결되도록 type으로 presynth/semi/personalized를 구분한다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "meta", "scores", "summary", "advice", "lucky", "avoid", "blessing", "narration"],
+  "properties": {
+    "schema_version": {
+      "const": "fortune.v1"
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["date", "character_id", "topic", "tone", "locale", "seed_hash", "content_version"],
+      "properties": {
+        "date": { "type": "string", "format": "date", "description": "운세 기준 날짜 (KST)" },
+        "character_id": { "type": "string", "enum": ["hongyeon", "sowol", "gangrim"], "description": "무당 캐릭터 ID. 베타는 hongyeon 고정" },
+        "topic": { "type": "string", "enum": ["total", "love", "money", "work", "relationship"], "description": "사용자 선택 주제" },
+        "tone": { "type": "string", "enum": ["bright", "calm", "firm"], "description": "캐릭터 톤. hongyeon=bright" },
+        "locale": { "type": "string", "const": "ko-KR" },
+        "seed_hash": { "type": "string", "minLength": 8, "description": "date+birth_profile_hash(HMAC)+topic+character_id 기반 seed. 원본 생년월일/출생시간은 포함하지 않는다(§12)" },
+        "content_version": { "type": "string", "description": "프롬프트/콘텐츠 정책 버전 (예: prompt.v1)" }
+      }
+    },
+    "scores": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["love", "money", "work", "relationship", "condition"],
+      "description": "분야별 점수 0-100",
+      "properties": {
+        "love": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "money": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "work": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "relationship": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "condition": { "type": "integer", "minimum": 0, "maximum": 100 }
+      }
+    },
+    "summary": {
+      "type": "array",
+      "description": "총평 정확히 2문장 (개인화)",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": { "type": "string", "minLength": 8, "maxLength": 120 }
+    },
+    "advice": {
+      "type": "string",
+      "description": "오늘의 조언 1개. 오늘 바로 실천 가능한 작은 행동(§9)",
+      "minLength": 8,
+      "maxLength": 140
+    },
+    "lucky": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["color", "item"],
+      "properties": {
+        "color": { "type": "string", "minLength": 1, "maxLength": 24, "description": "행운 색상. 색상 사전(고정 풀)에서 선택 → 부분 캐시 가능" },
+        "item": { "type": "string", "minLength": 1, "maxLength": 30, "description": "행운 아이템. 아이템 사전(고정 풀)에서 선택 → 부분 캐시 가능" }
+      }
+    },
+    "avoid": {
+      "type": "string",
+      "description": "피해야 할 행동. 불안 조장/강요 금지(§9, §21)",
+      "minLength": 6,
+      "maxLength": 120
+    },
+    "blessing": {
+      "type": "string",
+      "description": "캐릭터 축원 문장. 캐릭터별 사전 합성 풀에서 선택 → presynth 가능",
+      "minLength": 6,
+      "maxLength": 120
+    },
+    "narration": {
+      "type": "array",
+      "description": "TTS 재생 순서대로 정렬된 세그먼트. type이 재생/캐싱 전략을 결정한다.",
+      "minItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["segment", "type", "text"],
+        "properties": {
+          "segment": {
+            "type": "string",
+            "enum": ["greeting", "summary", "scores", "advice", "lucky", "avoid", "blessing", "transition", "ending"],
+            "description": "세그먼트 역할"
+          },
+          "type": {
+            "type": "string",
+            "enum": ["presynth", "semi", "personalized"],
+            "description": "presynth=캐릭터 공통 사전합성(캐시 100%), semi=고정 풀 조합(부분 캐시), personalized=매번 신규 합성 가능성 높음"
+          },
+          "text": { "type": "string", "minLength": 1, "maxLength": 400, "description": "해당 세그먼트 음성 스크립트" }
+        }
+      }
+    }
+  }
+}

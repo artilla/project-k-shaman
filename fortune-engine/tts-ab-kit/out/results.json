@@ -1,0 +1,102 @@
+[
+  {
+    "seed": "h_love_001",
+    "topic": "love",
+    "version": "A",
+    "voice": "coral",
+    "pred_sec_slow": 50.8,
+    "actual_sec": 44.21,
+    "actual_cost_usd": 0.01105,
+    "segments": {}
+  },
+  {
+    "seed": "h_love_001",
+    "topic": "love",
+    "version": "B",
+    "voice": "coral",
+    "pred_sec_slow": 48.3,
+    "actual_sec": 41.16,
+    "actual_cost_usd": 0.01029,
+    "segments": {}
+  },
+  {
+    "seed": "h_money_001",
+    "topic": "money",
+    "version": "A",
+    "voice": "coral",
+    "pred_sec_slow": 46.8,
+    "actual_sec": 40.92,
+    "actual_cost_usd": 0.01023,
+    "segments": {}
+  },
+  {
+    "seed": "h_money_001",
+    "topic": "money",
+    "version": "B",
+    "voice": "coral",
+    "pred_sec_slow": 45.2,
+    "actual_sec": 39.46,
+    "actual_cost_usd": 0.00986,
+    "segments": {}
+  },
+  {
+    "seed": "h_work_001",
+    "topic": "work",
+    "version": "A",
+    "voice": "coral",
+    "pred_sec_slow": 47.9,
+    "actual_sec": 46.01,
+    "actual_cost_usd": 0.0115,
+    "segments": {}
+  },
+  {
+    "seed": "h_work_001",
+    "topic": "work",
+    "version": "B",
+    "voice": "coral",
+    "pred_sec_slow": 46.3,
+    "actual_sec": 40.06,
+    "actual_cost_usd": 0.01001,
+    "segments": {}
+  },
+  {
+    "seed": "h_rel_001",
+    "topic": "relationship",
+    "version": "A",
+    "voice": "coral",
+    "pred_sec_slow": 47.4,
+    "actual_sec": 41.71,
+    "actual_cost_usd": 0.01043,
+    "segments": {}
+  },
+  {
+    "seed": "h_rel_001",
+    "topic": "relationship",
+    "version": "B",
+    "voice": "coral",
+    "pred_sec_slow": 46.8,
+    "actual_sec": 38.45,
+    "actual_cost_usd": 0.00961,
+    "segments": {}
+  },
+  {
+    "seed": "h_total_001",
+    "topic": "total",
+    "version": "A",
+    "voice": "coral",
+    "pred_sec_slow": 47.4,
+    "actual_sec": 37.75,
+    "actual_cost_usd": 0.00944,
+    "segments": {}
+  },
+  {
+    "seed": "h_total_001",
+    "topic": "total",
+    "version": "B",
+    "voice": "coral",
+    "pred_sec_slow": 45.9,
+    "actual_sec": 38.11,
+    "actual_cost_usd": 0.00953,
+    "segments": {}
+  }
+]

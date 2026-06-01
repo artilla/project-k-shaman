@@ -1,0 +1,475 @@
+{
+  "rate_slow": 4.5,
+  "items": [
+    {
+      "seed": "h_love_001",
+      "topic": "love",
+      "A_llm": [
+        {
+          "segment": "greeting",
+          "type": "presynth",
+          "text": "오늘신당에 오셨군요. 홍연이 오늘의 기운을 무대 위에 올려볼게요."
+        },
+        {
+          "segment": "summary",
+          "type": "personalized",
+          "text": "오늘은 마음이 먼저 움직이는 날이에요. 솔직한 한마디가 관계의 온도를 한 칸 올려줘요."
+        },
+        {
+          "segment": "scores",
+          "type": "personalized",
+          "text": "연애운이 활짝 열렸고 인간관계도 좋아요. 다만 컨디션은 조금 낮으니 무리하진 마세요."
+        },
+        {
+          "segment": "advice",
+          "type": "personalized",
+          "text": "마음에 둔 사람에게 짧은 안부 한마디를 먼저 건네 보세요."
+        },
+        {
+          "segment": "lucky",
+          "type": "semi",
+          "text": "오늘의 행운 색은 코랄 핑크, 행운 아이템은 작은 손거울이에요."
+        },
+        {
+          "segment": "avoid",
+          "type": "personalized",
+          "text": "지난 대화를 너무 곱씹으며 혼자 결론 내리는 일은 잠시 미뤄두세요."
+        },
+        {
+          "segment": "blessing",
+          "type": "presynth",
+          "text": "오늘 하루, 홍연이 손님 곁에서 기운을 더해드릴게요."
+        },
+        {
+          "segment": "ending",
+          "type": "presynth",
+          "text": "내일도 무대는 열려 있어요. 오늘도 좋은 하루 보내요."
+        }
+      ],
+      "B_assembled": [
+        {
+          "segment": "greeting",
+          "type": "presynth",
+          "text": "오늘신당에 오셨군요. 홍연이 오늘의 기운을 무대 위에 올려볼게요."
+        },
+        {
+          "segment": "summary",
+          "type": "personalized",
+          "text": "오늘은 마음이 먼저 움직이는 날이에요. 솔직한 한마디가 관계의 온도를 한 칸 올려줘요."
+        },
+        {
+          "segment": "scores",
+          "type": "personalized",
+          "text": "연애운이 아주 좋고, 컨디션은 조금 낮으니 무리하진 마세요."
+        },
+        {
+          "segment": "advice",
+          "type": "personalized",
+          "text": "마음에 둔 사람에게 짧은 안부 한마디를 먼저 건네 보세요."
+        },
+        {
+          "segment": "lucky",
+          "type": "semi",
+          "text": "오늘의 행운 색은 코랄 핑크, 행운 아이템은 작은 손거울이에요."
+        },
+        {
+          "segment": "avoid",
+          "type": "personalized",
+          "text": "지난 대화를 너무 곱씹으며 혼자 결론 내리는 일은 잠시 미뤄두세요."
+        },
+        {
+          "segment": "blessing",
+          "type": "presynth",
+          "text": "오늘 하루, 홍연이 손님 곁에서 기운을 더해드릴게요."
+        },
+        {
+          "segment": "ending",
+          "type": "presynth",
+          "text": "내일도 무대는 열려 있어요. 오늘도 좋은 하루 보내요."
+        }
+      ],
+      "pred": {
+        "A_full_sec_slow": 50.8,
+        "B_full_sec_slow": 48.3,
+        "A_fresh_sec_slow": 32.2,
+        "B_fresh_sec_slow": 29.8
+      }
+    },
+    {
+      "seed": "h_money_001",
+      "topic": "money",
+      "A_llm": [
+        {
+          "segment": "greeting",
+          "type": "presynth",
+          "text": "오늘신당에 오셨군요. 홍연이 오늘의 기운을 무대 위에 올려볼게요."
+        },
+        {
+          "segment": "summary",
+          "type": "personalized",
+          "text": "작게 모으던 것이 형태를 갖추는 날이에요. 오늘의 알뜰한 선택이 다음 주의 여유가 돼요."
+        },
+        {
+          "segment": "scores",
+          "type": "personalized",
+          "text": "금전운이 든든하게 올라와 있어요. 일운도 안정적이라 차근차근 정리하기 좋아요."
+        },
+        {
+          "segment": "advice",
+          "type": "personalized",
+          "text": "미뤄둔 가계부나 영수증을 5분만 정리해 보세요."
+        },
+        {
+          "segment": "lucky",
+          "type": "semi",
+          "text": "오늘의 행운 색은 금빛, 행운 아이템은 단추예요."
+        },
+        {
+          "segment": "avoid",
+          "type": "personalized",
+          "text": "기분에 휩쓸린 즉흥 결제는 오늘만 잠시 멈춰두세요."
+        },
+        {
+          "segment": "blessing",
+          "type": "presynth",
+          "text": "오늘 하루, 홍연이 손님 곁에서 기운을 더해드릴게요."
+        },
+        {
+          "segment": "ending",
+          "type": "presynth",
+          "text": "내일도 무대는 열려 있어요. 오늘도 좋은 하루 보내요."
+        }
+      ],
+      "B_assembled": [
+        {
+          "segment": "greeting",
+          "type": "presynth",
+          "text": "오늘신당에 오셨군요. 홍연이 오늘의 기운을 무대 위에 올려볼게요."
+        },
+        {
+          "segment": "summary",
+          "type": "personalized",
+          "text": "작게 모으던 것이 형태를 갖추는 날이에요. 오늘의 알뜰한 선택이 다음 주의 여유가 돼요."
+        },
+        {
+          "segment": "scores",
+          "type": "personalized",
+          "text": "금전운이 아주 좋고, 인간관계운은 조금 낮으니 무리하진 마세요."
+        },
+        {
+          "segment": "advice",
+          "type": "personalized",
+          "text": "미뤄둔 가계부나 영수증을 5분만 정리해 보세요."
+        },
+        {
+          "segment": "lucky",
+          "type": "semi",
+          "text": "오늘의 행운 색은 금빛, 행운 아이템은 단추예요."
+        },
+        {
+          "segment": "avoid",
+          "type": "personalized",
+          "text": "기분에 휩쓸린 즉흥 결제는 오늘만 잠시 멈춰두세요."
+        },
+        {
+          "segment": "blessing",
+          "type": "presynth",
+          "text": "오늘 하루, 홍연이 손님 곁에서 기운을 더해드릴게요."
+        },
+        {
+          "segment": "ending",
+          "type": "presynth",
+          "text": "내일도 무대는 열려 있어요. 오늘도 좋은 하루 보내요."
+        }
+      ],
+      "pred": {
+        "A_full_sec_slow": 46.8,
+        "B_full_sec_slow": 45.2,
+        "A_fresh_sec_slow": 28.2,
+        "B_fresh_sec_slow": 26.7
+      }
+    },
+    {
+      "seed": "h_work_001",
+      "topic": "work",
+      "A_llm": [
+        {
+          "segment": "greeting",
+          "type": "presynth",
+          "text": "오늘신당에 오셨군요. 홍연이 오늘의 기운을 무대 위에 올려볼게요."
+        },
+        {
+          "segment": "summary",
+          "type": "personalized",
+          "text": "집중력이 또렷하게 모이는 날이에요. 미뤄둔 일 하나를 끝내면 흐름이 쭉 풀려요."
+        },
+        {
+          "segment": "scores",
+          "type": "personalized",
+          "text": "일과 학업운이 아주 좋아요. 컨디션도 받쳐주니 중요한 일을 먼저 처리하기 좋아요."
+        },
+        {
+          "segment": "advice",
+          "type": "personalized",
+          "text": "가장 부담스러운 일을 오전 첫 30분에 먼저 손대 보세요."
+        },
+        {
+          "segment": "lucky",
+          "type": "semi",
+          "text": "오늘의 행운 색은 먹색, 행운 아이템은 메모지예요."
+        },
+        {
+          "segment": "avoid",
+          "type": "personalized",
+          "text": "여러 일을 동시에 벌여 놓고 끝을 못 맺는 패턴은 오늘만 피하세요."
+        },
+        {
+          "segment": "blessing",
+          "type": "presynth",
+          "text": "오늘 하루, 홍연이 손님 곁에서 기운을 더해드릴게요."
+        },
+        {
+          "segment": "ending",
+          "type": "presynth",
+          "text": "내일도 무대는 열려 있어요. 오늘도 좋은 하루 보내요."
+        }
+      ],
+      "B_assembled": [
+        {
+          "segment": "greeting",
+          "type": "presynth",
+          "text": "오늘신당에 오셨군요. 홍연이 오늘의 기운을 무대 위에 올려볼게요."
+        },
+        {
+          "segment": "summary",
+          "type": "personalized",
+          "text": "집중력이 또렷하게 모이는 날이에요. 미뤄둔 일 하나를 끝내면 흐름이 쭉 풀려요."
+        },
+        {
+          "segment": "scores",
+          "type": "personalized",
+          "text": "일과 학업운이 아주 좋고, 연애운은 조금 낮으니 무리하진 마세요."
+        },
+        {
+          "segment": "advice",
+          "type": "personalized",
+          "text": "가장 부담스러운 일을 오전 첫 30분에 먼저 손대 보세요."
+        },
+        {
+          "segment": "lucky",
+          "type": "semi",
+          "text": "오늘의 행운 색은 먹색, 행운 아이템은 메모지예요."
+        },
+        {
+          "segment": "avoid",
+          "type": "personalized",
+          "text": "여러 일을 동시에 벌여 놓고 끝을 못 맺는 패턴은 오늘만 피하세요."
+        },
+        {
+          "segment": "blessing",
+          "type": "presynth",
+          "text": "오늘 하루, 홍연이 손님 곁에서 기운을 더해드릴게요."
+        },
+        {
+          "segment": "ending",
+          "type": "presynth",
+          "text": "내일도 무대는 열려 있어요. 오늘도 좋은 하루 보내요."
+        }
+      ],
+      "pred": {
+        "A_full_sec_slow": 47.9,
+        "B_full_sec_slow": 46.3,
+        "A_fresh_sec_slow": 29.3,
+        "B_fresh_sec_slow": 27.8
+      }
+    },
+    {
+      "seed": "h_rel_001",
+      "topic": "relationship",
+      "A_llm": [
+        {
+          "segment": "greeting",
+          "type": "presynth",
+          "text": "오늘신당에 오셨군요. 홍연이 오늘의 기운을 무대 위에 올려볼게요."
+        },
+        {
+          "segment": "summary",
+          "type": "personalized",
+          "text": "오래 못 본 사람과 연이 닿기 좋은 날이에요. 당신의 한마디가 누군가에게 큰 위로가 돼요."
+        },
+        {
+          "segment": "scores",
+          "type": "personalized",
+          "text": "인간관계운이 활짝 열렸어요. 연애운도 잔잔히 좋고 컨디션도 무난해요."
+        },
+        {
+          "segment": "advice",
+          "type": "personalized",
+          "text": "문득 떠오른 사람에게 안부 메시지를 가볍게 남겨 보세요."
+        },
+        {
+          "segment": "lucky",
+          "type": "semi",
+          "text": "오늘의 행운 색은 살구색, 행운 아이템은 손수건이에요."
+        },
+        {
+          "segment": "avoid",
+          "type": "personalized",
+          "text": "사소한 오해를 키워서 마음속에 담아두지는 마세요."
+        },
+        {
+          "segment": "blessing",
+          "type": "presynth",
+          "text": "오늘 하루, 홍연이 손님 곁에서 기운을 더해드릴게요."
+        },
+        {
+          "segment": "ending",
+          "type": "presynth",
+          "text": "내일도 무대는 열려 있어요. 오늘도 좋은 하루 보내요."
+        }
+      ],
+      "B_assembled": [
+        {
+          "segment": "greeting",
+          "type": "presynth",
+          "text": "오늘신당에 오셨군요. 홍연이 오늘의 기운을 무대 위에 올려볼게요."
+        },
+        {
+          "segment": "summary",
+          "type": "personalized",
+          "text": "오래 못 본 사람과 연이 닿기 좋은 날이에요. 당신의 한마디가 누군가에게 큰 위로가 돼요."
+        },
+        {
+          "segment": "scores",
+          "type": "personalized",
+          "text": "인간관계운이 아주 좋고, 금전운은 조금 낮으니 무리하진 마세요."
+        },
+        {
+          "segment": "advice",
+          "type": "personalized",
+          "text": "문득 떠오른 사람에게 안부 메시지를 가볍게 남겨 보세요."
+        },
+        {
+          "segment": "lucky",
+          "type": "semi",
+          "text": "오늘의 행운 색은 살구색, 행운 아이템은 손수건이에요."
+        },
+        {
+          "segment": "avoid",
+          "type": "personalized",
+          "text": "사소한 오해를 키워서 마음속에 담아두지는 마세요."
+        },
+        {
+          "segment": "blessing",
+          "type": "presynth",
+          "text": "오늘 하루, 홍연이 손님 곁에서 기운을 더해드릴게요."
+        },
+        {
+          "segment": "ending",
+          "type": "presynth",
+          "text": "내일도 무대는 열려 있어요. 오늘도 좋은 하루 보내요."
+        }
+      ],
+      "pred": {
+        "A_full_sec_slow": 47.4,
+        "B_full_sec_slow": 46.8,
+        "A_fresh_sec_slow": 28.9,
+        "B_fresh_sec_slow": 28.2
+      }
+    },
+    {
+      "seed": "h_total_001",
+      "topic": "total",
+      "A_llm": [
+        {
+          "segment": "greeting",
+          "type": "presynth",
+          "text": "오늘신당에 오셨군요. 홍연이 오늘의 기운을 무대 위에 올려볼게요."
+        },
+        {
+          "segment": "summary",
+          "type": "personalized",
+          "text": "전체적으로 균형이 잘 잡힌 안정적인 날이에요. 큰 욕심 없이 흐름을 타면 하루가 매끄러워요."
+        },
+        {
+          "segment": "scores",
+          "type": "personalized",
+          "text": "모든 운이 고르게 좋은 편이에요. 특별히 튀는 곳 없이 무난하고 든든한 하루예요."
+        },
+        {
+          "segment": "advice",
+          "type": "personalized",
+          "text": "오늘 할 일 중 가장 쉬운 것부터 하나 끝내고 시작해 보세요."
+        },
+        {
+          "segment": "lucky",
+          "type": "semi",
+          "text": "오늘의 행운 색은 금빛, 행운 아이템은 메모지예요."
+        },
+        {
+          "segment": "avoid",
+          "type": "personalized",
+          "text": "괜히 큰 결정을 서둘러 내리려 하지는 마세요."
+        },
+        {
+          "segment": "blessing",
+          "type": "presynth",
+          "text": "오늘 하루, 홍연이 손님 곁에서 기운을 더해드릴게요."
+        },
+        {
+          "segment": "ending",
+          "type": "presynth",
+          "text": "내일도 무대는 열려 있어요. 오늘도 좋은 하루 보내요."
+        }
+      ],
+      "B_assembled": [
+        {
+          "segment": "greeting",
+          "type": "presynth",
+          "text": "오늘신당에 오셨군요. 홍연이 오늘의 기운을 무대 위에 올려볼게요."
+        },
+        {
+          "segment": "summary",
+          "type": "personalized",
+          "text": "전체적으로 균형이 잘 잡힌 안정적인 날이에요. 큰 욕심 없이 흐름을 타면 하루가 매끄러워요."
+        },
+        {
+          "segment": "scores",
+          "type": "personalized",
+          "text": "인간관계운이 좋은 편이고, 전반적으로 고르게 안정적이에요."
+        },
+        {
+          "segment": "advice",
+          "type": "personalized",
+          "text": "오늘 할 일 중 가장 쉬운 것부터 하나 끝내고 시작해 보세요."
+        },
+        {
+          "segment": "lucky",
+          "type": "semi",
+          "text": "오늘의 행운 색은 금빛, 행운 아이템은 메모지예요."
+        },
+        {
+          "segment": "avoid",
+          "type": "personalized",
+          "text": "괜히 큰 결정을 서둘러 내리려 하지는 마세요."
+        },
+        {
+          "segment": "blessing",
+          "type": "presynth",
+          "text": "오늘 하루, 홍연이 손님 곁에서 기운을 더해드릴게요."
+        },
+        {
+          "segment": "ending",
+          "type": "presynth",
+          "text": "내일도 무대는 열려 있어요. 오늘도 좋은 하루 보내요."
+        }
+      ],
+      "pred": {
+        "A_full_sec_slow": 47.4,
+        "B_full_sec_slow": 45.9,
+        "A_fresh_sec_slow": 28.9,
+        "B_fresh_sec_slow": 27.3
+      }
+    }
+  ]
+}
