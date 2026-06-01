@@ -1,7 +1,7 @@
 ---
 id: T003
 title: narration_composer ↔ 시트/스키마 정합 회귀 테스트
-status: open
+status: done
 priority: P2
 safe: true
 persona: implementer
