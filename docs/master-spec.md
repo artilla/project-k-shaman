@@ -44,6 +44,8 @@
 
 **화면 IA**: 모바일 PWA 화면 인벤토리·전이·오디오 재생 UX·분석 이벤트 매핑은 `docs/ux/screen-ia.md`를 참조하세요 (T004 산출물).
 
+**TTS 프로바이더**: 베타 TTS 프로바이더·음색 선정 결정은 `docs/decisions/0001-tts-voice-and-provider.md` (ADR-0001) 참조 (T005 산출물). 결정: OpenAI `gpt-4o-mini-tts` + `coral` 음색. 실제 합성·커스텀 보이스 계약은 §3 hold.
+
 ## 3. 권한 경계 (가역성 기준)
 
 > 자동 허용(loop) vs 인간 승인(hold). 판단 기준: "잘못됐을 때 즉시 되돌릴 수 있는가?"

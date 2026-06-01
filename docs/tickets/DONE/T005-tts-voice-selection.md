@@ -1,7 +1,7 @@
 ---
 id: T005
 title: TTS 보이스·프로바이더 선정 결정 (ADR)
-status: open
+status: done
 priority: P2
 safe: true
 persona: planner
