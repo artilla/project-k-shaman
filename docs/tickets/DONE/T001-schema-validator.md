@@ -1,7 +1,7 @@
 ---
 id: T001
 title: 운세 스키마 validator 연결 (fortune-schema.v1.1)
-status: open
+status: done
 priority: P1
 safe: true
 persona: implementer
