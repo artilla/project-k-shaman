@@ -1,7 +1,7 @@
 ---
 id: T004
 title: Sprint 1 UX 골격 — 화면 IA·와이어프레임 명세
-status: open
+status: done
 priority: P1
 safe: true
 persona: planner

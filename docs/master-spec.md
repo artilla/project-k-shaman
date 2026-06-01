@@ -42,6 +42,8 @@
 흐름: **PWA**(Next.js/Vite React + TS) → **Fortune API** → Seed Builder → Text/TTS 캐시 → (miss 시) LLM 생성 + Safety Filter → TTS Provider Adapter → Object Storage/CDN → Avatar Playback → Result Card.
 정본 아키텍처·데이터 모델·운세 스키마(`fortune-schema.v1.1`)·API 계약은 `Plan.md` §6–§11, `today-shindang-service-plan-v3.md` §10·§18을 참조하세요.
 
+**화면 IA**: 모바일 PWA 화면 인벤토리·전이·오디오 재생 UX·분석 이벤트 매핑은 `docs/ux/screen-ia.md`를 참조하세요 (T004 산출물).
+
 ## 3. 권한 경계 (가역성 기준)
 
 > 자동 허용(loop) vs 인간 승인(hold). 판단 기준: "잘못됐을 때 즉시 되돌릴 수 있는가?"
