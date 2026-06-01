@@ -1,7 +1,7 @@
 ---
 id: T008
 title: 엔진 통합 스모크 테스트 (+ Step 2 로깅·자율성 진단)
-status: open
+status: done
 priority: P2
 safe: true
 persona: implementer
