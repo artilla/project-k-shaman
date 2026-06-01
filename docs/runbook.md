@@ -198,6 +198,32 @@ worker가 `CLAUDE_TIMEOUT_SECONDS` 초과로 rc=5를 반환한 경우, **§3.1 "
 
 참조: [ADR-0017](decisions/0017-v0.12-timeout-wip-recovery.md)
 
+### 3.8 Step 2 헤드리스 stall 후 WIP 회수
+
+`run_loop.sh TXXX`가 메인 워크트리에서 헤드리스 세션을 디스패치한 뒤, 산출물은 작성됐지만 세션이 종료·검증·commit 단계로 돌아오지 않는 경우가 있다. 이 경우도 **실패 3회 자동 폐기 규칙을 적용하지 않는다**. 메인 워크트리는 인간 소유이고, WIP가 회수 가능한 운영 산출물일 수 있기 때문이다.
+
+증상:
+
+```text
+🤖 헤드리스 세션 디스패치...
+# 장시간 추가 출력 없음
+git status --short
+# M docs/master-spec.md
+# M docs/tickets/TXXX-*.md
+# ?? docs/decisions/...
+```
+
+회수 절차:
+
+1. `ps` / `pgrep -fl "run_loop|run_headless|claude -p"`로 실제 프로세스가 아직 살아 있는지 확인한다.
+2. `git status --short`, `git diff`, 산출물 본문을 먼저 읽어 **티켓 scope 안의 WIP인지** 확인한다.
+3. 산출물이 scope 안이고 보존 가치가 있으면, 멈춘 `run_loop`/`run_headless`/`claude -p` 프로세스만 종료한다. `git reset --hard`는 금지.
+4. `state/lock`, `state/current_ticket`, `state/reservations/<TXXX>.d/`가 남아 있으면 pid가 죽었음을 확인한 뒤 제거한다.
+5. 사람이 빠진 의무를 마무리한다: 수용 기준 보강, `run_checks`, 티켓 `status: done`, `git mv docs/tickets/TXXX-*.md docs/tickets/DONE/`, 단일 완료 commit.
+6. WIP가 scope 밖이거나 위험하면 회수하지 않고 `docs/reviews/<TXXX>-failed.diff`로 보존한 뒤 티켓을 `blocked`로 전환한다.
+
+선례: T005 — planner가 ADR WIP를 작성했지만 종료/commit 단계에서 stall. operator가 공식 출처 보강, `run_checks` full green 확인, DONE 이동, 단일 완료 commit으로 회수.
+
 ## 4. 보안 경계 (3요소 룰)
 
 다음 셋 중 **2개 이상이 동시에** 같은 컨텍스트에 있으면 자율 실행 금지:
