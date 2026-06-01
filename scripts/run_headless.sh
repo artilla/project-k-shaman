@@ -83,7 +83,9 @@ run_claude_bash_watchdog() {
   group_pid="${CLAUDE_GROUP_PID:-}"
 
   (
-    sleep "$CLAUDE_TIMEOUT_SECONDS"
+    sleep "$CLAUDE_TIMEOUT_SECONDS" &
+    _watcher_sleep=$!
+    wait "$_watcher_sleep" 2>/dev/null || true
     if [ ! -f "$DONE_MARKER" ] && process_scope_alive "$child" "$group_pid"; then
       : > "$TIMEOUT_MARKER"
       terminate_claude_process_tree "$child" "$group_pid" TERM
@@ -110,6 +112,7 @@ run_claude_bash_watchdog() {
     wait "$watcher" 2>/dev/null
     set -e
   else
+    disown "$watcher" 2>/dev/null || true
     if command -v pkill >/dev/null 2>&1; then
       pkill -TERM -P "$watcher" 2>/dev/null || true
     fi

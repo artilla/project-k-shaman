@@ -1,7 +1,7 @@
 ---
 id: T009
 title: watchdog sleep 종료 job-control 노이즈 제거 (disown)
-status: open
+status: done
 priority: P2
 safe: true
 persona: implementer

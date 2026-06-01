@@ -172,6 +172,20 @@ _run_headless() {
   [ "$((end - start))" -lt 3 ]
 }
 
+@test "bash watchdog fallback does not emit Terminated noise when command exits early" {
+  # Force bash watchdog path (no timeout/gtimeout in TEST_BIN).
+  # When the watcher sleep is killed without disown, bash may print
+  # "Terminated: 15  sleep N" to stderr on exit.  Verify it is silent.
+  run env \
+    PATH="$TEST_BIN" \
+    CLAUDE_CMD="$FAKE_CLAUDE" \
+    CLAUDE_TIMEOUT_SECONDS=5 \
+    /bin/bash "$SCRIPT" "x" "$TEST_HOME/work"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Terminated"* ]]
+}
+
 @test "bash watchdog fallback times out long-running command" {
   start="$(date +%s)"
   run env \
