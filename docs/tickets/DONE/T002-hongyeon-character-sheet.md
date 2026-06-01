@@ -1,7 +1,7 @@
 ---
 id: T002
 title: 홍연 캐릭터 시트 작성 (제품 톤 단일 기준점)
-status: open
+status: done
 priority: P1
 safe: true
 persona: planner
