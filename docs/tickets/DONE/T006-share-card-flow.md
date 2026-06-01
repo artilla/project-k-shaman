@@ -1,7 +1,7 @@
 ---
 id: T006
 title: 정적 부적 공유 카드 생성·저장
-status: open
+status: done
 priority: P1
 safe: true
 persona: implementer
