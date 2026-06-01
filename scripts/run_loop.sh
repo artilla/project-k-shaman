@@ -54,7 +54,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-mkdir -p state state/reservations
+mkdir -p state state/reservations .ralph/logs
 
 # ────────── git 가드 (dry-run에서는 통과) ──────────
 GIT_REPO=0
@@ -438,7 +438,15 @@ EOF
 
   # ────────── 7. Act (delegate to headless) ──────────
   echo "🤖 헤드리스 세션 디스패치..."
-  if ! ./scripts/run_headless.sh "$prompt" "$ROOT"; then
+  local headless_log=".ralph/logs/${id}.log"
+  {
+    echo "ticket=$id"
+    echo "started_at=$(date -Iseconds)"
+    echo "root=$ROOT"
+    echo "persona=$persona"
+  } > "$headless_log"
+  echo "🧾 headless log: $headless_log"
+  if ! ./scripts/run_headless.sh "$prompt" "$ROOT" 2>&1 | tee -a "$headless_log"; then
     echo "❌ Claude 헤드리스 세션 실패"
     add_failure "$id" "claude-exec-failed" "${i:-0}" "$ticket"
     return 5
