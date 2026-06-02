@@ -1,7 +1,7 @@
 ---
 id: T011
 title: Seed builder (결정적 seed_hash·seed_signals; 실제 HMAC은 §3 hold)
-status: open
+status: done
 priority: P1
 safe: true
 persona: implementer
