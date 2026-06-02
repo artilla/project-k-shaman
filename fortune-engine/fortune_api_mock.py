@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""T010/T012: /api/fortune/today mock — fortune-schema.v1.1 준수, build_seed 연결.
+"""T010/T012/T014: /api/fortune/today mock — fortune-schema.v1.1 준수, build_seed·tts_adapter 연결.
 
 T012: build_seed(T011)의 seed_hash·seed_signals를 기반으로 응답을 도출한다.
 캐시 키 = Plan.md §10 규칙 (birth_profile_hash:date:topic:character_id:tone:locale).
+T014: tts_adapter.synthesize(script)로 audioUrl·durationSec·tts metadata를 도출한다.
 
 §3 hold: 실제 HMAC seed 키, 실제 LLM 생성, 실제 TTS 합성은 구현하지 않는다.
 birth 필드는 수신 가능하지만 키·응답·파일에 평문으로 남기지 않는다.
@@ -25,6 +26,13 @@ _sb_spec = importlib.util.spec_from_file_location("seed_builder", _SEED_BUILDER_
 _sb_mod = importlib.util.module_from_spec(_sb_spec)
 _sb_spec.loader.exec_module(_sb_mod)
 build_seed = _sb_mod.build_seed
+
+# T013 tts_adapter (synthesize 계약) — mock backend 기본, 실제 합성 = §3 hold
+_TTS_ADAPTER_PATH = _DIR / "tts_adapter.py"
+_tts_spec = importlib.util.spec_from_file_location("tts_adapter", _TTS_ADAPTER_PATH)
+_tts_mod = importlib.util.module_from_spec(_tts_spec)
+_tts_spec.loader.exec_module(_tts_mod)
+_tts_synthesize = _tts_mod.synthesize
 
 # 결정적 풀 — 텍스트 필드 소스 (scores_line, summary, advice, lucky, avoid, blessing)
 _POOL = [
@@ -136,10 +144,22 @@ def get_today_fortune(request: dict) -> dict:
     fortune_id = f"mock_{seed_hash[:16]}"
     script = _compose_narration({**fields, "scores": scores})
 
+    # T014: tts_adapter.synthesize()로 audioUrl·durationSec·tts metadata 도출
+    # mock backend 한정 (실제 TTS 합성·비용 = §3 hold, 네트워크 0)
+    tts_result = _tts_synthesize(script)
+
     return {
         "fortuneId": fortune_id,
-        "audioUrl": f"mock://audio/{fortune_id}.mp3",
-        "durationSec": 60,
+        "audioUrl": tts_result["audioUrl"],
+        "durationSec": tts_result["durationSec"],
         "script": script,
         "fortune": fortune,
+        "tts": {
+            "cacheKey": tts_result["cacheKey"],
+            "provider": tts_result["metadata"]["provider"],
+            "voice": tts_result["metadata"]["voice"],
+            "model": tts_result["metadata"]["model"],
+            "speed": tts_result["metadata"]["speed"],
+            "emotion": tts_result["metadata"]["emotion"],
+        },
     }

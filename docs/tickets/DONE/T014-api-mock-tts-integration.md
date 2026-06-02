@@ -1,7 +1,7 @@
 ---
 id: T014
 title: fortune_api_mock ↔ tts_adapter 연결 (audioUrl·duration·tts metadata)
-status: open
+status: done
 priority: P1
 safe: true
 persona: implementer

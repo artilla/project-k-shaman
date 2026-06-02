@@ -241,6 +241,62 @@ class TestBirthDependency:
         assert r_no_birth["fortune"]["meta"]["seed_hash"] != r_birth["fortune"]["meta"]["seed_hash"]
 
 
+# ─── T014 ────────────────────────────────────────────────────────────────────
+# 이하 클래스는 T014(tts_adapter 연결) 수용 기준 검증용이다.
+
+class TestTtsMetadata:
+    """T014: 엔벨로프에 tts metadata(cacheKey·provider·voice)가 포함된다."""
+
+    def test_tts_key_in_envelope(self):
+        result = get_today_fortune(_BASE_REQ)
+        assert "tts" in result, "응답 엔벨로프에 'tts' 키가 없음"
+
+    def test_tts_has_cache_key(self):
+        result = get_today_fortune(_BASE_REQ)
+        assert "cacheKey" in result["tts"], "tts.cacheKey가 없음"
+        assert result["tts"]["cacheKey"].startswith("tts:v1:")
+
+    def test_tts_has_provider(self):
+        result = get_today_fortune(_BASE_REQ)
+        assert "provider" in result["tts"]
+        assert result["tts"]["provider"] == "openai"
+
+    def test_tts_has_voice(self):
+        result = get_today_fortune(_BASE_REQ)
+        assert "voice" in result["tts"]
+        assert result["tts"]["voice"] == "coral"
+
+    def test_audio_url_from_tts_adapter(self):
+        """audioUrl은 tts_adapter.synthesize()에서 도출된다 (기존 placeholder 아님)."""
+        result = get_today_fortune(_BASE_REQ)
+        assert not result["audioUrl"].startswith("mock://audio/"), (
+            "audioUrl이 기존 하드코딩 placeholder 형식(mock://audio/)임"
+        )
+        assert result["audioUrl"].startswith("mock://")
+
+    def test_duration_sec_from_adapter_band(self):
+        """durationSec은 tts_adapter 밴드(45–60s) 내 결정적 값."""
+        result = get_today_fortune(_BASE_REQ)
+        dur = result["durationSec"]
+        assert 45 <= dur <= 60, f"durationSec={dur} 가 45–60 범위 밖"
+
+    def test_tts_deterministic(self):
+        """동일 요청 → tts metadata 동일."""
+        r1 = get_today_fortune(_BASE_REQ)
+        r2 = get_today_fortune(_BASE_REQ)
+        assert r1["tts"] == r2["tts"]
+
+    def test_tts_cache_key_contains_script_hash(self):
+        """tts.cacheKey는 64자 script hash를 포함한다."""
+        result = get_today_fortune(_BASE_REQ)
+        parts = result["tts"]["cacheKey"].split(":")
+        # format: tts:v1:{provider}:{voice}:{script_hash}:{speed}:{emotion}
+        assert len(parts) >= 7
+        script_hash = parts[4]
+        assert len(script_hash) == 64
+        assert all(c in "0123456789abcdef" for c in script_hash)
+
+
 class TestSeedBuilderContract:
     """AC1: get_today_fortune이 build_seed의 seed_hash를 그대로 사용한다."""
 
