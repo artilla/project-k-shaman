@@ -1,7 +1,7 @@
 ---
 id: T013
 title: TTS adapter mock (결정적 캐시 키·mock audioUrl; 실제 합성은 §3 hold)
-status: open
+status: done
 priority: P1
 safe: true
 persona: implementer
