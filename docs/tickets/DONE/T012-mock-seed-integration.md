@@ -1,7 +1,7 @@
 ---
 id: T012
 title: fortune_api_mock ↔ seed_builder 연결 (단일 계약, birth-의존 결정성)
-status: open
+status: done
 priority: P1
 safe: true
 persona: implementer

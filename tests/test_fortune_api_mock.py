@@ -1,4 +1,4 @@
-"""T010: Fortune API mock — 계약 경계 및 결정적 응답 테스트."""
+"""T010/T012: Fortune API mock — 계약 경계, 결정적 응답, birth-의존 테스트."""
 import importlib.util
 import json
 from pathlib import Path
@@ -9,6 +9,12 @@ import pytest
 ROOT = Path(__file__).parent.parent
 MOCK_PATH = ROOT / "fortune-engine" / "fortune_api_mock.py"
 SCHEMA_PATH = ROOT / "fortune-engine" / "fortune-schema.v1.1.json"
+SEED_BUILDER_PATH = ROOT / "fortune-engine" / "seed_builder.py"
+
+_sb_spec = importlib.util.spec_from_file_location("seed_builder", SEED_BUILDER_PATH)
+_sb_mod = importlib.util.module_from_spec(_sb_spec)
+_sb_spec.loader.exec_module(_sb_mod)
+build_seed = _sb_mod.build_seed
 
 _spec = importlib.util.spec_from_file_location("fortune_api_mock", MOCK_PATH)
 _mod = importlib.util.module_from_spec(_spec)
@@ -149,7 +155,7 @@ class TestRequestFieldHandling:
 
 
 class TestPrivacyGuard:
-    """AC4: birth 필드는 응답·로그·파일에 평문으로 남지 않는다 (§4 보안 3요소 준수)."""
+    """AC5: birth 필드는 응답·로그·파일에 평문으로 남지 않는다 (§4 보안 3요소 준수)."""
 
     def _collect_keys(self, obj):
         keys = set()
@@ -173,3 +179,85 @@ class TestPrivacyGuard:
         result_str = json.dumps(result, ensure_ascii=False)
         for field in ("birth_year", "birth_month", "birth_day", "birth_hour"):
             assert field not in result_str, f"birth 필드명 '{field}'가 응답 JSON에 존재함"
+
+
+# ─── T012 ────────────────────────────────────────────────────────────────────
+# 이하 클래스는 T012(build_seed 연결) 수용 기준 검증용이다.
+
+_MORNING_BIRTH_REQ = {
+    **_BASE_REQ,
+    "birth_year": 1990,
+    "birth_month": 3,
+    "birth_day": 15,
+    "birth_hour": 7,   # morning bucket (5–11)
+}
+_MORNING_BIRTH_REQ2 = {
+    **_BASE_REQ,
+    "birth_year": 1990,
+    "birth_month": 3,
+    "birth_day": 15,
+    "birth_hour": 10,  # same morning bucket
+}
+_EVENING_BIRTH_REQ = {
+    **_BASE_REQ,
+    "birth_year": 1990,
+    "birth_month": 3,
+    "birth_day": 15,
+    "birth_hour": 19,  # evening bucket (18–21)
+}
+
+
+class TestBirthDependency:
+    """AC4: birth-의존 결정성 — 버킷이 다른 birth → 다른 응답."""
+
+    def test_different_birth_bucket_different_fortune_id(self):
+        """morning vs evening 버킷 → fortuneId 상이."""
+        r_morning = get_today_fortune(_MORNING_BIRTH_REQ)
+        r_evening = get_today_fortune(_EVENING_BIRTH_REQ)
+        assert r_morning["fortuneId"] != r_evening["fortuneId"]
+
+    def test_different_birth_bucket_different_seed_hash(self):
+        """morning vs evening 버킷 → fortune.meta.seed_hash 상이."""
+        r_morning = get_today_fortune(_MORNING_BIRTH_REQ)
+        r_evening = get_today_fortune(_EVENING_BIRTH_REQ)
+        assert r_morning["fortune"]["meta"]["seed_hash"] != r_evening["fortune"]["meta"]["seed_hash"]
+
+    def test_same_birth_bucket_same_response(self):
+        """birth_hour=7과 birth_hour=10은 동일 morning 버킷 → 동일 응답."""
+        r1 = get_today_fortune(_MORNING_BIRTH_REQ)
+        r2 = get_today_fortune(_MORNING_BIRTH_REQ2)
+        assert r1 == r2
+
+    def test_birth_request_is_deterministic(self):
+        """동일 birth 요청 반복 → 동일 응답."""
+        r1 = get_today_fortune(_MORNING_BIRTH_REQ)
+        r2 = get_today_fortune(_MORNING_BIRTH_REQ)
+        assert r1 == r2
+
+    def test_birth_changes_seed_hash_vs_no_birth(self):
+        """birth 포함 요청 vs 제외 요청 → seed_hash 상이 (birth가 키에 반영됨)."""
+        r_no_birth = get_today_fortune(_BASE_REQ)
+        r_birth = get_today_fortune(_MORNING_BIRTH_REQ)
+        assert r_no_birth["fortune"]["meta"]["seed_hash"] != r_birth["fortune"]["meta"]["seed_hash"]
+
+
+class TestSeedBuilderContract:
+    """AC1: get_today_fortune이 build_seed의 seed_hash를 그대로 사용한다."""
+
+    def test_fortune_seed_hash_matches_build_seed(self):
+        """응답의 fortune.meta.seed_hash == build_seed(req)['seed_hash']."""
+        seed_result = build_seed(_MORNING_BIRTH_REQ)
+        result = get_today_fortune(_MORNING_BIRTH_REQ)
+        assert result["fortune"]["meta"]["seed_hash"] == seed_result["seed_hash"]
+
+    def test_fortune_id_derived_from_seed_hash(self):
+        """fortuneId에 seed_hash 앞 16자리가 포함된다."""
+        seed_result = build_seed(_MORNING_BIRTH_REQ)
+        result = get_today_fortune(_MORNING_BIRTH_REQ)
+        assert seed_result["seed_hash"][:16] in result["fortuneId"]
+
+    def test_no_birth_request_seed_hash_matches_build_seed(self):
+        """birth 없는 요청도 build_seed 계약을 따른다."""
+        seed_result = build_seed(_BASE_REQ)
+        result = get_today_fortune(_BASE_REQ)
+        assert result["fortune"]["meta"]["seed_hash"] == seed_result["seed_hash"]
