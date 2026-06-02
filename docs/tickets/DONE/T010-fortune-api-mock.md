@@ -1,7 +1,7 @@
 ---
 id: T010
 title: Fortune API mock (계약 경계 + 결정적 스키마 유효 응답)
-status: open
+status: done
 priority: P1
 safe: true
 persona: implementer
