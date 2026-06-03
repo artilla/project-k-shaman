@@ -1,7 +1,7 @@
 ---
 id: T015
 title: Text/TTS 캐시 레이어 mock (get-or-compute dedup; 실 Redis/S3/CDN은 §3 hold)
-status: open
+status: done
 priority: P1
 safe: true
 persona: implementer
