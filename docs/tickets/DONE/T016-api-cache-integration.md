@@ -1,7 +1,7 @@
 ---
 id: T016
 title: fortune_api_mock에 Text/TTS cache_layer 배선 (end-to-end dedup)
-status: open
+status: done
 priority: P1
 safe: true
 persona: implementer

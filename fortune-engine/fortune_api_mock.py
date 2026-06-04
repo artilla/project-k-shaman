@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""T010/T012/T014: /api/fortune/today mock — fortune-schema.v1.1 준수, build_seed·tts_adapter 연결.
+"""T010/T012/T014/T016: /api/fortune/today mock — fortune-schema.v1.1 준수, build_seed·tts_adapter 연결, 2단 캐시.
 
 T012: build_seed(T011)의 seed_hash·seed_signals를 기반으로 응답을 도출한다.
-캐시 키 = Plan.md §10 규칙 (birth_profile_hash:date:topic:character_id:tone:locale).
 T014: tts_adapter.synthesize(script)로 audioUrl·durationSec·tts metadata를 도출한다.
+T016: cache_layer.get_or_compute로 fortune/text + TTS 단계를 각각 캐싱한다 (2단 dedup).
 
 §3 hold: 실제 HMAC seed 키, 실제 LLM 생성, 실제 TTS 합성은 구현하지 않는다.
 birth 필드는 수신 가능하지만 키·응답·파일에 평문으로 남기지 않는다.
 """
+import hashlib
 import importlib.util
+import json
 from pathlib import Path
 
 _DIR = Path(__file__).parent
@@ -33,6 +35,20 @@ _tts_spec = importlib.util.spec_from_file_location("tts_adapter", _TTS_ADAPTER_P
 _tts_mod = importlib.util.module_from_spec(_tts_spec)
 _tts_spec.loader.exec_module(_tts_mod)
 _tts_synthesize = _tts_mod.synthesize
+
+# T015 cache_layer (get_or_compute, InMemoryCacheStore, fortune_cache_key)
+# §3 hold: inject real Redis/S3 store for production via store parameter.
+_CACHE_LAYER_PATH = _DIR / "cache_layer.py"
+_cl_spec = importlib.util.spec_from_file_location("cache_layer", _CACHE_LAYER_PATH)
+_cl_mod = importlib.util.module_from_spec(_cl_spec)
+_cl_spec.loader.exec_module(_cl_mod)
+get_or_compute = _cl_mod.get_or_compute
+InMemoryCacheStore = _cl_mod.InMemoryCacheStore
+fortune_cache_key = _cl_mod.fortune_cache_key
+
+# Module-level default store (in-memory, no network).
+# §3 hold: replace with Redis/Memcached injection for production.
+_default_store = InMemoryCacheStore()
 
 # 결정적 풀 — 텍스트 필드 소스 (scores_line, summary, advice, lucky, avoid, blessing)
 _POOL = [
@@ -99,22 +115,32 @@ def _apply_bias_scores(score_bias: dict, seed_hash: str) -> dict:
     return scores
 
 
-def get_today_fortune(request: dict) -> dict:
-    """결정적 fortune 응답을 반환한다 (birth-의존 seed_hash 포함).
+def _compute_tts_cache_key(
+    script,
+    provider: str = "openai",
+    voice: str = "coral",
+    speed: float = 1.0,
+    emotion: str = "bright",
+) -> str:
+    """Compute TTS cache key matching tts_adapter.synthesize formula (no network call).
 
-    build_seed(T011)의 seed_hash·seed_signals를 기반으로 응답을 도출한다.
-    birth 필드는 seed_builder에서 버킷 해시로 변환되며, 응답에 평문으로 남기지 않는다.
+    Returns the same key as tts_adapter.synthesize(script)["cacheKey"].
     """
-    # T011 계약: birth → 버킷 해시 변환, seed_hash·seed_signals 생성
-    seed_result = build_seed(request)
+    serialized = json.dumps(script, ensure_ascii=False, sort_keys=True)
+    script_hash = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    return f"tts:v1:{provider}:{voice}:{script_hash}:{speed}:{emotion}"
+
+
+def _build_fortune_data(request: dict, seed_result: dict) -> dict:
+    """Build fortune dict + script from seed_result (no TTS). Compute_fn for fortune cache.
+
+    Returns {"fortune": dict, "fortune_id": str, "script": list}
+    """
     seed_hash = seed_result["seed_hash"]
     seed_signals = seed_result["seed_signals"]
 
-    # 풀 선택: seed_hash 앞 8자로 결정적 인덱스
     pool_idx = int(seed_hash[:8], 16) % len(_POOL)
     fields = _POOL[pool_idx]
-
-    # scores: score_bias → 0-100 정수, birth-의존·결정적·스키마 유효
     scores = _apply_bias_scores(seed_signals["score_bias"], seed_hash)
 
     date = request.get("date", "2026-01-01")
@@ -144,16 +170,56 @@ def get_today_fortune(request: dict) -> dict:
     fortune_id = f"mock_{seed_hash[:16]}"
     script = _compose_narration({**fields, "scores": scores})
 
-    # T014: tts_adapter.synthesize()로 audioUrl·durationSec·tts metadata 도출
-    # mock backend 한정 (실제 TTS 합성·비용 = §3 hold, 네트워크 0)
-    tts_result = _tts_synthesize(script)
+    return {"fortune": fortune, "fortune_id": fortune_id, "script": script}
+
+
+def get_today_fortune(
+    request: dict,
+    *,
+    store=None,
+    fortune_build_fn=None,
+    tts_synthesize_fn=None,
+) -> dict:
+    """결정적 fortune 응답을 반환한다 (2단 캐시 포함).
+
+    build_seed(T011)의 seed_hash·seed_signals를 기반으로 응답을 도출한다.
+    birth 필드는 seed_builder에서 버킷 해시로 변환되며, 응답에 평문으로 남기지 않는다.
+
+    Args:
+        request: fortune 요청 딕셔너리.
+        store: CacheStore (get/set 인터페이스). None이면 모듈-레벨 InMemoryCacheStore 사용.
+               §3 hold: inject real Redis/Memcached store for production.
+        fortune_build_fn: (request, seed_result) → fortune_data. None이면 _build_fortune_data.
+        tts_synthesize_fn: (script) → tts_result. None이면 _tts_synthesize.
+                           §3 hold: inject real OpenAI TTS backend here for production synthesis.
+    """
+    if store is None:
+        store = _default_store
+    if fortune_build_fn is None:
+        fortune_build_fn = _build_fortune_data
+    if tts_synthesize_fn is None:
+        tts_synthesize_fn = _tts_synthesize
+
+    # T011 계약: birth → 버킷 해시 변환, seed_hash·seed_signals 생성
+    seed_result = build_seed(request)
+    seed_hash = seed_result["seed_hash"]
+
+    # Stage 1: fortune/text cache (fortune:v1:{seed_hash})
+    f_key = fortune_cache_key(seed_hash)
+    fortune_data = get_or_compute(store, f_key, lambda: fortune_build_fn(request, seed_result))
+
+    # Stage 2: TTS cache (tts:v1:{provider}:{voice}:{script_hash}:{speed}:{emotion})
+    # Key verbatim matches tts_adapter.synthesize(script)["cacheKey"].
+    script = fortune_data["script"]
+    tts_key = _compute_tts_cache_key(script)
+    tts_result = get_or_compute(store, tts_key, lambda: tts_synthesize_fn(script))
 
     return {
-        "fortuneId": fortune_id,
+        "fortuneId": fortune_data["fortune_id"],
         "audioUrl": tts_result["audioUrl"],
         "durationSec": tts_result["durationSec"],
         "script": script,
-        "fortune": fortune,
+        "fortune": fortune_data["fortune"],
         "tts": {
             "cacheKey": tts_result["cacheKey"],
             "provider": tts_result["metadata"]["provider"],
