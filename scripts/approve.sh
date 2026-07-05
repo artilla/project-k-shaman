@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+# approve.sh — create a run_loop-compatible approval marker or reject a ticket.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+usage() {
+  cat <<'EOF'
+usage:
+  scripts/approve.sh <TXXX>
+  scripts/approve.sh --reject "reason" <TXXX>
+EOF
+}
+
+REJECT_REASON=""
+ID=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --reject)
+      [ "$#" -ge 2 ] || { usage >&2; exit 2; }
+      REJECT_REASON="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    T*)
+      ID="$1"
+      shift
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+[ -n "$ID" ] || { usage >&2; exit 2; }
+case "$ID" in
+  T[0-9]*) ;;
+  *) echo "invalid ticket id: $ID" >&2; exit 2 ;;
+esac
+
+shopt -s nullglob
+matches=(docs/tickets/"$ID"-*.md)
+if [ "${#matches[@]}" -eq 0 ]; then
+  echo "ticket not found: $ID" >&2
+  exit 1
+fi
+if [ "${#matches[@]}" -gt 1 ]; then
+  echo "multiple tickets match $ID" >&2
+  printf '  %s\n' "${matches[@]}" >&2
+  exit 1
+fi
+TICKET="${matches[0]}"
+
+set_status() {
+  local file="$1" new_status="$2" tmp
+  tmp=$(mktemp "${TMPDIR:-/tmp}/approve-status.XXXXXX")
+  awk -v new_status="$new_status" '
+    /^---$/ { fm = !fm; print; next }
+    fm && $1 == "status:" { print "status: " new_status; next }
+    { print }
+  ' "$file" > "$tmp"
+  mv "$tmp" "$file"
+}
+
+if [ -n "$REJECT_REASON" ]; then
+  set_status "$TICKET" "skipped"
+  {
+    printf '\n## Rejection\n\n'
+    printf -- '- rejected_at: "%s"\n' "$(date -Iseconds)"
+    printf -- '- reason: "%s"\n' "$REJECT_REASON"
+  } >> "$TICKET"
+  echo "rejected $ID: $REJECT_REASON"
+  exit 0
+fi
+
+mkdir -p docs/approvals
+MARKER="docs/approvals/${ID}.md"
+APPROVER="${RALPH_APPROVED_BY:-}"
+if [ -z "$APPROVER" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  APPROVER="$(git config user.name || true)"
+fi
+APPROVER="${APPROVER:-$(whoami)}"
+
+# ADR-0037 §3.4: draft scope_confirmation / rollback_plan from the ticket's
+# §변경 범위 / §롤백 sections instead of a bare TODO placeholder. The draft is a
+# starting point — a human still confirms (the marker is committed and audited).
+section_oneline() {
+  # $1=file, $2=heading keyword → first ~3 content lines as one compact line.
+  awk -v kw="$2" '
+    /^##[[:space:]]/ { if (inSec) exit; inSec = (index($0, kw) > 0); next }
+    inSec {
+      line=$0
+      gsub(/^[[:space:]]*[-*>][[:space:]]*/, "", line)
+      gsub(/^[[:space:]]*\[[ xX]\][[:space:]]*/, "", line)
+      gsub(/[`*#]/, "", line)
+      gsub(/^[[:space:]]+/, "", line); gsub(/[[:space:]]+$/, "", line)
+      if (line ~ /^```/) next
+      if (line ~ /[^[:space:]]/) print line
+    }
+  ' "$1" | head -3 | tr '\n' ' ' | sed 's/  */ /g; s/[[:space:]]*$//'
+}
+yaml_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | cut -c1-400; }
+
+SCOPE_DRAFT="$(section_oneline "$TICKET" '변경 범위')"
+[ -n "$SCOPE_DRAFT" ] || SCOPE_DRAFT="$(section_oneline "$TICKET" 'Scope')"
+[ -n "$SCOPE_DRAFT" ] || SCOPE_DRAFT="TODO: confirm exact approved scope for $ID"
+ROLLBACK_DRAFT="$(section_oneline "$TICKET" '롤백')"
+[ -n "$ROLLBACK_DRAFT" ] || ROLLBACK_DRAFT="$(section_oneline "$TICKET" 'Reversibility')"
+[ -n "$ROLLBACK_DRAFT" ] || ROLLBACK_DRAFT="git revert <commit>"
+
+if [ ! -f "$MARKER" ]; then
+  cat > "$MARKER" <<EOF
+approved_by: "$APPROVER"
+approved_at: "$(date -Iseconds)"
+scope_confirmation: "$(yaml_escape "$SCOPE_DRAFT")"
+rollback_plan: "$(yaml_escape "$ROLLBACK_DRAFT")"
+EOF
+fi
+
+echo "approval marker ready: $MARKER"
+if [ -n "${EDITOR:-}" ]; then
+  "$EDITOR" "$MARKER"
+else
+  echo "EDITOR is not set; edit $MARKER before running run_loop."
+fi

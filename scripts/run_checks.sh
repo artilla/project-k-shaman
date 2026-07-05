@@ -144,6 +144,14 @@ fi
 run "master-spec exists" test -f docs/master-spec.md
 run "tickets dir exists" test -d docs/tickets
 run "external docs lint" ./scripts/lint_external_docs.sh
+# Mission Control UI 검사는 mission-control/ 가 있는 레포에서만 (clean-extract된
+# 하네스에는 mission-control/ 가 없다 — check_ui_requirements.sh 는 서버를 띄우므로 가드).
+if [ -d mission-control ] && [ -x ./scripts/check_ui_requirements.sh ]; then
+  run "Mission Control UI requirements R1-R5" ./scripts/check_ui_requirements.sh
+fi
+if ls mission-control/*.test.mjs >/dev/null 2>&1; then
+  run "Mission Control UI unit tests" node --test mission-control/*.test.mjs
+fi
 
 # ─────────────────────────────────────────────────────────
 # 4. bats 회귀 테스트 (설치된 경우에만 실행)
@@ -151,7 +159,7 @@ run "external docs lint" ./scripts/lint_external_docs.sh
 
 if command -v bats >/dev/null 2>&1; then
   if ls tests/*.bats >/dev/null 2>&1; then
-    run "bats regression tests" env -u RALPH_ROOT bats tests/*.bats
+    run "bats regression tests" env -u RALPH_ROOT -u RALPH_STATE_ROOT -u CLAUDE_TIMEOUT_SECONDS bats tests/*.bats
   else
     echo "── [check] bats tests — SKIP (tests/*.bats not found)"
   fi

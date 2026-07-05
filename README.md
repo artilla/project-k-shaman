@@ -1,6 +1,6 @@
-# K-Shaman
+# ProjectK-Shaman
 
-Project Hephaestus 운영 하네스에서 `init_new_project.sh`로 클린 추출한 프로젝트입니다 (추출일: 2026-06-01).
+Project Hephaestus 운영 하네스에서 `init_new_project.sh`로 클린 추출한 프로젝트입니다 (추출일: 2026-07-05).
 Ralph Loop(명세 → 분할 → 헤드리스 실행 → 검증 → 복구 → 인간 승인) 방식으로 운영합니다.
 
 ## 빠른 시작

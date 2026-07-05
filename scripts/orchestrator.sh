@@ -42,6 +42,13 @@ done
 
 mkdir -p .ralph .ralph/logs state state/reservations docs/tickets/DONE
 
+if [ -f "$ROOT/scripts/lib/session_events.sh" ]; then
+  # shellcheck source=./scripts/lib/session_events.sh
+  . "$ROOT/scripts/lib/session_events.sh"
+else
+  archive_session_events() { return 0; }
+fi
+
 # ────────── git 가드 ──────────
 if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "❌ 이 디렉터리는 git 저장소가 아닙니다. orchestrator는 worktree를 요구합니다." >&2
@@ -101,6 +108,8 @@ reserve_for_orchestrator() {
       echo "mode=orchestrated"
       echo "started_at=$(date -Iseconds)"
       echo "root=$ROOT"
+      echo "pgid=unknown"
+      echo "timeout_backend=unknown"
     } > "state/reservations/${id}.d/meta"
     return 0
   fi
@@ -109,6 +118,7 @@ reserve_for_orchestrator() {
 
 release_reservation() {
   local id="$1"
+  archive_session_events "$id" 2>/dev/null || true
   rm -rf "state/reservations/${id}.d" 2>/dev/null || true
 }
 
@@ -198,7 +208,7 @@ spawn_worker() {
   local logfile="$ROOT/.ralph/logs/${id}.log"
   (
     cd "$worker_root"
-    RALPH_ROOT="$worker_root" ./scripts/run_loop.sh "$id" --count 1 --no-reserve
+    RALPH_ROOT="$worker_root" RALPH_STATE_ROOT="$ROOT" ./scripts/run_loop.sh "$id" --count 1 --no-reserve
   ) >"$logfile" 2>&1 &
 
   local pid=$!
@@ -220,6 +230,57 @@ cleanup_orchestrator() {
   return 0
 }
 trap cleanup_orchestrator EXIT
+
+# ────────── Autopilot grant (ADR-0056) ──────────
+# 무인 연속 운영(watch)의 전제조건인 유한·자기만료 grant. budget(처리 가능 티켓 수)·
+# expiry_epoch(절대 만료). 정수 비교만 — date 파싱 비의존(이식성). safe:false는
+# 어느 경우에도 자동 포징하지 않는다(이 grant와 무관, pick_next_ticket이 항상 skip).
+AUTOPILOT_GRANT_FILE="state/autopilot_grant"
+LAST_ROUND_PROCESSED=0
+
+grant_field() {
+  [ -f "$AUTOPILOT_GRANT_FILE" ] || return 1
+  awk -F= -v k="$1" '$1==k { sub(/^[^=]*=/, ""); print; exit }' "$AUTOPILOT_GRANT_FILE"
+}
+
+autopilot_grant_valid() {
+  local budget expiry now_s
+  budget=$(grant_field budget) || return 1
+  expiry=$(grant_field expiry_epoch) || return 1
+  case "$budget" in ''|*[!0-9]*) return 1 ;; esac
+  case "$expiry" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$budget" -gt 0 ] || return 1
+  now_s=$(date +%s)
+  [ "$now_s" -lt "$expiry" ] || return 1
+  return 0
+}
+
+autopilot_grant_summary() {
+  local budget expiry now_s left
+  budget=$(grant_field budget 2>/dev/null || echo "?")
+  expiry=$(grant_field expiry_epoch 2>/dev/null || echo "")
+  now_s=$(date +%s)
+  if [ -n "$expiry" ] && [ "$expiry" -gt "$now_s" ] 2>/dev/null; then
+    left=$(( (expiry - now_s) / 60 ))
+    echo "budget=${budget}, 만료까지 ${left}분"
+  else
+    echo "budget=${budget}, 만료됨"
+  fi
+}
+
+# 무인 처리 1건 이상이면 budget을 그만큼 차감(소진 시 다음 라운드에서 정지).
+autopilot_grant_consume() {
+  local n="${1:-0}" cur new content
+  [ -f "$AUTOPILOT_GRANT_FILE" ] || return 0
+  case "$n" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$n" -gt 0 ] || return 0
+  cur=$(grant_field budget) || return 0
+  case "$cur" in ''|*[!0-9]*) return 0 ;; esac
+  new=$((cur - n)); [ "$new" -lt 0 ] && new=0
+  # budget 라인만 갱신, in-place 재기록(임시파일·unlink 비의존).
+  content=$(awk -F= -v b="$new" 'BEGIN{done=0} $1=="budget"{print "budget=" b; done=1; next} {print} END{if(!done) print "budget=" b}' "$AUTOPILOT_GRANT_FILE")
+  printf '%s\n' "$content" > "$AUTOPILOT_GRANT_FILE"
+}
 
 run_round() {
   local active=0
@@ -247,6 +308,8 @@ run_round() {
       RESERVED_IN_ROUND=("${new_arr[@]:-}")
     fi
   done
+
+  LAST_ROUND_PROCESSED="$active"   # ADR-0056: 이 라운드에서 처리한 티켓 수(grant budget 차감용)
 
   if [ "$active" = "0" ]; then
     echo "📭 처리할 티켓 없음."
@@ -366,9 +429,23 @@ fi
 
 # ────────── main ──────────
 if [ "$WATCH" = "1" ]; then
-  echo "👀 watch 모드: ${WATCH_INTERVAL}s 마다 새 티켓 확인. (Ctrl-C로 종료)"
+  # ADR-0056: 무인 연속 운영(watch)은 유한·자기만료 autopilot grant를 전제로 한다.
+  # grant가 없으면 연속 운영 대신 단발 attended 라운드만 실행한다(안전한 강등).
+  if ! autopilot_grant_valid; then
+    echo "⛔ 무인 연속 운영(watch)에는 유효한 autopilot grant가 필요합니다 (ADR-0056)."
+    echo "   발급: ./scripts/autopilot_grant.sh issue --budget N --expiry-min M (또는 Mission Control localhost)."
+    echo "   grant 없이 단발 라운드만 실행합니다 (attended)."
+    run_round
+    exit $?
+  fi
+  echo "👀 watch 모드 (autopilot grant: $(autopilot_grant_summary)) — ${WATCH_INTERVAL}s 간격. safe:false는 자동 실행 안 됨."
   while true; do
+    if ! autopilot_grant_valid; then
+      echo "🔚 autopilot grant 만료/소진 — 무인 연속 운영을 정지합니다 (default-tightens). 재개하려면 grant를 다시 발급하세요."
+      break
+    fi
     run_round || true
+    autopilot_grant_consume "$LAST_ROUND_PROCESSED"
     sleep "$WATCH_INTERVAL"
   done
 else

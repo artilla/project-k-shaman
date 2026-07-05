@@ -1,3 +1,6 @@
+# 비-티켓 드래프트 격리 보관소 (삭제 대신 이동, 추적 제외)
+_drafts/
+
 # Ralph Loop 운영 산출물 — 절대 커밋되면 안 됨
 .ralph/
 .ralph.log
@@ -7,6 +10,18 @@ state/failures.log
 state/auto_merge.log
 state/cron.log
 state/reservations/
+state/devices/
+# Mission Control 런타임 산출물 (서버 로그/PID/진단)
+state/*.log
+state/token_usage.log
+state/token_rates.json
+state/*.pid
+state/mission-control.log
+state/mission-control.pid
+state/console-log.jsonl
+state/headless-diagnostics/
+state/loop_mode
+state/autopilot_grant
 
 # OS / editor
 .DS_Store
@@ -29,6 +44,12 @@ outputs/ocr/
 .env
 .env.*
 !.env.example
+state/certs/
+*.crt
+*.cer
+*.csr
+*.p12
+*.pfx
 *.pem
 *.key
 
@@ -39,5 +60,4 @@ build/
 __pycache__/
 *.pyc
 .pytest_cache/
-.ruff_cache/
 target/

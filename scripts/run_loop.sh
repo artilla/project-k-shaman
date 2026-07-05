@@ -40,6 +40,7 @@ DRY_RUN=0
 SPECIFIC_TICKET=""
 CYCLES=1
 NO_RESERVE=0   # orchestrator가 이미 reservation lock을 잡았다면 1로 호출
+LOCK_OWNED=0   # ADR-0054: 이 세션이 state/lock을 보유 중인가(런타임 모드 전환 시 안전 판단)
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -55,6 +56,20 @@ while [ $# -gt 0 ]; do
 done
 
 mkdir -p state state/reservations .ralph/logs
+
+SESSION_STATE_ROOT="${RALPH_STATE_ROOT:-$ROOT}"
+mkdir -p "$SESSION_STATE_ROOT/state/reservations" "$SESSION_STATE_ROOT/.ralph/logs"
+
+if [ -f "$ROOT/scripts/lib/session_events.sh" ]; then
+  # shellcheck source=./scripts/lib/session_events.sh
+  . "$ROOT/scripts/lib/session_events.sh"
+else
+  session_event() { return 0; }
+  archive_session_events() { return 0; }
+fi
+
+DEFAULT_HEADLESS_TIMEOUT_SECONDS=1200
+SCALED_HEADLESS_TIMEOUT_SECONDS=2400
 
 # ────────── git 가드 (dry-run에서는 통과) ──────────
 GIT_REPO=0
@@ -83,11 +98,14 @@ cleanup() {
   rm -f state/lock 2>/dev/null || true
   rm -f state/current_ticket 2>/dev/null || true
   for id in "${OWNED_RESERVATIONS[@]:-}"; do
-    [ -n "$id" ] && rm -rf "state/reservations/${id}.d" 2>/dev/null || true
+    if [ -n "$id" ]; then
+      archive_session_events "$id" 2>/dev/null || true
+      rm -rf "$SESSION_STATE_ROOT/state/reservations/${id}.d" 2>/dev/null || true
+    fi
   done
 }
 trap cleanup EXIT
-[ "$DRY_RUN" = "0" ] && touch state/lock
+if [ "$DRY_RUN" = "0" ]; then touch state/lock; LOCK_OWNED=1; fi
 
 add_failure() {
   # add_failure <ticket_id> <stage> <cycle_retry> <message>
@@ -95,6 +113,233 @@ add_failure() {
   printf '%s\t%s\t%s\t%s\t%s\n' \
     "$(date -Iseconds)" "${1:-unknown}" "${2:-unknown}" "${3:-0}" "${4:-}" \
     >> state/failures.log
+}
+
+# ────────── 진단 번들 저장 ──────────
+# save_headless_diagnostics <ticket_id> <stage> <timeout_seconds> [headless_rc]
+# stage: idle-exit | no-commit | no-done-move | checks-failed | claude-exec-failed
+#
+# $RALPH_STATE_ROOT 또는 isolated worktree parent root 아래 state/headless-diagnostics/<id>/<timestamp>/ 에 저장.
+# isolated worktree가 삭제되어도 진단 정보가 남도록 stable state root를 사용한다.
+# git reset 전에 호출해야 diff가 보존된다.
+diagnostics_state_root() {
+  if [ -n "${RALPH_STATE_ROOT:-}" ]; then
+    printf '%s\n' "$RALPH_STATE_ROOT"
+    return 0
+  fi
+
+  case "$ROOT" in
+    */.ralph/wt-*)
+      printf '%s\n' "${ROOT%%/.ralph/wt-*}"
+      return 0
+      ;;
+  esac
+
+  printf '%s\n' "$SESSION_STATE_ROOT"
+}
+
+diagnostic_termination_class() {
+  local stage="$1" rc="${2:-}"
+
+  case "$stage" in
+    idle-exit|no-commit|no-done-move|checks-failed)
+      printf '%s\n' "$stage"
+      ;;
+    claude-exec-failed)
+      case "$rc" in
+        143)     printf '%s\n' "manual-term" ;;
+        124|137) printf '%s\n' "timeout" ;;
+        *)       printf '%s\n' "claude-exec-failed" ;;
+      esac
+      ;;
+    *)
+      printf '%s\n' "$stage"
+      ;;
+  esac
+}
+
+portable_stat_epoch() {
+  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || return 1
+}
+
+portable_stat_size() {
+  stat -f '%z' "$1" 2>/dev/null || stat -c '%s' "$1" 2>/dev/null || wc -c < "$1" 2>/dev/null
+}
+
+portable_epoch_iso() {
+  local epoch="$1"
+  date -r "$epoch" '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date -d "@$epoch" -Iseconds 2>/dev/null || printf '%s\n' "$epoch"
+}
+
+diagnostic_changed_files() {
+  {
+    git -C "$ROOT" diff --name-only HEAD 2>/dev/null || true
+    git -C "$ROOT" diff --cached --name-only 2>/dev/null || true
+    git -C "$ROOT" ls-files --others --exclude-standard 2>/dev/null || true
+  } | sed '/^$/d' | sort -u
+}
+
+write_untracked_file_sizes() {
+  local out="$1" file abs size
+  : > "$out"
+  git -C "$ROOT" ls-files --others --exclude-standard 2>/dev/null | while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    abs="$ROOT/$file"
+    [ -f "$abs" ] || continue
+    size="$(portable_stat_size "$abs" | tr -d '[:space:]')"
+    printf '%s\t%s\n' "$size" "$file"
+  done > "$out"
+}
+
+write_changed_file_mtimes() {
+  local out="$1" file abs epoch iso size
+  : > "$out"
+  diagnostic_changed_files | while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    abs="$ROOT/$file"
+    [ -e "$abs" ] || continue
+    epoch="$(portable_stat_epoch "$abs" 2>/dev/null || true)"
+    [ -n "$epoch" ] || continue
+    iso="$(portable_epoch_iso "$epoch")"
+    size="$(portable_stat_size "$abs" | tr -d '[:space:]')"
+    printf '%s\t%s\t%s\n' "$iso" "$size" "$file"
+  done > "$out"
+}
+
+last_worktree_change_at() {
+  local file abs epoch latest=""
+  while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    abs="$ROOT/$file"
+    [ -e "$abs" ] || continue
+    epoch="$(portable_stat_epoch "$abs" 2>/dev/null || true)"
+    [ -n "$epoch" ] || continue
+    if [ -z "$latest" ] || [ "$epoch" -gt "$latest" ]; then
+      latest="$epoch"
+    fi
+  done <<EOF
+$(diagnostic_changed_files)
+EOF
+
+  if [ -n "$latest" ]; then
+    portable_epoch_iso "$latest"
+  else
+    printf '%s\n' "none"
+  fi
+}
+
+save_headless_diagnostics() {
+  local id="$1" stage="$2" timeout_sec="${3:-unknown}" headless_rc="${4:-}"
+  local stable_state_root; stable_state_root="$(diagnostics_state_root)"
+  local diag_root="$stable_state_root/state/headless-diagnostics"
+  local ts; ts="$(date +%Y%m%dT%H%M%S)"
+  local bundle_dir="$diag_root/${id}/${ts}"
+  local headless_log="$ROOT/.ralph/logs/${id}.log"
+  local reservation_dir="$SESSION_STATE_ROOT/state/reservations/${id}.d"
+  local events_src="$reservation_dir/events.jsonl"
+  local meta_src="$reservation_dir/meta"
+  local termination_class; termination_class="$(diagnostic_termination_class "$stage" "$headless_rc")"
+
+  mkdir -p "$bundle_dir" || return 0
+
+  # headless log 복사
+  if [ -f "$headless_log" ]; then
+    cp "$headless_log" "$bundle_dir/headless.log"
+  fi
+
+  # events 복사 (있고 비어 있지 않을 때)
+  if [ -f "$events_src" ] && [ -s "$events_src" ]; then
+    cp "$events_src" "$bundle_dir/events.jsonl"
+  fi
+
+  # meta에서 timeout_backend / pgid 읽기
+  local timeout_backend="unknown" pgid="unknown"
+  if [ -f "$meta_src" ]; then
+    timeout_backend="$(awk -F= '/^timeout_backend=/{print $2; exit}' "$meta_src" 2>/dev/null || true)"
+    pgid="$(awk -F= '/^pgid=/{print $2; exit}' "$meta_src" 2>/dev/null || true)"
+    [ -z "$timeout_backend" ] && timeout_backend="unknown"
+    [ -z "$pgid" ]            && pgid="unknown"
+  fi
+
+  # git 상태 수집 (reset 전에 호출해야 diff가 유효)
+  local git_status="" git_status_porcelain="" git_diff_stat="" git_log3="" last_change_at="none"
+  if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git_status="$(git -C "$ROOT" status --short 2>/dev/null || true)"
+    git_status_porcelain="$(git -C "$ROOT" status --porcelain=v1 --untracked-files=all 2>/dev/null || true)"
+    git_diff_stat="$(git -C "$ROOT" diff --stat HEAD 2>/dev/null || true)"
+    git_log3="$(git -C "$ROOT" log --oneline -3 2>/dev/null || true)"
+    write_untracked_file_sizes "$bundle_dir/untracked-files.tsv"
+    write_changed_file_mtimes "$bundle_dir/changed-files-mtime.tsv"
+    last_change_at="$(last_worktree_change_at)"
+    printf '%s\n' "$git_status_porcelain" > "$bundle_dir/git-status.porcelain"
+  else
+    : > "$bundle_dir/untracked-files.tsv"
+    : > "$bundle_dir/changed-files-mtime.tsv"
+    : > "$bundle_dir/git-status.porcelain"
+  fi
+  printf '%s\n' "$last_change_at" > "$bundle_dir/worktree-change.txt"
+
+  # status.txt — key=value + git 상태
+  {
+    printf 'stage=%s\n'            "$stage"
+    printf 'termination_class=%s\n' "$termination_class"
+    printf 'ticket_id=%s\n'        "$id"
+    printf 'headless_rc=%s\n'      "${headless_rc:-unknown}"
+    printf 'command=%s\n'          "${CLAUDE_CMD:-claude}"
+    printf 'model=%s\n'            "${CLAUDE_MODEL:-sonnet}"
+    printf 'permission_mode=%s\n'  "${CLAUDE_PERMISSION_MODE:-bypassPermissions}"
+    printf 'timeout_seconds=%s\n'  "$timeout_sec"
+    printf 'timeout_backend=%s\n'  "$timeout_backend"
+    printf 'pgid=%s\n'             "$pgid"
+    printf 'headless_log_path=%s\n' "$headless_log"
+    printf 'diagnosed_at=%s\n'     "$(date -Iseconds)"
+    printf 'last_worktree_change_at=%s\n' "$last_change_at"
+    printf '\n--- git status ---\n'
+    printf '%s\n'                  "$git_status"
+    printf '\n--- git status --porcelain=v1 --untracked-files=all ---\n'
+    printf '%s\n'                  "$git_status_porcelain"
+    printf '\n--- git log --oneline -3 ---\n'
+    printf '%s\n'                  "$git_log3"
+  } > "$bundle_dir/status.txt"
+
+  # diff.stat — git reset 전 WIP 크기 파악 (untracked 크기 요약 포함)
+  {
+    printf '%s\n' "$git_diff_stat"
+    if [ -s "$bundle_dir/untracked-files.tsv" ]; then
+      printf '\n--- untracked files (bytes, path) ---\n'
+      cat "$bundle_dir/untracked-files.tsv"
+    fi
+  } > "$bundle_dir/diff.stat"
+
+  # summary.md — 사람이 읽는 요약
+  {
+    printf '# Headless Diagnostics — %s — %s\n\n' "$id" "$stage"
+    printf '**stage**: %s\n'           "$stage"
+    printf '**termination_class**: %s\n' "$termination_class"
+    printf '**ticket**: %s\n'          "$id"
+    printf '**headless_rc**: %s\n'     "${headless_rc:-unknown}"
+    printf '**command**: `%s %s --permission-mode %s --model %s`\n' \
+      "${CLAUDE_CMD:-claude}" "${CLAUDE_HEADLESS:--p}" \
+      "${CLAUDE_PERMISSION_MODE:-bypassPermissions}" "${CLAUDE_MODEL:-sonnet}"
+    printf '**timeout_seconds**: %ss\n'  "$timeout_sec"
+    printf '**timeout_backend**: %s\n'   "$timeout_backend"
+    printf '**pgid**: %s\n'             "$pgid"
+    printf '**headless_log**: `%s`\n'   "$headless_log"
+    printf '**diagnosed_at**: %s\n\n'   "$(date -Iseconds)"
+    printf '**last_worktree_change_at**: %s\n\n' "$last_change_at"
+    printf '## git status\n\n```\n%s\n```\n\n'          "$git_status"
+    printf '## git status porcelain\n\n```\n%s\n```\n\n' "$git_status_porcelain"
+    printf '## git diff --stat\n\n```\n%s\n```\n\n'     "$git_diff_stat"
+    printf '## untracked files\n\n```\n'
+    cat "$bundle_dir/untracked-files.tsv"
+    printf '```\n\n'
+    printf '## changed file mtimes\n\n```\n'
+    cat "$bundle_dir/changed-files-mtime.tsv"
+    printf '```\n\n'
+    printf '## git log (last 3)\n\n```\n%s\n```\n'      "$git_log3"
+  } > "$bundle_dir/summary.md"
+
+  echo "📦 진단 번들 저장: $bundle_dir"
 }
 
 # isolated worktree(.ralph/wt-*) 안에서 실행 중인지
@@ -126,17 +371,35 @@ ticket_id_from_path() {
   echo "${base%%-*}"
 }
 
+# ADR-0046: frontmatter 필드 추가/갱신 — 닫는 `---` 직전에 삽입(기존 동일 키는 제거).
+# 계측 타임스탬프(completed_at/started_at)를 DONE 티켓에 durable하게 남기기 위함.
+fm_set_field() {
+  local file="$1" key="$2" val="$3" tmp
+  tmp=$(mktemp "${TMPDIR:-/tmp}/ralph-fm.XXXXXX") || return 1
+  awk -v k="$key" -v v="$val" '
+    BEGIN { fm = 0 }
+    /^---[ \t]*$/ {
+      if (fm == 0) { fm = 1; print; next }
+      if (fm == 1) { print k ": " v; fm = 2; print; next }
+    }
+    fm == 1 && $1 == k":" { next }   # drop existing same key (idempotent)
+    { print }
+  ' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
 # atomic reservation: mkdir로 검사. 성공: 0, 이미 차지됨: 1
 reserve_ticket() {
   local id="$1" mode="${2:-standalone}"
-  mkdir -p state/reservations
-  if mkdir "state/reservations/${id}.d" 2>/dev/null; then
+  mkdir -p "$SESSION_STATE_ROOT/state/reservations"
+  if mkdir "$SESSION_STATE_ROOT/state/reservations/${id}.d" 2>/dev/null; then
     {
       echo "pid=$$"
       echo "mode=$mode"
       echo "started_at=$(date -Iseconds)"
       echo "root=$ROOT"
-    } > "state/reservations/${id}.d/meta"
+      echo "pgid=unknown"
+      echo "timeout_backend=unknown"
+    } > "$SESSION_STATE_ROOT/state/reservations/${id}.d/meta"
     OWNED_RESERVATIONS+=("$id")
     return 0
   fi
@@ -145,7 +408,7 @@ reserve_ticket() {
 
 is_reserved() {
   local id="$1"
-  [ -d "state/reservations/${id}.d" ]
+  [ -d "$SESSION_STATE_ROOT/state/reservations/${id}.d" ]
 }
 
 # 운영 관련 경로 whitelist에 해당하는 git status --porcelain 라인만 출력.
@@ -246,11 +509,87 @@ validate_safe_false_approval() {
   return 0
 }
 
+ticket_label_contains() {
+  local labels="$1" wanted="$2"
+  printf '%s\n' "$labels" \
+    | tr '[]",' '    ' \
+    | tr -s '[:space:]' '\n' \
+    | grep -Fxq "$wanted"
+}
+
+headless_timeout_policy() {
+  local file="$1" estimate labels label
+
+  if [ -n "${CLAUDE_TIMEOUT_SECONDS:-}" ]; then
+    echo "${CLAUDE_TIMEOUT_SECONDS}|operator override: CLAUDE_TIMEOUT_SECONDS"
+    return 0
+  fi
+
+  estimate=$(field_of "$file" estimate || true)
+  labels=$(field_of "$file" labels || true)
+
+  if [ "$estimate" = "L" ]; then
+    echo "${SCALED_HEADLESS_TIMEOUT_SECONDS}|ticket estimate:L; default ${DEFAULT_HEADLESS_TIMEOUT_SECONDS}s"
+    return 0
+  fi
+
+  for label in ui frontend mission-control; do
+    if ticket_label_contains "$labels" "$label"; then
+      echo "${SCALED_HEADLESS_TIMEOUT_SECONDS}|ticket label:${label}; default ${DEFAULT_HEADLESS_TIMEOUT_SECONDS}s"
+      return 0
+    fi
+  done
+
+  echo "${DEFAULT_HEADLESS_TIMEOUT_SECONDS}|default"
+}
+
+# ADR-0054 §3.2: re-read the declarative state/loop_mode at the cycle boundary
+# (before picking the next ticket) so a runtime mode switch — Mission Control's
+# localhost-only set_mode, or a hand edit (CLI parity) — takes effect on the NEXT
+# ticket, never mid-ticket. The loop stays the executor; the file is the truth.
+#
+# Mapping: suggest → dry-run(미실행 미리보기), co-pilot → safe-only(기본). Absent
+# or unknown token → keep the startup flags (fail-safe). `autopilot` is NOT
+# reachable via a runtime file switch (ADR-0054 §6.3 b) — entering Autopilot stays
+# a deliberate CLI launch (run_loop.sh without --safe-only); the file switch warns
+# and keeps the current mode.
+#
+# Safety: leaving dry-run mid-session needs the concurrency lock. If this session
+# never acquired it (started in --dry-run) and another loop holds state/lock, we
+# refuse to loosen and stay in dry-run — never steal the lock.
+apply_loop_mode() {
+  local mode_file="state/loop_mode" mode new_safe new_dry
+  [ -f "$mode_file" ] || return 0
+  mode=$(head -n1 "$mode_file" 2>/dev/null | tr -d '[:space:]' | tr 'A-Z' 'a-z')
+  case "$mode" in
+    suggest)          new_safe=1; new_dry=1 ;;
+    co-pilot|copilot) new_safe=1; new_dry=0 ;;
+    autopilot)
+      echo "⚠️  loop_mode='autopilot'는 런타임 전환으로 진입할 수 없습니다(ADR-0054 §6.3 b). 현재 모드 유지 — Autopilot은 CLI 재기동(run_loop.sh, --safe-only 없이)으로만 진입." >&2
+      return 0 ;;
+    *) return 0 ;;   # unknown/empty token → keep current flags (fail-safe)
+  esac
+  if [ "$new_dry" = "0" ] && [ "$LOCK_OWNED" = "0" ]; then
+    if [ -f state/lock ]; then
+      echo "⚠️  loop_mode='${mode}' 요청이나 state/lock을 다른 세션이 보유 — dry-run 유지(락 탈취 금지)." >&2
+      return 0
+    fi
+    touch state/lock && LOCK_OWNED=1
+  fi
+  if [ "$new_safe" != "$SAFE_ONLY" ] || [ "$new_dry" != "$DRY_RUN" ]; then
+    echo "🔀 loop_mode='${mode}' 적용 — safe_only=${new_safe} dry_run=${new_dry} (사이클 경계)"
+  fi
+  SAFE_ONLY="$new_safe"; DRY_RUN="$new_dry"
+}
+
 cycle_one() {
   echo "════════════════════════════════════════════════════════"
   echo "RALPH LOOP — cycle start $(date -Iseconds)  cwd=$ROOT"
   if in_isolated_worktree; then echo "🌲 isolated worktree mode"; fi
   echo "════════════════════════════════════════════════════════"
+
+  # ADR-0054 §3.2: honor a runtime mode switch at this cycle boundary.
+  apply_loop_mode
 
   # ────────── 1. Pre-flight: 워크트리 청결 검사 ──────────
   # dry-run은 git/lock 변경이 없으므로 dirty 검사 자체가 의미 없음 → skip.
@@ -260,9 +599,13 @@ cycle_one() {
   if [ "$DRY_RUN" = "0" ] && [ "$GIT_REPO" = "1" ]; then
     if in_isolated_worktree; then
       if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-        echo "ℹ️  isolated worktree에서 dirty 상태 — 자동 폐기 허용"
-        git reset --hard HEAD 2>/dev/null || true
-        git clean -fd 2>/dev/null || true
+        if [ "${RALPH_KEEP_DIRTY_ON_START:-0}" = "1" ]; then
+          echo "ℹ️  isolated worktree dirty 상태 보존 — redirect 재디스패치"
+        else
+          echo "ℹ️  isolated worktree에서 dirty 상태 — 자동 폐기 허용"
+          git reset --hard HEAD 2>/dev/null || true
+          git clean -fd 2>/dev/null || true
+        fi
       fi
     else
       if [ -n "$(_op_dirty_lines)" ]; then
@@ -318,6 +661,11 @@ EOF
 )
   fi
 
+  if [ "$DRY_RUN" = "0" ] && [ "$GIT_REPO" = "1" ]; then
+    git tag -f "cycle/${id}-pre" HEAD >/dev/null
+    echo "🏷️  pre-cycle tag: cycle/${id}-pre"
+  fi
+
   # ────────── 3. Reservation (lock 디렉터리) ──────────
   # 중요: --no-reserve 모드에서는 worker-local lock을 검증하지 않는다.
   #       (orchestrator의 lock은 메인 worktree의 state/reservations/ 에 있고,
@@ -349,6 +697,11 @@ EOF
   fi
 
   echo "🎭 persona: $persona  skill: $skill_file"
+
+  local timeout_spec timeout_seconds timeout_reason
+  timeout_spec=$(headless_timeout_policy "$ticket")
+  timeout_seconds="${timeout_spec%%|*}"
+  timeout_reason="${timeout_spec#*|}"
 
   # ────────── 5. Build prompt ──────────
   local persona_specific=""
@@ -427,10 +780,17 @@ $safe_false_note
 EOF
 )
 
+  # ────────── 5.5 Timeout 정책 (dry-run에서도 operator가 확인하도록) ──────────
+  local timeout_spec timeout_seconds timeout_reason
+  timeout_spec=$(headless_timeout_policy "$ticket")
+  timeout_seconds="${timeout_spec%%|*}"
+  timeout_reason="${timeout_spec#*|}"
+
   # ────────── 6. dry-run 처리 (git/lock 변경 없이 종료) ──────────
   if [ "$DRY_RUN" = "1" ]; then
     echo "── DRY RUN: 다음 프롬프트가 실행될 예정 ──"
     echo "$prompt"
+    echo "⏱️  headless timeout: ${timeout_seconds}s (${timeout_reason})"
     echo "──────────────────────────────────────────"
     echo "(dry-run: 티켓 파일·git history·reservation 모두 변경 없음)"
     return 0
@@ -444,19 +804,49 @@ EOF
     echo "started_at=$(date -Iseconds)"
     echo "root=$ROOT"
     echo "persona=$persona"
+    echo "timeout_policy=$timeout_seconds"
+    echo "timeout_reason=$timeout_reason"
   } > "$headless_log"
   echo "🧾 headless log: $headless_log"
-  if ! ./scripts/run_headless.sh "$prompt" "$ROOT" 2>&1 | tee -a "$headless_log"; then
+  echo "⏱️  headless timeout: ${timeout_seconds}s (${timeout_reason})" | tee -a "$headless_log"
+  session_event "$id" system dispatch "persona=$persona timeout=${timeout_seconds}s reason=$timeout_reason" 2>/dev/null || true
+
+  local headless_rc reservation_meta
+  reservation_meta="$SESSION_STATE_ROOT/state/reservations/${id}.d/meta"
+  set +e
+  CLAUDE_TIMEOUT_SECONDS="$timeout_seconds" \
+    RALPH_SESSION_META_FILE="$reservation_meta" \
+    RALPH_STATE_ROOT="$SESSION_STATE_ROOT" \
+    ./scripts/run_headless.sh "$prompt" "$ROOT" 2>&1 | tee -a "$headless_log"
+  headless_rc=${PIPESTATUS[0]}
+  set -e
+
+  if [ "$headless_rc" -ne 0 ]; then
+    if [ "$headless_rc" = "124" ] || [ "$headless_rc" = "137" ]; then
+      session_event "$id" system timeout "run_headless rc=$headless_rc" 2>/dev/null || true
+    elif [ "$headless_rc" = "125" ]; then
+      session_event "$id" system "idle-exit" "run_headless rc=$headless_rc" 2>/dev/null || true
+    else
+      session_event "$id" system failed "run_headless rc=$headless_rc" 2>/dev/null || true
+    fi
     echo "❌ Claude 헤드리스 세션 실패"
+    if [ "$headless_rc" = "125" ]; then
+      add_failure "$id" "idle-exit" "${i:-0}" "$ticket"
+      save_headless_diagnostics "$id" "idle-exit" "$timeout_seconds" "$headless_rc"
+      return 15
+    fi
     add_failure "$id" "claude-exec-failed" "${i:-0}" "$ticket"
+    save_headless_diagnostics "$id" "claude-exec-failed" "$timeout_seconds" "$headless_rc"
     return 5
   fi
+  session_event "$id" system completed "run_headless rc=0" 2>/dev/null || true
 
   # ────────── 8. Verify ──────────
   echo "🔍 검증..."
   if ! ./scripts/run_checks.sh; then
     echo "❌ run_checks.sh 실패"
     add_failure "$id" "checks-failed" "${i:-0}" "$ticket"
+    save_headless_diagnostics "$id" "checks-failed" "$timeout_seconds"
     if in_isolated_worktree; then
       echo "↩️  isolated worktree → 자동 폐기 (git reset --hard)"
       git reset --hard HEAD 2>/dev/null || true
@@ -472,6 +862,7 @@ EOF
   if [ -n "$(_op_dirty_lines)" ]; then
     echo "❌ 워킹 트리에 미커밋 변경이 남음 — 페르소나가 commit 의무를 어김."
     add_failure "$id" "no-commit" "${i:-0}" "$ticket"
+    save_headless_diagnostics "$id" "no-commit" "$timeout_seconds"
     if in_isolated_worktree; then
       git reset --hard HEAD 2>/dev/null || true
     fi
@@ -481,7 +872,52 @@ EOF
   if [ -f "$ticket" ]; then
     echo "❌ 페르소나가 티켓을 docs/tickets/DONE/ 로 이동하지 않음."
     add_failure "$id" "no-done-move" "${i:-0}" "$ticket"
+    save_headless_diagnostics "$id" "no-done-move" "$timeout_seconds"
     return 8
+  fi
+
+  # ────────── 10. 계측 (ADR-0046): 완료 타임스탬프 영속 ──────────
+  # DONE 티켓 frontmatter에 completed_at / started_at(reservation meta)을 durable하게
+  # 기록한다. 별도 telemetry 커밋이며 페르소나 커밋과 분리된다. Mission Control은 이를
+  # 읽어 사이클/리드 타임·완료 throughput을 집계한다(읽기 전용 — 영속은 루프 전담).
+  # 실패해도 cycle 성공을 깨지 않도록 변경분을 되돌린다(트리 clean 유지).
+  local done_file started_at_val completed_at_val
+  done_file="docs/tickets/DONE/$(basename "$ticket")"
+  if [ -f "$done_file" ]; then
+    started_at_val=""
+    [ -f "$reservation_meta" ] && started_at_val="$(awk -F= '/^started_at=/{print $2; exit}' "$reservation_meta" 2>/dev/null || true)"
+    completed_at_val="$(date -Iseconds)"
+    if fm_set_field "$done_file" completed_at "$completed_at_val" \
+       && { [ -z "$started_at_val" ] || fm_set_field "$done_file" started_at "$started_at_val"; } \
+       && git add "$done_file" 2>/dev/null \
+       && git commit -m "telemetry(${id}): completed_at" >/dev/null 2>&1; then
+      echo "🕒 telemetry: $id completed_at=$completed_at_val"
+    else
+      git checkout -- "$done_file" 2>/dev/null || true   # 실패 시 트리 clean 복원
+    fi
+  fi
+
+  # ────────── 11. 계측 (ADR-0070): per-ticket 토큰 합계 영속 ──────────
+  # 완료 티켓의 token_usage.log 세션들을 합산해 DONE frontmatter tokens_total(+in/out)을
+  # durable하게 기록한다(measured 카운트만 — 비용은 reader가 요율로 추정·frontmatter 미영속).
+  # completed_at과 동형: 분리 telemetry 커밋·실패 시 트리 복원(cycle 비치명). usage 없으면
+  # 미기록(fail-closed, 0 아님). 로그 없음/TOKEN_TELEMETRY OFF면 무동작.
+  local token_log="state/token_usage.log"
+  if [ -f "$done_file" ] && [ -f "$token_log" ]; then
+    local tok_sum tin tout ttot
+    tok_sum="$(awk -F'\t' -v id="$id" '$2==id { ti+=$4; to+=$5; n++ } END { if (n>0) printf "%d %d", ti, to }' "$token_log" 2>/dev/null || true)"
+    if [ -n "$tok_sum" ]; then
+      tin="${tok_sum%% *}"; tout="${tok_sum##* }"; ttot=$((tin + tout))
+      if fm_set_field "$done_file" tokens_total "$ttot" \
+         && fm_set_field "$done_file" tokens_in "$tin" \
+         && fm_set_field "$done_file" tokens_out "$tout" \
+         && git add "$done_file" 2>/dev/null \
+         && git commit -m "telemetry(${id}): tokens_total" >/dev/null 2>&1; then
+        echo "🔢 telemetry: $id tokens_total=$ttot (in=$tin out=$tout)"
+      else
+        git checkout -- "$done_file" 2>/dev/null || true   # 실패 시 트리 clean 복원
+      fi
+    fi
   fi
 
   echo "✅ cycle done — $ticket → DONE/  (lock은 trap에서 정리됨)"

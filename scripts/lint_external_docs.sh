@@ -36,126 +36,74 @@ set -euo pipefail
 LINT_EXTERNAL_TARGET="${LINT_EXTERNAL_TARGET:-docs/onboarding docs/decisions}"
 VIOLATIONS=0
 
-# check_rule_a <file>
-# Rule A: shell code fence 안에서 git 명령 컨텍스트의 base 브랜치 'main' 하드코딩 감지.
-# fence 밖(산문·표·비-shell 펜스)은 적용하지 않는다.
-check_rule_a() {
-  local file="$1"
-  local line_num=0
-  local line matched
-  local fence_active=0 shell_fence=0
-  while IFS= read -r line; do
-    line_num=$((line_num + 1))
-
-    if [ "$fence_active" -eq 1 ]; then
-      # 닫는 fence
-      if printf '%s' "$line" | grep -qE '^```[[:space:]]*$'; then
-        fence_active=0
-        shell_fence=0
-        continue
-      fi
-      # 비-shell fence 내부 → skip
-      if [ "$shell_fence" -eq 0 ]; then
-        continue
-      fi
-    else
-      # shell fence 열기
-      if printf '%s' "$line" | grep -qE '^```(bash|sh|shell)([[:space:]].*)?$'; then
-        fence_active=1
-        shell_fence=1
-        continue
-      fi
-      # 기타 fence 열기
-      if printf '%s' "$line" | grep -qE '^```[^[:space:]]'; then
-        fence_active=1
-        shell_fence=0
-        continue
-      fi
-      # fence 밖 → Rule A 미적용
-      continue
-    fi
-
-    # shell fence 안에서만 도달
-    matched=0
-    if printf '%s' "$line" | grep -qE 'git[[:space:]]+(merge|checkout|rebase)([[:space:]]+-[-[:alnum:]]+(=[^[:space:]]+)?)*[[:space:]]+main([^[:alnum:]_/-]|$)'; then
-      matched=1
-    elif printf '%s' "$line" | grep -qE 'origin/main([^[:alnum:]_/-]|$)'; then
-      matched=1
-    elif printf '%s' "$line" | grep -qE '\.\.main([^[:alnum:]_/-]|$)'; then
-      matched=1
-    elif printf '%s' "$line" | grep -qE '(^|[^[:alnum:]_/-])main\.\.'; then
-      matched=1
-    fi
-    if [ "$matched" -eq 1 ]; then
-      echo "${file}:${line_num}: Rule-A hardcoded base branch 'main' in git command context (use \$BASE_BRANCH instead)" >&2
-      VIOLATIONS=$((VIOLATIONS + 1))
-    fi
-  done < "$file"
-}
-
-# check_rule_b <file>
-# Rule B: shell code fence 안에서 BASE_BRANCH=$(...) 직접 대입 감지.
-# 면제: ${BASE_BRANCH:-$(...)} override 보존 형태 (같은 라인에 ':-' 포함).
-# fence 밖(산문·표·비-shell 펜스)은 적용하지 않는다.
-check_rule_b() {
-  local file="$1"
-  local line_num=0
-  local line
-  local fence_active=0 shell_fence=0
-  while IFS= read -r line; do
-    line_num=$((line_num + 1))
-
-    if [ "$fence_active" -eq 1 ]; then
-      # 닫는 fence
-      if printf '%s' "$line" | grep -qE '^```[[:space:]]*$'; then
-        fence_active=0
-        shell_fence=0
-        continue
-      fi
-      # 비-shell fence 내부 → skip
-      if [ "$shell_fence" -eq 0 ]; then
-        continue
-      fi
-    else
-      # shell fence 열기
-      if printf '%s' "$line" | grep -qE '^```(bash|sh|shell)([[:space:]].*)?$'; then
-        fence_active=1
-        shell_fence=1
-        continue
-      fi
-      # 기타 fence 열기
-      if printf '%s' "$line" | grep -qE '^```[^[:space:]]'; then
-        fence_active=1
-        shell_fence=0
-        continue
-      fi
-      # fence 밖 → Rule B 미적용
-      continue
-    fi
-
-    # shell fence 안에서만 도달
-    # 면제: override 보존 패턴 (:-를 포함하는 라인)
-    if printf '%s' "$line" | grep -qE 'BASE_BRANCH[^=]*:-'; then
-      continue
-    fi
-    # Rule B: BASE_BRANCH=...$(  직접 대입 (따옴표 포함 형태도 감지)
-    if printf '%s' "$line" | grep -qE 'BASE_BRANCH=["'"'"']?\$\('; then
-      echo "${file}:${line_num}: Rule-B direct assignment of BASE_BRANCH overrides operator-set value; use \${BASE_BRANCH:-\$(...)} instead" >&2
-      VIOLATIONS=$((VIOLATIONS + 1))
-    fi
-  done < "$file"
-}
-
 # 대상 파일 수집 (.md, .html) — find 결과를 임시 파일에 저장해 while subshell 회피
 TMPFILE="$(mktemp)"
 for _target in $LINT_EXTERNAL_TARGET; do
   find "$_target" -type f \( -name "*.md" -o -name "*.html" \) 2>/dev/null || true
 done | sort -u > "$TMPFILE"
 
+check_file() {
+  local file="$1"
+  awk -v file="$file" '
+    BEGIN { fence_active = 0; shell_fence = 0; violations = 0 }
+
+    {
+      line = $0
+
+      if (fence_active == 1) {
+        if (line ~ /^```[[:space:]]*$/) {
+          fence_active = 0
+          shell_fence = 0
+          next
+        }
+        if (shell_fence == 0) {
+          next
+        }
+      } else {
+        if (line ~ /^```(bash|sh|shell)([[:space:]].*)?$/) {
+          fence_active = 1
+          shell_fence = 1
+          next
+        }
+        if (line ~ /^```[^[:space:]]/) {
+          fence_active = 1
+          shell_fence = 0
+          next
+        }
+        next
+      }
+
+      matched = 0
+      if (line ~ /git[[:space:]]+(merge|checkout|rebase)([[:space:]]+-[-[:alnum:]]+(=[^[:space:]]+)?)*[[:space:]]+main([^[:alnum:]_\/-]|$)/) {
+        matched = 1
+      } else if (line ~ /origin\/main([^[:alnum:]_\/-]|$)/) {
+        matched = 1
+      } else if (line ~ /\.\.main([^[:alnum:]_\/-]|$)/) {
+        matched = 1
+      } else if (line ~ /(^|[^[:alnum:]_\/-])main\.\./) {
+        matched = 1
+      }
+
+      if (matched == 1) {
+        printf "%s:%d: Rule-A hardcoded base branch '\''main'\'' in git command context (use $BASE_BRANCH instead)\n", file, FNR > "/dev/stderr"
+        violations++
+      }
+
+      if (line !~ /BASE_BRANCH[^=]*:-/ && line ~ /BASE_BRANCH=["\047]?\$\(/) {
+        printf "%s:%d: Rule-B direct assignment of BASE_BRANCH overrides operator-set value; use ${BASE_BRANCH:-$(...)} instead\n", file, FNR > "/dev/stderr"
+        violations++
+      }
+    }
+
+    END { exit violations > 0 ? 1 : 0 }
+  ' "$file"
+}
+
 while IFS= read -r f; do
   [ -z "$f" ] && continue
-  check_rule_a "$f"
-  check_rule_b "$f"
+  if ! check_file "$f"; then
+    VIOLATIONS=$((VIOLATIONS + 1))
+  fi
 done < "$TMPFILE"
 
 rm -f "$TMPFILE"
