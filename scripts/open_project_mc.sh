@@ -47,6 +47,14 @@ if [ ! -f "$TGT/scripts/mission_control.sh" ]; then
   echo "오류: 하네스 마커 없음 — $TGT/scripts/mission_control.sh 가 없습니다." >&2; exit 1
 fi
 
+# node 해석: exec 경유 시 서버가 NODE_BIN(자기 자신의 node)을 넘겨준다.
+# 수동 실행 시엔 PATH에서 찾는다. 둘 다 없으면 명확히 실패 (nohup 뒤 조용한 죽음 방지).
+NODE_BIN="${NODE_BIN:-$(command -v node || true)}"
+if [ -z "$NODE_BIN" ] || [ ! -x "$NODE_BIN" ]; then
+  echo "오류: node 실행 파일을 찾을 수 없습니다 — PATH에 node를 추가하거나 NODE_BIN=/path/to/node 로 지정하세요" >&2
+  exit 1
+fi
+
 mkdir -p "$TGT/state"
 PID_FILE="$TGT/state/mission-control.pid"
 LOG_FILE="$TGT/state/mission-control.log"
@@ -73,7 +81,10 @@ if [ -z "$PORT" ]; then echo "오류: 사용 가능한 포트가 없습니다 (7
 
 (
   cd "$TGT"
-  nohup node mission-control/server.mjs --port "$PORT" >> "$LOG_FILE" 2>&1 &
+  # 타깃 MC가 다시 자식(run_loop → claude CLI 등)을 spawn할 때 도구를 찾을 수 있도록
+  # node의 bin 디렉터리를 PATH 앞에 추가해 물려준다 (npm 글로벌 CLI는 보통 같은 디렉터리).
+  # MC 프로세스의 PATH가 빈약한 환경(GUI/launchd 기동)에서 T018 유형 rc=5를 방지.
+  PATH="$(dirname "$NODE_BIN"):$PATH" nohup "$NODE_BIN" mission-control/server.mjs --port "$PORT" >> "$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
 )
 
