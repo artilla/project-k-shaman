@@ -148,7 +148,9 @@ _commit_all() {
   run bash -c 'cd "$1" && ./scripts/run_loop.sh T003' _ "$TEST_HOME"
   [ "$status" -eq 0 ]
   [ -f "$TEST_HOME/docs/tickets/DONE/T003-test.md" ]
-  [ "$(git -C "$TEST_HOME" log --format=%s -1)" = "T003: fake safe false gate run" ]
+  # ADR-0046: run_loop appends a separate telemetry(T003) commit after the persona
+  # done commit, so the persona commit need not be HEAD — assert it is present.
+  git -C "$TEST_HOME" log --format=%s -3 | grep -qx "T003: fake safe false gate run"
 }
 
 @test "T4: malformed approval marker exits rc=14 and names invalid fields" {

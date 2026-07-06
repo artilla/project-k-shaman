@@ -1,7 +1,7 @@
 ---
 id: T017
 title: run_checks --fast 멈춤 수정 — run-headless-timeout.bats 업스트림 동기화
-status: open
+status: done
 priority: P0
 safe: true               # 테스트 파일 1개 교체 — 제품 코드·스크립트 무변경, git revert 즉시 복구.
 persona: implementer

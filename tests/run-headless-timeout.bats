@@ -60,8 +60,14 @@ EOF
   _link_tool rm
   _link_tool sleep
   _link_tool date
+  _link_tool tail
+  _link_tool tr
+  _link_tool wc
   if command -v pkill >/dev/null 2>&1; then
     _link_tool pkill
+  fi
+  if command -v perl >/dev/null 2>&1; then
+    _link_tool perl
   fi
   if command -v python3 >/dev/null 2>&1; then
     _link_tool python3
@@ -204,8 +210,8 @@ _run_headless() {
 }
 
 @test "bash watchdog fallback kills spawned grandchild process tree" {
-  if ! command -v python3 >/dev/null 2>&1; then
-    skip "python3 is required for process-group fallback on this platform"
+  if ! command -v perl >/dev/null 2>&1 && ! command -v python3 >/dev/null 2>&1; then
+    skip "perl or python3 is required for process-group fallback on this platform"
   fi
 
   grandchild_pid_file="$TEST_HOME/grandchild.pid"
