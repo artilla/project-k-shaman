@@ -77,7 +77,7 @@ if [ "${1:-}" = "--diff-manifest" ]; then
     echo "GIT none"
   fi
   # 복사 대상(HARNESS_PATHS와 동일 목록 — 아래 §5 배열과 동기 유지할 것)
-  for p in scripts skills docs/tickets/TEMPLATE.md docs/runbook.md docs/approvals/README.md .gitignore; do
+  for p in scripts skills mission-control docs/tickets/TEMPLATE.md docs/runbook.md docs/approvals/README.md .gitignore; do
     if [ -e "$DM_ABS/$p" ]; then
       if [ -d "$SRC/$p" ] && [ -d "$DM_ABS/$p" ]; then
         n=0
@@ -342,7 +342,7 @@ step() { printf '  • %s\n' "$*"; }
 # Hephaestus product 테스트(mission-control 등 누적물)는 새 레포에서 통과하지 못하므로
 # 빈 스켈레톤 + 통과하는 starter smoke 테스트(아래 [2/6])만 둔다.
 HARNESS_PATHS=(
-  "scripts" "skills"
+  "scripts" "skills" "mission-control"
   "docs/tickets/TEMPLATE.md" "docs/runbook.md" "docs/approvals/README.md" ".gitignore"
 )
 SKELETON_DIRS=(
@@ -398,6 +398,8 @@ fi
 if [ "$DRY_RUN" -eq 0 ]; then
   chmod +x "$TARGET"/scripts/*.sh 2>/dev/null || true
   [ -d "$TARGET/scripts/lib" ] && chmod +x "$TARGET"/scripts/lib/*.sh 2>/dev/null || true
+  # T303: mission-control은 서버 본체만 이식 — Hephaestus 유닛 테스트는 새 레포 소관이 아님
+  rm -f "$TARGET/mission-control/"*.test.mjs 2>/dev/null || true
 fi
 
 # ─────────────────────────────────────────────────────────
@@ -663,6 +665,7 @@ $EDITOR docs/tickets/T001-first.md     # 4) 첫 티켓
 | `docs/decisions/` | ADR (의사결정 기록) |
 | `skills/` | AI 페르소나 4종 |
 | `scripts/` | 루프 실행 도구 (`run_checks.local.sh`에 프로젝트 검증) |
+| `mission-control/` | 이 프로젝트 전용 Mission Control 웹 (`./scripts/mission_control.sh start`) |
 | `state/`, `.ralph/` | 런타임 상태 (git 무시) |
 
 운영 규칙 전체: [`docs/runbook.md`](docs/runbook.md)

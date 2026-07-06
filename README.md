@@ -24,6 +24,7 @@ $EDITOR docs/tickets/T001-first.md     # 4) 첫 티켓
 | `docs/decisions/` | ADR (의사결정 기록) |
 | `skills/` | AI 페르소나 4종 |
 | `scripts/` | 루프 실행 도구 (`run_checks.local.sh`에 프로젝트 검증) |
+| `mission-control/` | 이 프로젝트 전용 Mission Control 웹 (`./scripts/mission_control.sh start`) |
 | `state/`, `.ralph/` | 런타임 상태 (git 무시) |
 
 운영 규칙 전체: [`docs/runbook.md`](docs/runbook.md)
