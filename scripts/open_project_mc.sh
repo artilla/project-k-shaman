@@ -79,12 +79,20 @@ if [ -z "$PORT" ]; then
 fi
 if [ -z "$PORT" ]; then echo "오류: 사용 가능한 포트가 없습니다 (7475-7499)" >&2; exit 1; fi
 
+# 타깃 MC가 다시 자식(run_loop → claude CLI 등)을 spawn할 때 도구를 찾을 수 있도록
+# PATH를 보강해 물려준다. MC 프로세스의 PATH가 빈약한 환경(GUI/launchd 기동)에서
+# 'node/claude not found'(rc=127)를 방지:
+#   1) node의 bin 디렉터리 (npm 글로벌 CLI는 보통 같은 디렉터리)
+#   2) claude CLI 표준 설치 위치 중 실재하는 곳 (네이티브 설치 ~/.local/bin 등)
+EXTRA_PATH="$(dirname "$NODE_BIN")"
+if ! PATH="$EXTRA_PATH:$PATH" command -v claude >/dev/null 2>&1; then
+  for d in "$HOME/.local/bin" "$HOME/.claude/local" /opt/homebrew/bin /usr/local/bin; do
+    if [ -x "$d/claude" ]; then EXTRA_PATH="$EXTRA_PATH:$d"; break; fi
+  done
+fi
 (
   cd "$TGT"
-  # 타깃 MC가 다시 자식(run_loop → claude CLI 등)을 spawn할 때 도구를 찾을 수 있도록
-  # node의 bin 디렉터리를 PATH 앞에 추가해 물려준다 (npm 글로벌 CLI는 보통 같은 디렉터리).
-  # MC 프로세스의 PATH가 빈약한 환경(GUI/launchd 기동)에서 T018 유형 rc=5를 방지.
-  PATH="$(dirname "$NODE_BIN"):$PATH" nohup "$NODE_BIN" mission-control/server.mjs --port "$PORT" >> "$LOG_FILE" 2>&1 &
+  PATH="$EXTRA_PATH:$PATH" nohup "$NODE_BIN" mission-control/server.mjs --port "$PORT" >> "$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
 )
 
