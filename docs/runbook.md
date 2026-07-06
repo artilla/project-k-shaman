@@ -2008,3 +2008,13 @@ v0.21부터 동시 활성 기기 수에 **상한**이 있다(`MISSION_CONTROL_MA
 **무회귀.** 정방향 `mc-deps`·역방향 `mc-blocks`·blocked/Backlog·Run 가시성 전부 무변경. node 202/202·capability-map 7/7(innerHTML 0)·`board-blocks-consistency.bats` 4/4(stale 배지·missing/no-edge reason·정합·미선언 무경보(노이즈 없음)·무회귀). 호스트 `run_checks --full` R1–R6.
 
 - 회귀: `tests/board-blocks-consistency.bats`(+4). 다음: v0.99.0 봉인(ADR-0195, T287·T288). 후속(별도 ADR): 전이적 체인·richer events·보안 민감 쓰기.
+
+## 12. 목업 → 구현 시각 정합 규칙 (ADR-0206 · T302)
+
+디자인 목업(`docs/reviews/*.dc.html` 정본)을 실화면으로 옮기는 티켓은 아래 4규칙을 따른다.
+배경: T300/T301에서 bats(DOM 훅·문구 계약)로는 못 잡는 "스킨 편차"가 반복 발생 (ADR-0205 §5).
+
+1. **인벤토리 → 명시적 편차.** 구현 전에 목업의 모든 시각 요소(섹션·라벨·상태·컴포넌트)를 티켓 수용 기준에 체크리스트로 붙인다. 목업과 다르게 만들 항목은 반드시 ADR "의도적 편차" 목록에 사유와 함께 명시한다. **명시된 편차 외의 불일치 = 버그.**
+2. **재사용 컴포넌트의 기본 스킨 의존 금지.** 기존 컴포넌트(`.mc-panel` 등)를 목업 화면에 재사용할 땐 해당 화면 스코프 클래스(`np-*` 등)로 목업 값(배경·radius·패딩)을 명시적으로 오버라이드한다. "컴포넌트를 가져오면 옛 스킨이 딸려온다"가 T301 카드 편차의 원인이었다.
+3. **접근성 계약과 디자인이 충돌하면 sr-only.** aria-describedby 등으로 DOM에 남아야 하는 요소를 목업이 숨기면, 지우지 말고 시각 숨김(sr-only 패턴)으로 양쪽을 만족시킨다 (예: T301 후속의 `#np-stack-hint`).
+4. **visual_diff로 검증.** `node scripts/visual_diff.mjs` — 정본 목업과 실화면을 같은 뷰포트로 헤드리스 렌더해 상태별 diff 이미지+불일치율을 `state/visual-diff/`에 생성한다. 수용 기준: **diff 이미지의 불일치 영역이 전부 ADR 의도적 편차 목록으로 설명될 것.** 문서화된 편차는 스크립트의 normalize 단계에 반영해 리포트에서 제거할 수 있다(ADR 문서화가 선행 조건). Chrome 필요(`CHROME_BIN` 지정 가능), 목업 CDN 의존은 `docs/reviews/vendor/` 고정 사본으로 오프라인 해소.
