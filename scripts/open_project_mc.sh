@@ -92,6 +92,14 @@ if ! PATH="$EXTRA_PATH:$PATH" command -v claude >/dev/null 2>&1; then
 fi
 (
   cd "$TGT"
+  # 타깃의 .env.local(gitignore 대상)이 있으면 타깃 MC env로 로드 — 루프 자식(claude·
+  # 어댑터의 OPENAI_API_KEY 등)에 전파된다. 값은 절대 echo/로그하지 않는다 (runbook §4).
+  if [ -f "$TGT/.env.local" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$TGT/.env.local"
+    set +a
+  fi
   PATH="$EXTRA_PATH:$PATH" nohup "$NODE_BIN" mission-control/server.mjs --port "$PORT" >> "$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
 )
