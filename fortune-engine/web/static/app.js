@@ -568,11 +568,19 @@
     }
   }
 
+  let live2dInitRequested = false;
+
   function showMainStage() {
     onboardingEl.hidden = true;
     profileFormEl.hidden = true;
     mainStageEl.hidden = false;
     renderProfileSummary();
+    // T026 fix: Live2D 초기화는 #main-stage가 보이는 시점에 1회 — 페이지 로드 시점엔
+    // 컨테이너가 hidden이라 clientWidth=0으로 캔버스가 0×0으로 굳는다 (실측).
+    if (!live2dInitRequested && window.HongyeonLive2D) {
+      live2dInitRequested = true;
+      window.HongyeonLive2D.init(avatarEl);
+    }
   }
 
   function onGuestStartTap() {
@@ -745,11 +753,7 @@
   privacyDetailLink.addEventListener("click", onPrivacyDetailTap);
 
   initOnboarding();
-
-  // T025: Live2D 아바타 초기화 — 자산 없으면 스스로 비활성(폴백 유지).
-  // 탭 이전의 대기 화면에서 로드되므로 first_text_visible·first_audio_play
-  // 경로(§1.6-② 예산)에 선행하지 않는다.
-  if (window.HongyeonLive2D) {
-    window.HongyeonLive2D.init(avatarEl);
-  }
+  // T025→T026: Live2D 초기화는 showMainStage()에서 수행한다 — 온보딩 중엔 컨테이너가
+  // hidden이라 여기서 부르면 0×0 캔버스로 굳는다. 저장 프로필로 스킵되는 경우
+  // initOnboarding→showMainStage 경로에서 이미 호출된다.
 })();
