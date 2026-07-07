@@ -11,6 +11,8 @@ blocks: []
 labels: ["feature", "frontend", "share-card", "metrics"]
 created: 2026-07-07
 spec_ref: docs/ux/screen-ia.md#s5--결과-카드
+completed_at: 2026-07-07T19:48:34+09:00
+started_at: 2026-07-07T19:34:38+09:00
 ---
 
 # T021 — 공유 카드 프론트 연결 (E2E 베타 데모 마무리 1/2)
