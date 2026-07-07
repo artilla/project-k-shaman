@@ -11,6 +11,8 @@ blocks: []
 labels: ["feature", "frontend", "playback", "metrics"]
 created: 2026-07-07
 spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
+completed_at: 2026-07-07T11:24:37+09:00
+started_at: 2026-07-07T11:13:07+09:00
 ---
 
 # T019 — 재생 프론트 스켈레톤 (E2E 베타 데모 1단계)
