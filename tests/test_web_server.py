@@ -75,6 +75,32 @@ class TestFortuneEndpoint:
             _stop(httpd, thread)
 
 
+class TestFortuneCardFieldsContract:
+    """T022: S4 phase C 텍스트 카드가 렌더링에 쓰는 fortune 필드가 응답에 고정 존재하는지 잠근다."""
+
+    def test_fortune_object_has_card_fields(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/api/fortune/today?topic=love&date=2026-07-07")) as resp:
+                data = json.loads(resp.read())
+            fortune = data["fortune"]
+
+            assert isinstance(fortune["summary"], list) and len(fortune["summary"]) >= 1
+            assert isinstance(fortune["scores_line"], str) and fortune["scores_line"]
+            assert isinstance(fortune["avoid"], str) and fortune["avoid"]
+
+            scores = fortune["scores"]
+            for key in ("love", "money", "work", "relationship", "condition"):
+                assert key in scores, f"scores.{key} 누락"
+                assert 0 <= scores[key] <= 100
+
+            lucky = fortune["lucky"]
+            assert isinstance(lucky["color"], str) and lucky["color"]
+            assert isinstance(lucky["item"], str) and lucky["item"]
+        finally:
+            _stop(httpd, thread)
+
+
 class TestAudioEndpoint:
     def test_audio_endpoint_serves_playable_wav(self):
         httpd, thread = _start_server()
@@ -153,6 +179,61 @@ class TestStaticPage:
             with urllib.request.urlopen(_url(httpd, "/static/app.js")) as resp:
                 assert resp.status == 200
                 assert "javascript" in resp.headers.get("Content-Type", "")
+        finally:
+            _stop(httpd, thread)
+
+
+class TestStagePlaybackUXMarkup:
+    """T022: phase C 텍스트 카드 + phase D 플레이어 FSM 요소가 정적 파일에 존재하는지
+    문자열 수준으로 잠근다 (브라우저 렌더링 자체는 수동 확인, 관례는 T019).
+    무회귀: 기존 훅(start-btn·share-btn·share-status)과 이벤트명은 그대로 유지되어야 한다.
+    """
+
+    def test_index_html_has_card_and_player_elements(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/")) as resp:
+                body = resp.read().decode("utf-8")
+            # phase C 텍스트 카드
+            for hook in (
+                "fortune-card", "card-summary", "card-scores-line", "card-scores",
+                "card-lucky-color", "card-lucky-item", "card-avoid",
+            ):
+                assert f'id="{hook}"' in body, f"카드 요소 누락: {hook}"
+            # phase D 플레이어 FSM
+            for hook in ("player", "player-state", "player-progress-bar", "listen-btn", "play-pause-btn", "replay-btn"):
+                assert f'id="{hook}"' in body, f"플레이어 요소 누락: {hook}"
+            # 무대 아바타 플레이스홀더
+            assert 'id="avatar"' in body
+            # 기존 훅 무회귀
+            for hook in ("start-btn", "share-btn", "share-status"):
+                assert f'id="{hook}"' in body, f"기존 훅 회귀: {hook}"
+        finally:
+            _stop(httpd, thread)
+
+    def test_app_js_keeps_existing_event_hooks_and_adds_player_fsm(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/static/app.js")) as resp:
+                body = resp.read().decode("utf-8")
+            # 이벤트 훅 무회귀
+            assert "first_text_visible" in body
+            assert "first_audio_play" in body
+            # 부적 받기(T021) 무회귀
+            assert "share-btn" in body or "shareBtn" in body
+            # 플레이어 FSM 상태 라벨
+            for state in ("greeting", "speaking", "blessing"):
+                assert state in body, f"FSM 상태 누락: {state}"
+        finally:
+            _stop(httpd, thread)
+
+    def test_styles_css_has_stage_and_player_classes(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/static/styles.css")) as resp:
+                body = resp.read().decode("utf-8")
+            for selector in (".avatar", ".fortune-card", ".score-bar", ".player-progress-bar"):
+                assert selector in body, f"스타일 셀렉터 누락: {selector}"
         finally:
             _stop(httpd, thread)
 

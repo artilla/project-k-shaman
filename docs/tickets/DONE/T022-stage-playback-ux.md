@@ -1,7 +1,7 @@
 ---
 id: T022
 title: S4 무대 재생 UX 최소판 — 구조화 운세 카드(점수 바·행운) + 플레이어 FSM(듣기/진행/상태) + 무대 스타일
-status: open
+status: done
 priority: P1
 safe: true               # 프론트 정적 파일 + 서버 응답 필드 노출만 — 과금·키 경로 무변경.
 persona: implementer

@@ -1,4 +1,5 @@
-/* T019: 스켈레톤 스타일 — 디자인 폴리시는 non-goal, 모바일 뷰포트 가독성만 확보한다. */
+/* T022: S4 무대 감성 스타일 — 단청/조명 그라디언트 + 홍연 팔레트(character-sheet §6).
+   캐릭터 일러스트/모션 에셋은 없다 — 아바타는 이모지 플레이스홀더 + CSS 애니메이션까지만. */
 * {
   box-sizing: border-box;
 }
@@ -12,6 +13,7 @@ body {
 }
 
 .stage {
+  position: relative;
   max-width: 480px;
   margin: 0 auto;
   padding: 24px 20px 48px;
@@ -19,6 +21,17 @@ body {
   flex-direction: column;
   align-items: center;
   text-align: center;
+  overflow: hidden;
+}
+
+.stage-lighting {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(201, 24, 74, 0.45), transparent 55%),
+    radial-gradient(circle at 20% 30%, rgba(242, 183, 5, 0.18), transparent 45%),
+    radial-gradient(circle at 80% 60%, rgba(123, 44, 191, 0.25), transparent 50%);
 }
 
 .title {
@@ -29,6 +42,56 @@ body {
 .subtitle {
   margin: 0 0 24px;
   opacity: 0.75;
+}
+
+.avatar {
+  width: 96px;
+  height: 96px;
+  margin: 0 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 44px;
+  background: radial-gradient(circle at 35% 30%, #ffe3b0, #c9184a 70%);
+  box-shadow: 0 0 0 4px rgba(230, 160, 255, 0.25);
+}
+
+.avatar--idle {
+  animation: avatar-breathe 3.2s ease-in-out infinite;
+}
+
+.avatar--greeting {
+  animation: avatar-greet 0.6s ease-out;
+}
+
+.avatar--speaking {
+  animation: avatar-speak 0.5s ease-in-out infinite;
+}
+
+.avatar--blessing {
+  animation: avatar-bless 1.6s ease-in-out infinite;
+  background: radial-gradient(circle at 35% 30%, #fff3d6, #f2b705 70%);
+}
+
+@keyframes avatar-breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.04); }
+}
+
+@keyframes avatar-greet {
+  0% { transform: scale(0.85) translateY(10px); opacity: 0.4; }
+  100% { transform: scale(1) translateY(0); opacity: 1; }
+}
+
+@keyframes avatar-speak {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.08); }
+}
+
+@keyframes avatar-bless {
+  0%, 100% { transform: rotate(-3deg); }
+  50% { transform: rotate(3deg); }
 }
 
 .tap-button {
@@ -69,14 +132,133 @@ body {
   opacity: 0.8;
 }
 
-.fortune-text {
+.fortune-card {
   margin-top: 20px;
+  padding: 20px;
+  width: 100%;
   text-align: left;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(230, 160, 255, 0.25);
+}
+
+.card-summary {
+  margin: 0 0 8px;
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.card-scores-line {
+  margin: 0 0 16px;
+  font-size: 15px;
+  opacity: 0.85;
+}
+
+.card-scores {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+}
+
+.score-row {
+  display: grid;
+  grid-template-columns: 56px 1fr 32px;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.score-track {
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.score-bar {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: #e6a0ff;
+}
+
+.score-value {
+  text-align: right;
+  opacity: 0.8;
+}
+
+.card-lucky {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 12px;
+  font-size: 14px;
+}
+
+.lucky-swatch {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+}
+
+.card-avoid {
+  margin: 0;
+  font-size: 14px;
+  opacity: 0.85;
+}
+
+.player {
+  margin-top: 20px;
   width: 100%;
 }
 
-.segment {
-  margin: 0 0 12px;
-  line-height: 1.6;
-  font-size: 16px;
+.player-state {
+  margin: 0 0 8px;
+  font-size: 14px;
+  opacity: 0.85;
+}
+
+.player-progress-track {
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.player-progress-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: #f2b705;
+  transition: width 0.2s linear;
+}
+
+.player-controls {
+  display: flex;
+  gap: 10px;
+}
+
+.listen-button,
+.play-pause-button,
+.replay-button {
+  flex: 1;
+  padding: 14px;
+  font-size: 15px;
+  font-weight: 700;
+  border-radius: 12px;
+  border: none;
+  background: #e6a0ff;
+  color: #1b1029;
+}
+
+.replay-button {
+  background: transparent;
+  color: #e6a0ff;
+  border: 2px solid #e6a0ff;
 }

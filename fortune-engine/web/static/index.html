@@ -8,14 +8,42 @@
 </head>
 <body>
 <main class="stage">
+  <div class="stage-lighting" aria-hidden="true"></div>
+
   <h1 class="title">오늘신당</h1>
   <p class="subtitle">홍연이 오늘의 기운을 전해드려요</p>
+
+  <div id="avatar" class="avatar avatar--idle" aria-hidden="true">
+    <span class="avatar-emoji">🔮</span>
+  </div>
 
   <button id="start-btn" class="tap-button" type="button">탭하여 오늘의 운세 보기</button>
 
   <p id="status" class="status" aria-live="polite"></p>
 
-  <section id="fortune-text" class="fortune-text" aria-live="polite"></section>
+  <section id="fortune-card" class="fortune-card" hidden>
+    <p id="card-summary" class="card-summary"></p>
+    <p id="card-scores-line" class="card-scores-line"></p>
+    <ul id="card-scores" class="card-scores"></ul>
+    <div class="card-lucky">
+      <span id="card-lucky-color" class="lucky-swatch"></span>
+      <span id="card-lucky-text" class="lucky-text"></span>
+      <span id="card-lucky-item" class="lucky-item"></span>
+    </div>
+    <p id="card-avoid" class="card-avoid"></p>
+  </section>
+
+  <section id="player" class="player" hidden>
+    <p id="player-state" class="player-state" aria-live="polite">대기 중</p>
+    <div class="player-progress-track" aria-hidden="true">
+      <div id="player-progress-bar" class="player-progress-bar"></div>
+    </div>
+    <div class="player-controls">
+      <button id="listen-btn" class="listen-button" type="button">듣기</button>
+      <button id="play-pause-btn" class="play-pause-button" type="button" hidden>일시정지</button>
+      <button id="replay-btn" class="replay-button" type="button" hidden>다시 듣기</button>
+    </div>
+  </section>
 
   <button id="share-btn" class="share-button" type="button" hidden>부적 받기</button>
   <p id="share-status" class="status" aria-live="polite"></p>
