@@ -308,3 +308,110 @@ body {
   color: #e6a0ff;
   border: 2px solid #e6a0ff;
 }
+
+/* T026: 온보딩(S0)/입력(S2) — 게스트 우선 + 소셜 로그인 스캐폴드 */
+.onboarding,
+.profile-form,
+#main-stage {
+  width: 100%;
+}
+
+.onboarding-account-status {
+  margin: 0 0 12px;
+  font-size: 14px;
+  opacity: 0.85;
+}
+
+.onboarding-button {
+  display: block;
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 16px;
+  font-size: 16px;
+  font-weight: 700;
+  border-radius: 12px;
+  border: 2px solid #e6a0ff;
+  background: transparent;
+  color: #e6a0ff;
+}
+
+.onboarding-button--primary {
+  border: none;
+  background: #e6a0ff;
+  color: #1b1029;
+}
+
+.onboarding-button--ghost {
+  border: 1px solid rgba(245, 238, 252, 0.4);
+  color: #f5eefc;
+}
+
+.onboarding-button:disabled {
+  opacity: 0.4;
+}
+
+.profile-form-title {
+  margin: 0 0 20px;
+  font-size: 18px;
+}
+
+.field-label {
+  display: block;
+  margin: 16px 0 6px;
+  text-align: left;
+  font-size: 13px;
+  opacity: 0.8;
+}
+
+.field-input {
+  width: 100%;
+  padding: 12px;
+  font-size: 15px;
+  border-radius: 10px;
+  border: 1px solid rgba(230, 160, 255, 0.35);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f5eefc;
+}
+
+.field-error {
+  margin: 6px 0 0;
+  text-align: left;
+  font-size: 13px;
+  color: #ff9fb2;
+}
+
+.privacy-banner {
+  margin: 20px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0.75;
+  text-align: left;
+}
+
+.privacy-detail-link {
+  color: #e6a0ff;
+}
+
+.privacy-detail-text {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0.75;
+  text-align: left;
+}
+
+.profile-summary {
+  margin: 0 0 16px;
+  font-size: 13px;
+  opacity: 0.85;
+}
+
+.link-button {
+  margin-left: 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: #e6a0ff;
+  font-size: 13px;
+  text-decoration: underline;
+}

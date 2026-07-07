@@ -15,19 +15,22 @@ T020: `--backend openai` 명시 옵트인 + OPENAI_API_KEY 존재 시에만 T018
 """
 import argparse
 import hashlib
+import hmac
 import importlib.util
 import json
 import logging
 import math
 import os
 import re
+import secrets
 import struct
 import sys
+import urllib.request
 import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 _WEB_DIR = Path(__file__).resolve().parent
 _ENGINE_DIR = _WEB_DIR.parent
@@ -66,6 +69,28 @@ _DEFAULT_CHARACTER_ID = "hongyeon"
 _SHARE_CARD_NICKNAME = "손님"
 # fortuneId→fortune 매핑의 세션 범위 상한 — 초과 시 가장 오래된 항목부터 제거 (메모리 누수 방지).
 _FORTUNE_CACHE_MAX = 500
+
+# T026: 소셜 로그인 스캐폴드 — 키는 env만, 코드/로그에 원문 금지 (runbook §4).
+_OAUTH_PROVIDERS = {
+    "google": {
+        "client_id_env": "GOOGLE_CLIENT_ID",
+        "client_secret_env": "GOOGLE_CLIENT_SECRET",
+        "authorize_url": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_url": "https://oauth2.googleapis.com/token",
+        "userinfo_url": "https://openidconnect.googleapis.com/v1/userinfo",
+        "scope": "openid email profile",
+    },
+    "kakao": {
+        "client_id_env": "KAKAO_REST_API_KEY",
+        "client_secret_env": "KAKAO_CLIENT_SECRET",
+        "authorize_url": "https://kauth.kakao.com/oauth/authorize",
+        "token_url": "https://kauth.kakao.com/oauth/token",
+        "userinfo_url": "https://kapi.kakao.com/v2/user/me",
+        "scope": "profile_nickname",
+    },
+}
+_SESSION_COOKIE_NAME = "shindang_session"
+_OAUTH_STATE_COOKIE_NAME = "shindang_oauth_state"
 
 _STATIC_CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -126,6 +151,117 @@ def _real_audio_url_for(cache_key: str) -> str:
     return f"/audio/real/{key_hash}.mp3"
 
 
+def _provider_client_id(provider: str) -> str | None:
+    cfg = _OAUTH_PROVIDERS.get(provider)
+    if not cfg:
+        return None
+    return os.getenv(cfg["client_id_env"])
+
+
+def oauth_provider_status() -> dict:
+    """provider별 env 키 존재 여부만 반환한다 — 원문 키 값은 응답에 절대 포함하지 않는다."""
+    return {name: bool(_provider_client_id(name)) for name in _OAUTH_PROVIDERS}
+
+
+def build_oauth_authorize_url(provider: str, *, redirect_uri: str, state: str) -> str | None:
+    """순수 함수 — 네트워크 호출 없이 리다이렉트 URL 문자열만 조립한다.
+
+    client_id가 없으면(env 미설정) None을 반환한다 — 호출부가 400으로 막는다.
+    """
+    cfg = _OAUTH_PROVIDERS.get(provider)
+    if not cfg:
+        return None
+    client_id = _provider_client_id(provider)
+    if not client_id:
+        return None
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": cfg["scope"],
+        "state": state,
+    }
+    return f"{cfg['authorize_url']}?{urlencode(params)}"
+
+
+def _extract_profile(provider: str, profile_data: dict) -> dict:
+    """provider별 원시 userinfo 응답에서 subject/nickname만 뽑아낸다 (순수 함수, 네트워크 없음)."""
+    if provider == "google":
+        return {
+            "subject": profile_data.get("sub"),
+            "nickname": profile_data.get("name") or profile_data.get("given_name"),
+        }
+    if provider == "kakao":
+        nickname = profile_data.get("kakao_account", {}).get("profile", {}).get("nickname")
+        subject = profile_data.get("id")
+        return {"subject": str(subject) if subject is not None else None, "nickname": nickname}
+    return {"subject": None, "nickname": None}
+
+
+def _oauth_token_and_profile(provider: str, code: str, *, redirect_uri: str) -> dict:
+    """실 네트워크 2단 호출(토큰 교환→프로필 조회).
+
+    §4 3요소 카브아웃 근거: 미신뢰 입력(code) + 인터넷 접근 + 기밀 데이터(client_secret)가
+    동시에 겹치는 유일한 지점이라, 자율 루프는 이 함수를 스스로 호출하지 않는다 — 실행은
+    사람이 실 키를 배치한 뒤 실제 브라우저 리다이렉트로만 도달한다. 테스트는 항상 이 함수를
+    monkeypatch로 대체한다(runbook §4, T026 위험 완화).
+    """
+    cfg = _OAUTH_PROVIDERS[provider]
+    client_id = _provider_client_id(provider)
+    client_secret = os.getenv(cfg["client_secret_env"]) if cfg.get("client_secret_env") else None
+    token_body = urlencode({
+        "grant_type": "authorization_code",
+        "client_id": client_id or "",
+        "client_secret": client_secret or "",
+        "redirect_uri": redirect_uri,
+        "code": code,
+    }).encode("utf-8")
+    token_req = urllib.request.Request(cfg["token_url"], data=token_body, method="POST")
+    with urllib.request.urlopen(token_req, timeout=10) as resp:  # noqa: S310 — provider 도메인 고정
+        token_data = json.loads(resp.read())
+
+    profile_req = urllib.request.Request(
+        cfg["userinfo_url"],
+        headers={"Authorization": f"Bearer {token_data.get('access_token', '')}"},
+    )
+    with urllib.request.urlopen(profile_req, timeout=10) as resp:  # noqa: S310 — provider 도메인 고정
+        profile_data = json.loads(resp.read())
+
+    return _extract_profile(provider, profile_data)
+
+
+def _parse_cookie_header(header: str) -> dict:
+    cookies = {}
+    if not header:
+        return cookies
+    for part in header.split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        key, _, value = part.partition("=")
+        cookies[key.strip()] = value.strip()
+    return cookies
+
+
+def _sign_value(value: str, secret: str) -> str:
+    return hmac.new(secret.encode("utf-8"), value.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _make_session_cookie_value(session_id: str, secret: str) -> str:
+    return f"{session_id}.{_sign_value(session_id, secret)}"
+
+
+def _verify_session_cookie_value(cookie_value, secret) -> str | None:
+    if not cookie_value or "." not in cookie_value:
+        return None
+    session_id, _, sig = cookie_value.rpartition(".")
+    if not session_id or not sig:
+        return None
+    if not hmac.compare_digest(_sign_value(session_id, secret), sig):
+        return None
+    return session_id
+
+
 def validate_backend_startup(backend: str, *, has_api_key: bool) -> None:
     """`--backend openai` 옵트인인데 키가 없으면 기동 자체를 거부한다 (실수 과금 방지).
 
@@ -158,11 +294,13 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # noqa: A003
         _logger.info("%s - %s", self.address_string(), fmt % args)
 
-    def _send_json(self, status: int, payload: dict) -> None:
+    def _send_json(self, status: int, payload: dict, *, extra_headers: dict | None = None) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
 
@@ -214,6 +352,84 @@ class _Handler(BaseHTTPRequestHandler):
         svg = _share_card.render_share_card_svg(fortune, nickname=_SHARE_CARD_NICKNAME)
         self._send_bytes(200, "image/svg+xml; charset=utf-8", svg.encode("utf-8"))
 
+    def _handle_auth_providers(self) -> None:
+        self._send_json(200, {"providers": oauth_provider_status()})
+
+    def _oauth_redirect_uri(self, provider: str) -> str:
+        host = self.headers.get("Host", "127.0.0.1")
+        return f"http://{host}/api/auth/callback/{provider}"
+
+    def _handle_auth_login(self, provider: str) -> None:
+        if provider not in _OAUTH_PROVIDERS:
+            self._send_json(404, {"error": "unknown provider"})
+            return
+        state = secrets.token_hex(16)
+        url = build_oauth_authorize_url(provider, redirect_uri=self._oauth_redirect_uri(provider), state=state)
+        if url is None:
+            self._send_json(400, {"error": "provider not configured"})
+            return
+        self.send_response(302)
+        self.send_header("Location", url)
+        self.send_header(
+            "Set-Cookie",
+            f"{_OAUTH_STATE_COOKIE_NAME}={state}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600",
+        )
+        self.end_headers()
+
+    def _handle_auth_callback(self, provider: str, query: dict) -> None:
+        if provider not in _OAUTH_PROVIDERS:
+            self._send_json(404, {"error": "unknown provider"})
+            return
+        code = query.get("code", [None])[0]
+        if not code:
+            self._send_json(400, {"error": "missing code"})
+            return
+        state = query.get("state", [None])[0]
+        expected_state = _parse_cookie_header(self.headers.get("Cookie", "")).get(_OAUTH_STATE_COOKIE_NAME)
+        if not state or not expected_state or not hmac.compare_digest(state, expected_state):
+            self._send_json(400, {"error": "invalid state"})
+            return
+        try:
+            profile = _oauth_token_and_profile(provider, code, redirect_uri=self._oauth_redirect_uri(provider))
+        except Exception:
+            _logger.exception("oauth token exchange failed for provider=%s", provider)
+            self._send_json(502, {"error": "oauth exchange failed"})
+            return
+        session_id = secrets.token_hex(16)
+        self.server.sessions[session_id] = {"provider": provider, "nickname": profile.get("nickname")}
+        cookie_value = _make_session_cookie_value(session_id, self.server.session_secret)
+        self.send_response(302)
+        self.send_header("Location", "/")
+        self.send_header("Set-Cookie", f"{_SESSION_COOKIE_NAME}={cookie_value}; Path=/; HttpOnly; SameSite=Lax")
+        self.end_headers()
+
+    def _current_session(self):
+        raw = _parse_cookie_header(self.headers.get("Cookie", "")).get(_SESSION_COOKIE_NAME)
+        if not raw:
+            return None
+        session_id = _verify_session_cookie_value(raw, self.server.session_secret)
+        if session_id is None:
+            return None
+        return self.server.sessions.get(session_id)
+
+    def _handle_auth_me(self) -> None:
+        session = self._current_session()
+        if session is None:
+            self._send_json(200, {"loggedIn": False})
+            return
+        self._send_json(200, {"loggedIn": True, "provider": session["provider"], "nickname": session.get("nickname")})
+
+    def _handle_auth_logout(self) -> None:
+        raw = _parse_cookie_header(self.headers.get("Cookie", "")).get(_SESSION_COOKIE_NAME)
+        if raw:
+            session_id = _verify_session_cookie_value(raw, self.server.session_secret)
+            if session_id is not None:
+                self.server.sessions.pop(session_id, None)
+        self._send_json(
+            200, {"ok": True},
+            extra_headers={"Set-Cookie": f"{_SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"},
+        )
+
     def _handle_audio_mock(self, key_hash: str) -> None:
         if not _KEY_RE.match(key_hash):
             self._send_json(404, {"error": "invalid audio key"})
@@ -260,6 +476,14 @@ class _Handler(BaseHTTPRequestHandler):
             self._handle_fortune_today(query)
         elif parsed.path == "/api/share-card":
             self._handle_share_card(query)
+        elif parsed.path == "/api/auth/providers":
+            self._handle_auth_providers()
+        elif parsed.path.startswith("/api/auth/login/"):
+            self._handle_auth_login(parsed.path[len("/api/auth/login/"):])
+        elif parsed.path.startswith("/api/auth/callback/"):
+            self._handle_auth_callback(parsed.path[len("/api/auth/callback/"):], query)
+        elif parsed.path == "/api/auth/me":
+            self._handle_auth_me()
         elif parsed.path.startswith("/audio/mock/") and parsed.path.endswith(".wav"):
             key_hash = parsed.path[len("/audio/mock/"):-len(".wav")]
             self._handle_audio_mock(key_hash)
@@ -276,6 +500,8 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/api/event":
             self._handle_event()
+        elif parsed.path == "/api/auth/logout":
+            self._handle_auth_logout()
         else:
             self._send_json(404, {"error": "not found"})
 
@@ -288,6 +514,10 @@ def make_server(address=("127.0.0.1", 8787), *, backend: str = "mock") -> Thread
     httpd = ThreadingHTTPServer(address, _Handler)
     httpd.tts_backend_mode = backend
     httpd.fortune_cache_by_id = {}
+    # T026: 세션은 서버 메모리 + 서명 쿠키만 사용한다(DB 없음, §3 hold) — 프로세스 재시작 시
+    # session_secret이 새로 생성되므로 이전 쿠키는 자동으로 무효화된다(잔존물 없음).
+    httpd.sessions = {}
+    httpd.session_secret = secrets.token_hex(32)
     return httpd
 
 

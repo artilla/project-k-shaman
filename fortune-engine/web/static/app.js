@@ -4,6 +4,34 @@
 (function () {
   "use strict";
 
+  // T026: 온보딩(S0)/입력(S2) 요소 — 게스트 우선 + 소셜 로그인 스캐폴드.
+  const PROFILE_STORAGE_KEY = "shindang.profile";
+  const PROFILE_NICKNAME_MAX_LENGTH = 10;
+
+  const onboardingEl = document.getElementById("onboarding");
+  const onboardingAccountStatusEl = document.getElementById("onboarding-account-status");
+  const guestStartBtn = document.getElementById("guest-start-btn");
+  const googleLoginBtn = document.getElementById("google-login-btn");
+  const kakaoLoginBtn = document.getElementById("kakao-login-btn");
+  const logoutBtn = document.getElementById("logout-btn");
+
+  const profileFormEl = document.getElementById("profile-form");
+  const profileNicknameInput = document.getElementById("profile-nickname");
+  const profileNicknameErrorEl = document.getElementById("profile-nickname-error");
+  const profileBirthDateInput = document.getElementById("profile-birth-date");
+  const profileBirthDateErrorEl = document.getElementById("profile-birth-date-error");
+  const profileBirthHourSelect = document.getElementById("profile-birth-hour");
+  const profileNextBtn = document.getElementById("profile-next-btn");
+  const privacyDetailLink = document.getElementById("privacy-detail-link");
+  const privacyDetailTextEl = document.getElementById("privacy-detail-text");
+
+  const mainStageEl = document.getElementById("main-stage");
+  const profileSummaryEl = document.getElementById("profile-summary");
+  const profileSummaryNicknameEl = document.getElementById("profile-summary-nickname");
+  const editProfileBtn = document.getElementById("edit-profile-btn");
+
+  let currentProfile = null;
+
   const startBtn = document.getElementById("start-btn");
   const statusEl = document.getElementById("status");
   const avatarEl = document.getElementById("avatar");
@@ -436,6 +464,224 @@
     audioEl.play().then(startGlowLoop).catch(onAudioError);
   }
 
+  // T026: localStorage(shindang.profile)에만 저장 — 서버 미전송(v3 §12 로컬 우선 불변식).
+  function loadStoredProfile() {
+    try {
+      const raw = window.localStorage.getItem(PROFILE_STORAGE_KEY);
+      if (!raw) {
+        return null;
+      }
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function saveStoredProfile(profile) {
+    try {
+      window.localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile));
+    } catch (err) {
+      // localStorage 사용 불가 환경(사파리 프라이빗 등) — 세션 내 진행 자체는 막지 않는다.
+    }
+  }
+
+  // 12시진 대표 시각(profile-birth-hour의 select value)이 이미 seed_builder._get_birth_time_bucket
+  // 버킷 경계에 맞춰 선택돼 있으므로, 여기서는 그대로 쿼리에 실어 보내기만 한다.
+  function buildBirthQuery(profile) {
+    if (!profile || !profile.birthYear || !profile.birthMonth || !profile.birthDay) {
+      return "";
+    }
+    const params = new URLSearchParams();
+    params.set("birth_year", profile.birthYear);
+    params.set("birth_month", profile.birthMonth);
+    params.set("birth_day", profile.birthDay);
+    if (profile.birthHour !== null && profile.birthHour !== undefined) {
+      params.set("birth_hour", profile.birthHour);
+    }
+    return "?" + params.toString();
+  }
+
+  function validateProfileForm() {
+    const nickname = profileNicknameInput.value.trim();
+    const birthDateRaw = profileBirthDateInput.value;
+    const errors = {};
+
+    if (!nickname) {
+      errors.nickname = "닉네임을 입력해주세요.";
+    } else if (nickname.length > PROFILE_NICKNAME_MAX_LENGTH) {
+      errors.nickname = "닉네임은 최대 " + PROFILE_NICKNAME_MAX_LENGTH + "자까지 입력할 수 있어요.";
+    }
+
+    if (!birthDateRaw) {
+      errors.birthDate = "생년월일을 입력해주세요.";
+    } else {
+      const parsed = new Date(birthDateRaw + "T00:00:00");
+      const todayStr = new Date().toISOString().slice(0, 10);
+      if (isNaN(parsed.getTime())) {
+        errors.birthDate = "올바른 날짜 형식이 아니에요.";
+      } else if (birthDateRaw > todayStr) {
+        errors.birthDate = "미래 날짜는 입력할 수 없어요.";
+      }
+    }
+
+    return errors;
+  }
+
+  function renderProfileErrors(errors) {
+    profileNicknameErrorEl.textContent = errors.nickname || "";
+    profileNicknameErrorEl.hidden = !errors.nickname;
+    profileBirthDateErrorEl.textContent = errors.birthDate || "";
+    profileBirthDateErrorEl.hidden = !errors.birthDate;
+  }
+
+  function updateNextButtonState() {
+    const errors = validateProfileForm();
+    profileNextBtn.disabled = Object.keys(errors).length > 0;
+    return errors;
+  }
+
+  function prefillProfileForm(profile) {
+    if (!profile) {
+      return;
+    }
+    profileNicknameInput.value = profile.nickname || "";
+    if (profile.birthYear && profile.birthMonth && profile.birthDay) {
+      profileBirthDateInput.value =
+        String(profile.birthYear).padStart(4, "0") + "-" +
+        String(profile.birthMonth).padStart(2, "0") + "-" +
+        String(profile.birthDay).padStart(2, "0");
+    } else {
+      profileBirthDateInput.value = "";
+    }
+    profileBirthHourSelect.value =
+      profile.birthHour === null || profile.birthHour === undefined ? "" : String(profile.birthHour);
+    updateNextButtonState();
+  }
+
+  function renderProfileSummary() {
+    if (currentProfile && currentProfile.nickname) {
+      profileSummaryNicknameEl.textContent = currentProfile.nickname + "님";
+      profileSummaryEl.hidden = false;
+    } else {
+      profileSummaryEl.hidden = true;
+    }
+  }
+
+  function showMainStage() {
+    onboardingEl.hidden = true;
+    profileFormEl.hidden = true;
+    mainStageEl.hidden = false;
+    renderProfileSummary();
+  }
+
+  function onGuestStartTap() {
+    onboardingEl.hidden = true;
+    profileFormEl.hidden = false;
+  }
+
+  // 생년월일 원문은 여기서 로컬에만 저장되고, 이벤트 payload에는 존재 여부(hasBirthHour)만
+  // 싣는다 — 원본 생년월일·출생시간을 이벤트 로그에 남기지 않는다(v3 §12, screen-ia S2).
+  function onProfileNextTap() {
+    const errors = validateProfileForm();
+    renderProfileErrors(errors);
+    if (Object.keys(errors).length > 0) {
+      return;
+    }
+    const nickname = profileNicknameInput.value.trim();
+    const parts = profileBirthDateInput.value.split("-").map(Number);
+    const birthHourRaw = profileBirthHourSelect.value;
+    const profile = {
+      nickname: nickname,
+      birthYear: parts[0],
+      birthMonth: parts[1],
+      birthDay: parts[2],
+      birthHour: birthHourRaw === "" ? null : Number(birthHourRaw),
+    };
+    saveStoredProfile(profile);
+    currentProfile = profile;
+    reportEvents(null, [{
+      event: "profile_saved",
+      clientTs: Date.now(),
+      hasBirthHour: profile.birthHour !== null,
+    }], []);
+    showMainStage();
+  }
+
+  function onEditProfileTap() {
+    mainStageEl.hidden = true;
+    prefillProfileForm(currentProfile);
+    profileFormEl.hidden = false;
+  }
+
+  function onPrivacyDetailTap(event) {
+    event.preventDefault();
+    privacyDetailTextEl.hidden = !privacyDetailTextEl.hidden;
+  }
+
+  function applyProviderButtonState(btn, enabled) {
+    btn.disabled = !enabled;
+    btn.title = enabled ? "" : "관리자 설정 필요";
+  }
+
+  function fetchProviderStatus() {
+    fetch("/api/auth/providers")
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        const providers = data.providers || {};
+        applyProviderButtonState(googleLoginBtn, !!providers.google);
+        applyProviderButtonState(kakaoLoginBtn, !!providers.kakao);
+      })
+      .catch(function () {
+        applyProviderButtonState(googleLoginBtn, false);
+        applyProviderButtonState(kakaoLoginBtn, false);
+      });
+  }
+
+  function showLoggedInState(session) {
+    guestStartBtn.hidden = true;
+    googleLoginBtn.hidden = true;
+    kakaoLoginBtn.hidden = true;
+    onboardingAccountStatusEl.textContent = (session.nickname || "소셜 사용자") + "님으로 로그인됨";
+    onboardingAccountStatusEl.hidden = false;
+    logoutBtn.hidden = false;
+  }
+
+  function fetchAuthMe() {
+    fetch("/api/auth/me")
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        if (data.loggedIn) {
+          showLoggedInState(data);
+        }
+      })
+      .catch(function () {});
+  }
+
+  function onSocialLoginTap(provider) {
+    reportEvents(null, [{ event: "login_" + provider, clientTs: Date.now() }], []);
+    window.location.href = "/api/auth/login/" + provider;
+  }
+
+  function onLogoutTap() {
+    fetch("/api/auth/logout", { method: "POST" }).finally(function () {
+      window.location.reload();
+    });
+  }
+
+  function initOnboarding() {
+    currentProfile = loadStoredProfile();
+    fetchProviderStatus();
+    fetchAuthMe();
+
+    if (currentProfile) {
+      showMainStage();
+    } else {
+      onboardingEl.hidden = false;
+      reportEvents(null, [{ event: "onboarding_started", clientTs: Date.now() }], []);
+    }
+  }
+
   function onTap() {
     sessionStartMs = Date.now();
     audioPlayReported = false;
@@ -445,7 +691,7 @@
     startBtn.textContent = "불러오는 중…";
     statusEl.textContent = "";
 
-    fetch("/api/fortune/today")
+    fetch("/api/fortune/today" + buildBirthQuery(currentProfile))
       .then(function (res) {
         return res.json();
       })
@@ -485,6 +731,20 @@
   playPauseBtn.addEventListener("click", onPlayPauseTap);
   replayBtn.addEventListener("click", onReplayTap);
   shareBtn.addEventListener("click", onShareTap);
+
+  guestStartBtn.addEventListener("click", onGuestStartTap);
+  googleLoginBtn.addEventListener("click", function () { onSocialLoginTap("google"); });
+  kakaoLoginBtn.addEventListener("click", function () { onSocialLoginTap("kakao"); });
+  logoutBtn.addEventListener("click", onLogoutTap);
+  profileNicknameInput.addEventListener("input", updateNextButtonState);
+  profileNicknameInput.addEventListener("blur", function () { renderProfileErrors(validateProfileForm()); });
+  profileBirthDateInput.addEventListener("input", updateNextButtonState);
+  profileBirthDateInput.addEventListener("change", function () { renderProfileErrors(validateProfileForm()); });
+  profileNextBtn.addEventListener("click", onProfileNextTap);
+  editProfileBtn.addEventListener("click", onEditProfileTap);
+  privacyDetailLink.addEventListener("click", onPrivacyDetailTap);
+
+  initOnboarding();
 
   // T025: Live2D 아바타 초기화 — 자산 없으면 스스로 비활성(폴백 유지).
   // 탭 이전의 대기 화면에서 로드되므로 first_text_visible·first_audio_play

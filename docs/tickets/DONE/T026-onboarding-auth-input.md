@@ -1,7 +1,7 @@
 ---
 id: T026
 title: 온보딩·로그인·입력 화면 — 게스트 우선 + 소셜 로그인 스캐폴드 + S2(닉네임·생년월일·시진) → seed 반영
-status: open
+status: done
 priority: P1
 safe: true               # 로컬 세션·로컬 스토리지 우선, 소셜은 env 키 있을 때만 활성 — 과금·외부 전송 기본 없음.
 persona: implementer

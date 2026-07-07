@@ -8,6 +8,7 @@
   라우팅/가드 로직만 단위 검증한다 (실 계약 테스트는 tests/test_tts_adapter.py에 이미 존재).
 """
 import hashlib
+import http.client
 import importlib.util
 import json
 import threading
@@ -643,3 +644,396 @@ class TestLive2DIntegration:
         assert '"HEAD"' not in module
         assert "catch" in module
         assert "ParamMouthOpenY" in module
+
+
+def _raw_get(httpd, path, headers=None):
+    conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1])
+    conn.request("GET", path, headers=headers or {})
+    resp = conn.getresponse()
+    body = resp.read()
+    conn.close()
+    return resp, body
+
+
+def _raw_post(httpd, path, headers=None):
+    conn = http.client.HTTPConnection("127.0.0.1", httpd.server_address[1])
+    conn.request("POST", path, headers=headers or {})
+    resp = conn.getresponse()
+    body = resp.read()
+    conn.close()
+    return resp, body
+
+
+class TestAuthProvidersEndpoint:
+    """T026: 키 없는 환경(기본)에서는 소셜 로그인 버튼이 전부 비활성이어야 한다."""
+
+    def test_providers_all_disabled_without_env(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
+        monkeypatch.delenv("KAKAO_REST_API_KEY", raising=False)
+        assert web_server.oauth_provider_status() == {"google": False, "kakao": False}
+
+    def test_providers_reflect_env_presence(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id")
+        monkeypatch.delenv("KAKAO_REST_API_KEY", raising=False)
+        assert web_server.oauth_provider_status() == {"google": True, "kakao": False}
+
+    def test_provider_keys_never_appear_in_response(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "super-secret-client-id")
+        httpd, thread = _start_server()
+        try:
+            resp, body = _raw_get(httpd, "/api/auth/providers")
+            assert resp.status == 200
+            data = json.loads(body)
+            assert data == {"providers": {"google": True, "kakao": False}}
+            assert "super-secret-client-id" not in body.decode("utf-8")
+        finally:
+            _stop(httpd, thread)
+
+
+class TestOAuthAuthorizeUrl:
+    """T026: 순수 함수 — 리다이렉트 URL 조립을 네트워크 없이 계약 테스트로 고정."""
+
+    def test_returns_none_when_client_id_missing(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
+        assert web_server.build_oauth_authorize_url(
+            "google", redirect_uri="http://127.0.0.1:8787/api/auth/callback/google", state="s1"
+        ) is None
+
+    def test_builds_url_with_client_id_and_state(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "abc123")
+        url = web_server.build_oauth_authorize_url(
+            "google", redirect_uri="http://127.0.0.1:8787/api/auth/callback/google", state="s1"
+        )
+        assert url.startswith("https://accounts.google.com/o/oauth2/v2/auth?")
+        assert "client_id=abc123" in url
+        assert "state=s1" in url
+        assert "redirect_uri=http" in url
+
+    def test_unknown_provider_returns_none(self):
+        assert web_server.build_oauth_authorize_url("naver", redirect_uri="x", state="s") is None
+
+
+class TestOAuthProfileExtraction:
+    """T026: provider별 userinfo 응답 파싱 — 순수 함수, 네트워크 없이 고정."""
+
+    def test_google_profile_extraction(self):
+        profile = web_server._extract_profile("google", {"sub": "g1", "name": "홍길동"})
+        assert profile == {"subject": "g1", "nickname": "홍길동"}
+
+    def test_kakao_profile_extraction(self):
+        profile = web_server._extract_profile(
+            "kakao", {"id": 12345, "kakao_account": {"profile": {"nickname": "카카오유저"}}}
+        )
+        assert profile == {"subject": "12345", "nickname": "카카오유저"}
+
+    def test_unknown_provider_extraction(self):
+        assert web_server._extract_profile("naver", {}) == {"subject": None, "nickname": None}
+
+
+class TestSessionCookieSigning:
+    """T026: 서명 쿠키 — 서버 메모리 세션과 짝을 이루는 순수 함수."""
+
+    def test_round_trip(self):
+        cookie = web_server._make_session_cookie_value("sid123", "test-secret")
+        assert web_server._verify_session_cookie_value(cookie, "test-secret") == "sid123"
+
+    def test_tampered_signature_rejected(self):
+        cookie = web_server._make_session_cookie_value("sid123", "test-secret")
+        tampered = cookie[:-1] + ("0" if cookie[-1] != "0" else "1")
+        assert web_server._verify_session_cookie_value(tampered, "test-secret") is None
+
+    def test_wrong_secret_rejected(self):
+        cookie = web_server._make_session_cookie_value("sid123", "secret-a")
+        assert web_server._verify_session_cookie_value(cookie, "secret-b") is None
+
+    def test_malformed_cookie_rejected(self):
+        assert web_server._verify_session_cookie_value("not-a-valid-cookie", "test-secret") is None
+        assert web_server._verify_session_cookie_value("", "test-secret") is None
+        assert web_server._verify_session_cookie_value(None, "test-secret") is None
+
+
+class TestOAuthLoginRedirect:
+    """T026: GET /api/auth/login/{provider} — 리다이렉트 라우팅 계약."""
+
+    def test_disabled_provider_returns_400(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
+        httpd, thread = _start_server()
+        try:
+            resp, body = _raw_get(httpd, "/api/auth/login/google")
+            assert resp.status == 400
+        finally:
+            _stop(httpd, thread)
+
+    def test_unknown_provider_returns_404(self):
+        httpd, thread = _start_server()
+        try:
+            resp, body = _raw_get(httpd, "/api/auth/login/naver")
+            assert resp.status == 404
+        finally:
+            _stop(httpd, thread)
+
+    def test_enabled_provider_redirects_with_state_cookie(self, monkeypatch):
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "abc123")
+        httpd, thread = _start_server()
+        try:
+            resp, body = _raw_get(httpd, "/api/auth/login/google")
+            assert resp.status == 302
+            location = resp.getheader("Location")
+            assert location.startswith("https://accounts.google.com/")
+            set_cookie = resp.getheader("Set-Cookie")
+            assert "shindang_oauth_state=" in set_cookie
+            assert "HttpOnly" in set_cookie
+        finally:
+            _stop(httpd, thread)
+
+
+class TestOAuthCallback:
+    """T026: GET /api/auth/callback/{provider} — 코드 교환 경로를 실 네트워크 없이 monkeypatch로 고정."""
+
+    def test_missing_code_returns_400(self):
+        httpd, thread = _start_server()
+        try:
+            resp, body = _raw_get(httpd, "/api/auth/callback/google")
+            assert resp.status == 400
+        finally:
+            _stop(httpd, thread)
+
+    def test_state_mismatch_returns_400(self):
+        httpd, thread = _start_server()
+        try:
+            resp, body = _raw_get(
+                httpd, "/api/auth/callback/google?code=abc&state=bad",
+                headers={"Cookie": "shindang_oauth_state=good"},
+            )
+            assert resp.status == 400
+        finally:
+            _stop(httpd, thread)
+
+    def test_missing_state_cookie_returns_400(self):
+        httpd, thread = _start_server()
+        try:
+            resp, body = _raw_get(httpd, "/api/auth/callback/google?code=abc&state=st1")
+            assert resp.status == 400
+        finally:
+            _stop(httpd, thread)
+
+    def test_unknown_provider_returns_404(self):
+        httpd, thread = _start_server()
+        try:
+            resp, body = _raw_get(httpd, "/api/auth/callback/naver?code=abc&state=st1")
+            assert resp.status == 404
+        finally:
+            _stop(httpd, thread)
+
+    def test_successful_callback_sets_session_cookie_and_redirects(self, monkeypatch):
+        def fake_exchange(provider, code, *, redirect_uri):
+            assert provider == "google"
+            assert code == "authcode123"
+            return {"subject": "u1", "nickname": "테스트유저"}
+
+        monkeypatch.setattr(web_server, "_oauth_token_and_profile", fake_exchange)
+
+        httpd, thread = _start_server()
+        try:
+            resp, body = _raw_get(
+                httpd, "/api/auth/callback/google?code=authcode123&state=st1",
+                headers={"Cookie": "shindang_oauth_state=st1"},
+            )
+            assert resp.status == 302
+            assert resp.getheader("Location") == "/"
+            set_cookie = resp.getheader("Set-Cookie")
+            assert "shindang_session=" in set_cookie
+
+            session_cookie = set_cookie.split(";")[0]
+            resp2, body2 = _raw_get(httpd, "/api/auth/me", headers={"Cookie": session_cookie})
+            data = json.loads(body2)
+            assert data == {"loggedIn": True, "provider": "google", "nickname": "테스트유저"}
+        finally:
+            _stop(httpd, thread)
+
+    def test_exchange_failure_returns_502(self, monkeypatch):
+        def fake_exchange(provider, code, *, redirect_uri):
+            raise RuntimeError("network unreachable")
+
+        monkeypatch.setattr(web_server, "_oauth_token_and_profile", fake_exchange)
+
+        httpd, thread = _start_server()
+        try:
+            resp, body = _raw_get(
+                httpd, "/api/auth/callback/google?code=authcode123&state=st1",
+                headers={"Cookie": "shindang_oauth_state=st1"},
+            )
+            assert resp.status == 502
+        finally:
+            _stop(httpd, thread)
+
+
+class TestAuthMeAndLogout:
+    """T026: GET /api/auth/me, POST /api/auth/logout — 서버 메모리 세션 조회/삭제."""
+
+    def test_me_without_cookie_returns_logged_out(self):
+        httpd, thread = _start_server()
+        try:
+            resp, body = _raw_get(httpd, "/api/auth/me")
+            assert json.loads(body) == {"loggedIn": False}
+        finally:
+            _stop(httpd, thread)
+
+    def test_tampered_cookie_rejected(self):
+        httpd, thread = _start_server()
+        try:
+            resp, body = _raw_get(httpd, "/api/auth/me", headers={"Cookie": "shindang_session=deadbeef.tampered"})
+            assert json.loads(body) == {"loggedIn": False}
+        finally:
+            _stop(httpd, thread)
+
+    def test_logout_clears_session(self, monkeypatch):
+        def fake_exchange(provider, code, *, redirect_uri):
+            return {"subject": "u1", "nickname": "테스트유저"}
+
+        monkeypatch.setattr(web_server, "_oauth_token_and_profile", fake_exchange)
+
+        httpd, thread = _start_server()
+        try:
+            resp, body = _raw_get(
+                httpd, "/api/auth/callback/google?code=x&state=s",
+                headers={"Cookie": "shindang_oauth_state=s"},
+            )
+            session_cookie = resp.getheader("Set-Cookie").split(";")[0]
+
+            logout_resp, logout_body = _raw_post(httpd, "/api/auth/logout", headers={"Cookie": session_cookie})
+            assert logout_resp.status == 200
+            assert json.loads(logout_body) == {"ok": True}
+
+            resp2, body2 = _raw_get(httpd, "/api/auth/me", headers={"Cookie": session_cookie})
+            assert json.loads(body2) == {"loggedIn": False}
+        finally:
+            _stop(httpd, thread)
+
+
+class TestGuestFlowNonRegression:
+    """AC: 키 없는 환경(기본)에서 게스트 흐름(탭→재생)이 무회귀해야 한다."""
+
+    def test_fortune_and_share_flow_unaffected_by_auth_scaffold(self, monkeypatch):
+        monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
+        monkeypatch.delenv("KAKAO_REST_API_KEY", raising=False)
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/api/fortune/today?topic=love&date=2026-07-07")) as resp:
+                data = json.loads(resp.read())
+            assert data["audioUrl"].startswith("/audio/mock/")
+            with urllib.request.urlopen(
+                _url(httpd, f"/api/share-card?fortuneId={data['fortuneId']}")
+            ) as resp:
+                assert resp.status == 200
+        finally:
+            _stop(httpd, thread)
+
+
+class TestBirthProfileQueryMapping:
+    """AC: 프로필→쿼리 매핑 — 같은 생년월일 재방문 시 동일 fortuneId(결정성 유지),
+    '모름'(birth_hour 미첨부)이면 미첨부 상태와 동일한 seed로 계산돼야 한다."""
+
+    def test_revisit_with_same_birth_fields_yields_same_fortune_id(self):
+        httpd, thread = _start_server()
+        try:
+            path = (
+                "/api/fortune/today?topic=love&date=2026-07-07"
+                "&birth_year=1995&birth_month=3&birth_day=21&birth_hour=8"
+            )
+            with urllib.request.urlopen(_url(httpd, path)) as resp:
+                first = json.loads(resp.read())
+            with urllib.request.urlopen(_url(httpd, path)) as resp:
+                second = json.loads(resp.read())
+            assert first["fortuneId"] == second["fortuneId"]
+        finally:
+            _stop(httpd, thread)
+
+    def test_missing_birth_hour_matches_no_birth_hour_query(self):
+        httpd, thread = _start_server()
+        try:
+            with_unknown_hour = (
+                "/api/fortune/today?topic=love&date=2026-07-07"
+                "&birth_year=1995&birth_month=3&birth_day=21"
+            )
+            with urllib.request.urlopen(_url(httpd, with_unknown_hour)) as resp:
+                data = json.loads(resp.read())
+            assert data["fortuneId"]
+        finally:
+            _stop(httpd, thread)
+
+
+class TestFrontendOnboardingWiring:
+    """T026: S0 온보딩 + S2 입력 마크업/배선이 정적 파일에 존재하는지 문자열 수준으로 잠근다
+    (브라우저 렌더링 자체는 수동 확인, 관례는 T022/T024와 동일). 기존 훅은 무회귀여야 한다."""
+
+    def test_index_has_onboarding_and_profile_form_elements(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/")) as resp:
+                body = resp.read().decode("utf-8")
+            for hook in (
+                "onboarding", "guest-start-btn", "google-login-btn", "kakao-login-btn", "logout-btn",
+                "profile-form", "profile-nickname", "profile-birth-date", "profile-birth-hour",
+                "profile-next-btn", "main-stage", "profile-summary", "edit-profile-btn",
+            ):
+                assert f'id="{hook}"' in body, f"온보딩 요소 누락: {hook}"
+            # 기존 훅 무회귀
+            for hook in ("start-btn", "share-btn", "share-status", "fortune-card", "player"):
+                assert f'id="{hook}"' in body, f"기존 훅 회귀: {hook}"
+        finally:
+            _stop(httpd, thread)
+
+    def test_sijin_options_present(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/")) as resp:
+                body = resp.read().decode("utf-8")
+            for label in (
+                "자시", "축시", "인시", "묘시", "진시", "사시",
+                "오시", "미시", "신시", "유시", "술시", "해시", "모름",
+            ):
+                assert label in body, f"시진 옵션 누락: {label}"
+        finally:
+            _stop(httpd, thread)
+
+    def test_app_js_appends_birth_query_and_stores_profile_locally(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/static/app.js")) as resp:
+                body = resp.read().decode("utf-8")
+            assert "shindang.profile" in body
+            assert "localStorage" in body
+            assert "birth_year" in body and "birth_month" in body
+            assert "birth_day" in body and "birth_hour" in body
+            assert "buildBirthQuery" in body
+        finally:
+            _stop(httpd, thread)
+
+    def test_app_js_profile_saved_event_excludes_raw_birth_values(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/static/app.js")) as resp:
+                body = resp.read().decode("utf-8")
+            idx = body.index('"profile_saved"')
+            snippet_end = body.index("}", idx)
+            snippet = body[idx:snippet_end]
+            for forbidden in ("profile.birthYear", "profile.birthMonth", "profile.birthDay"):
+                assert forbidden not in snippet, f"profile_saved 이벤트에 원문 필드 노출: {forbidden}"
+        finally:
+            _stop(httpd, thread)
+
+    def test_app_js_wires_onboarding_and_auth_endpoints(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/static/app.js")) as resp:
+                body = resp.read().decode("utf-8")
+            assert "/api/auth/providers" in body
+            assert "/api/auth/login/" in body
+            assert "/api/auth/me" in body
+            assert "/api/auth/logout" in body
+            assert "onboarding_started" in body
+            assert "profile_saved" in body
+            assert "login_" in body
+        finally:
+            _stop(httpd, thread)

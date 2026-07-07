@@ -13,41 +13,100 @@
   <h1 class="title">오늘신당</h1>
   <p class="subtitle">홍연이 오늘의 기운을 전해드려요</p>
 
-  <div id="avatar" class="avatar avatar--idle" aria-hidden="true">
-    <span class="avatar-emoji">🔮</span>
-    <img id="avatar-image" class="avatar-image" alt="" hidden>
+  <!-- S0: 온보딩/로그인 — 게스트 우선 + 소셜 로그인 스캐폴드 (T026) -->
+  <section id="onboarding" class="onboarding" hidden>
+    <p id="onboarding-account-status" class="onboarding-account-status" hidden aria-live="polite"></p>
+    <button id="guest-start-btn" class="onboarding-button onboarding-button--primary" type="button">게스트로 시작</button>
+    <button id="google-login-btn" class="onboarding-button" type="button" data-provider="google">Google로 계속</button>
+    <button id="kakao-login-btn" class="onboarding-button" type="button" data-provider="kakao">카카오로 계속</button>
+    <button id="logout-btn" class="onboarding-button onboarding-button--ghost" type="button" hidden>로그아웃</button>
+  </section>
+
+  <!-- S2: 입력 — 닉네임·생년월일·출생시간(12시진) (T026, screen-ia.md S2) -->
+  <section id="profile-form" class="profile-form" hidden>
+    <h2 class="profile-form-title">시작 전 몇 가지만 알려주세요</h2>
+
+    <label class="field-label" for="profile-nickname">닉네임 (최대 10자)</label>
+    <input id="profile-nickname" class="field-input" type="text" autocomplete="off" placeholder="닉네임을 입력해주세요">
+    <p id="profile-nickname-error" class="field-error" hidden aria-live="polite"></p>
+
+    <label class="field-label" for="profile-birth-date">생년월일</label>
+    <input id="profile-birth-date" class="field-input" type="date">
+    <p id="profile-birth-date-error" class="field-error" hidden aria-live="polite"></p>
+
+    <label class="field-label" for="profile-birth-hour">출생시간 (선택)</label>
+    <select id="profile-birth-hour" class="field-input">
+      <option value="">모름</option>
+      <option value="23">자시 (23:00–01:00)</option>
+      <option value="2">축시 (01:00–03:00)</option>
+      <option value="4">인시 (03:00–05:00)</option>
+      <option value="6">묘시 (05:00–07:00)</option>
+      <option value="8">진시 (07:00–09:00)</option>
+      <option value="10">사시 (09:00–11:00)</option>
+      <option value="12">오시 (11:00–13:00)</option>
+      <option value="14">미시 (13:00–15:00)</option>
+      <option value="16">신시 (15:00–17:00)</option>
+      <option value="18">유시 (17:00–19:00)</option>
+      <option value="20">술시 (19:00–21:00)</option>
+      <option value="22">해시 (21:00–23:00)</option>
+    </select>
+
+    <button id="profile-next-btn" class="tap-button" type="button" disabled>다음</button>
+
+    <p class="privacy-banner">
+      입력 정보는 오늘의 운세 생성에만 사용되며, 이 기기에만 저장됩니다.
+      <a id="privacy-detail-link" href="#" class="privacy-detail-link">상세 보기</a>
+    </p>
+    <p id="privacy-detail-text" class="privacy-detail-text" hidden>
+      닉네임·생년월일·출생시간은 서버로 전송되지 않고 이 기기의 localStorage에만 저장됩니다.
+      운세를 생성할 때는 생년월일·출생시간 대신 해시로 변환된 값만 서버에 전달되며,
+      원본 생년월일·출생시간은 화면이나 공유 카드 어디에도 다시 표시되지 않습니다.
+    </p>
+  </section>
+
+  <!-- 기존 재생 흐름 (T019/T022) — 온보딩·S2 완료 후에만 노출 -->
+  <div id="main-stage" hidden>
+    <p id="profile-summary" class="profile-summary" hidden>
+      <span id="profile-summary-nickname"></span>
+      <button id="edit-profile-btn" class="link-button" type="button">변경</button>
+    </p>
+
+    <div id="avatar" class="avatar avatar--idle" aria-hidden="true">
+      <span class="avatar-emoji">🔮</span>
+      <img id="avatar-image" class="avatar-image" alt="" hidden>
+    </div>
+
+    <button id="start-btn" class="tap-button" type="button">탭하여 오늘의 운세 보기</button>
+
+    <p id="status" class="status" aria-live="polite"></p>
+
+    <section id="fortune-card" class="fortune-card" hidden>
+      <p id="card-summary" class="card-summary"></p>
+      <p id="card-scores-line" class="card-scores-line"></p>
+      <ul id="card-scores" class="card-scores"></ul>
+      <div class="card-lucky">
+        <span id="card-lucky-color" class="lucky-swatch"></span>
+        <span id="card-lucky-text" class="lucky-text"></span>
+        <span id="card-lucky-item" class="lucky-item"></span>
+      </div>
+      <p id="card-avoid" class="card-avoid"></p>
+    </section>
+
+    <section id="player" class="player" hidden>
+      <p id="player-state" class="player-state" aria-live="polite">대기 중</p>
+      <div class="player-progress-track" aria-hidden="true">
+        <div id="player-progress-bar" class="player-progress-bar"></div>
+      </div>
+      <div class="player-controls">
+        <button id="listen-btn" class="listen-button" type="button">듣기</button>
+        <button id="play-pause-btn" class="play-pause-button" type="button" hidden>일시정지</button>
+        <button id="replay-btn" class="replay-button" type="button" hidden>다시 듣기</button>
+      </div>
+    </section>
+
+    <button id="share-btn" class="share-button" type="button" hidden>부적 받기</button>
+    <p id="share-status" class="status" aria-live="polite"></p>
   </div>
-
-  <button id="start-btn" class="tap-button" type="button">탭하여 오늘의 운세 보기</button>
-
-  <p id="status" class="status" aria-live="polite"></p>
-
-  <section id="fortune-card" class="fortune-card" hidden>
-    <p id="card-summary" class="card-summary"></p>
-    <p id="card-scores-line" class="card-scores-line"></p>
-    <ul id="card-scores" class="card-scores"></ul>
-    <div class="card-lucky">
-      <span id="card-lucky-color" class="lucky-swatch"></span>
-      <span id="card-lucky-text" class="lucky-text"></span>
-      <span id="card-lucky-item" class="lucky-item"></span>
-    </div>
-    <p id="card-avoid" class="card-avoid"></p>
-  </section>
-
-  <section id="player" class="player" hidden>
-    <p id="player-state" class="player-state" aria-live="polite">대기 중</p>
-    <div class="player-progress-track" aria-hidden="true">
-      <div id="player-progress-bar" class="player-progress-bar"></div>
-    </div>
-    <div class="player-controls">
-      <button id="listen-btn" class="listen-button" type="button">듣기</button>
-      <button id="play-pause-btn" class="play-pause-button" type="button" hidden>일시정지</button>
-      <button id="replay-btn" class="replay-button" type="button" hidden>다시 듣기</button>
-    </div>
-  </section>
-
-  <button id="share-btn" class="share-button" type="button" hidden>부적 받기</button>
-  <p id="share-status" class="status" aria-live="polite"></p>
 </main>
 <script src="/static/live2d-avatar.js"></script>
 <script src="/static/app.js"></script>
