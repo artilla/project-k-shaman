@@ -18,6 +18,7 @@ _DEFAULT_EVENTS_LOG_PATH = _WEB_DIR.parent.parent / "state" / "events" / "playba
 
 _CACHE_HIT_RATE_THRESHOLD = 0.70
 _COST_PER_SESSION_THRESHOLD_USD = 0.01
+_SHARE_RATE_THRESHOLD = 0.08  # 베타 임계 공유율 8% (v3 §13, T021)
 
 
 def load_records(path: Path = _DEFAULT_EVENTS_LOG_PATH) -> list:
@@ -43,12 +44,16 @@ def summarize(records: list) -> dict:
             "cacheHitRate": float|None,   # hit 세션 수 / (hit+miss 세션 수), mixed/unknown 제외
             "newSynthesisCount": int,     # tts_generate_complete 이벤트 총합
             "estimatedNewSynthesisCostUsd": float,
+            "shareInitiatedRate": float|None,  # share_initiated 기록 수 / 텍스트 노출 세션 수 (T021)
+            "shareCompletedRate": float|None,  # share_completed 기록 수 / 텍스트 노출 세션 수 (T021)
         }
     """
     text_latencies = []
     audio_latencies = []
     cache_statuses = []
     synthesis_costs = []
+    share_initiated_count = 0
+    share_completed_count = 0
 
     for record in records:
         summary = record.get("summary", {})
@@ -58,12 +63,20 @@ def summarize(records: list) -> dict:
             audio_latencies.append(summary["audioLatencyMs"])
         if summary.get("cacheStatus") in ("hit", "miss"):
             cache_statuses.append(summary["cacheStatus"])
-        for event in record.get("events", []):
+        events = record.get("events", [])
+        for event in events:
             if event.get("event") == "tts_generate_complete":
                 synthesis_costs.append(event.get("costUsd", 0))
+        if any(e.get("event") == "share_initiated" for e in events):
+            share_initiated_count += 1
+        if any(e.get("event") == "share_completed" for e in events):
+            share_completed_count += 1
 
     hit_count = cache_statuses.count("hit")
     cache_hit_rate = (hit_count / len(cache_statuses)) if cache_statuses else None
+
+    # "부적 받기" 버튼은 텍스트 노출 시점에 나타나므로, 텍스트 노출 세션 수를 공유율 분모로 쓴다.
+    eligible_sessions = len(text_latencies)
 
     return {
         "sessions": len(records),
@@ -72,6 +85,8 @@ def summarize(records: list) -> dict:
         "cacheHitRate": cache_hit_rate,
         "newSynthesisCount": len(synthesis_costs),
         "estimatedNewSynthesisCostUsd": round(sum(synthesis_costs), 5),
+        "shareInitiatedRate": (share_initiated_count / eligible_sessions) if eligible_sessions else None,
+        "shareCompletedRate": (share_completed_count / eligible_sessions) if eligible_sessions else None,
     }
 
 
@@ -91,6 +106,13 @@ def format_report(summary: dict) -> str:
         lines.append(
             f"est. cost/session ${cost_per_session:.5f} "
             f"(threshold <= ${_COST_PER_SESSION_THRESHOLD_USD}): {verdict}"
+        )
+
+    if summary["shareCompletedRate"] is not None:
+        verdict = "PASS" if summary["shareCompletedRate"] >= _SHARE_RATE_THRESHOLD else "BELOW threshold"
+        lines.append(
+            f"shareCompletedRate {summary['shareCompletedRate']:.2%} "
+            f"(threshold >= {_SHARE_RATE_THRESHOLD:.0%}): {verdict}"
         )
 
     return "\n".join(lines)

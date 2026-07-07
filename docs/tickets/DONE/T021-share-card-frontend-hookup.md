@@ -1,7 +1,7 @@
 ---
 id: T021
 title: 공유 카드 프론트 연결 — 재생 후 부적 받기(/api/share-card + 다운로드/Web Share) + 공유 이벤트 계측
-status: open
+status: done
 priority: P1
 safe: true               # mock/실 운세 객체 → 기존 T006 렌더러 재사용, 과금·외부 업로드 없음.
 persona: implementer

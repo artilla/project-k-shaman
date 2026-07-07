@@ -15,6 +15,7 @@ T020: `--backend openai` 명시 옵트인 + OPENAI_API_KEY 존재 시에만 T018
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 import logging
 import math
@@ -29,9 +30,21 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 _WEB_DIR = Path(__file__).resolve().parent
+_ENGINE_DIR = _WEB_DIR.parent
 sys.path.insert(0, str(_WEB_DIR))
 from pipeline import build_playback_response  # noqa: E402
 from event_timeline import summarize_latency, validate_timeline  # noqa: E402
+
+
+def _load_engine_module(name: str):
+    spec = importlib.util.spec_from_file_location(name, _ENGINE_DIR / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# T021: T006 정적 부적 렌더러를 실 재생 흐름(GET /api/share-card)에 연결한다.
+_share_card = _load_engine_module("share_card")
 
 _STATIC_DIR = _WEB_DIR / "static"
 _STATE_DIR = _WEB_DIR.parent.parent / "state"
@@ -48,6 +61,11 @@ _KEY_RE = re.compile(r"^[0-9a-f]{16,64}$")
 _DEFAULT_DATE = "2026-01-01"
 _DEFAULT_TOPIC = "total"
 _DEFAULT_CHARACTER_ID = "hongyeon"
+
+# T021: 공유 카드는 닉네임을 받지 않는다 (개인정보 최소화) — 항상 이 기본값으로 렌더링한다.
+_SHARE_CARD_NICKNAME = "손님"
+# fortuneId→fortune 매핑의 세션 범위 상한 — 초과 시 가장 오래된 항목부터 제거 (메모리 누수 방지).
+_FORTUNE_CACHE_MAX = 500
 
 _STATIC_CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -121,6 +139,14 @@ def _append_event_log(record: dict) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def _remember_fortune(cache: dict, fortune_id: str, fortune: dict) -> None:
+    """fortuneId→fortune 매핑을 세션 범위 상한(_FORTUNE_CACHE_MAX) 안에서 유지한다."""
+    cache[fortune_id] = fortune
+    if len(cache) > _FORTUNE_CACHE_MAX:
+        oldest_key = next(iter(cache))
+        del cache[oldest_key]
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "FortuneWebSkeleton/0.1"
 
@@ -169,7 +195,17 @@ class _Handler(BaseHTTPRequestHandler):
         result = build_playback_response(request, tts_backend=tts_backend)
         cache_key = result["tts"]["cacheKey"]
         audio_url = _real_audio_url_for(cache_key) if backend_mode == "openai" else _mock_audio_url_for(cache_key)
+        _remember_fortune(self.server.fortune_cache_by_id, result["fortuneId"], result["fortune"])
         self._send_json(200, {**result, "audioUrl": audio_url})
+
+    def _handle_share_card(self, query: dict) -> None:
+        fortune_id = query.get("fortuneId", [None])[0]
+        fortune = self.server.fortune_cache_by_id.get(fortune_id) if fortune_id else None
+        if fortune is None:
+            self._send_json(404, {"error": "fortune not found"})
+            return
+        svg = _share_card.render_share_card_svg(fortune, nickname=_SHARE_CARD_NICKNAME)
+        self._send_bytes(200, "image/svg+xml; charset=utf-8", svg.encode("utf-8"))
 
     def _handle_audio_mock(self, key_hash: str) -> None:
         if not _KEY_RE.match(key_hash):
@@ -215,6 +251,8 @@ class _Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/fortune/today":
             self._handle_fortune_today(query)
+        elif parsed.path == "/api/share-card":
+            self._handle_share_card(query)
         elif parsed.path.startswith("/audio/mock/") and parsed.path.endswith(".wav"):
             key_hash = parsed.path[len("/audio/mock/"):-len(".wav")]
             self._handle_audio_mock(key_hash)
@@ -242,6 +280,7 @@ def make_server(address=("127.0.0.1", 8787), *, backend: str = "mock") -> Thread
     """
     httpd = ThreadingHTTPServer(address, _Handler)
     httpd.tts_backend_mode = backend
+    httpd.fortune_cache_by_id = {}
     return httpd
 
 

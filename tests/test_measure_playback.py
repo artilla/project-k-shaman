@@ -32,6 +32,19 @@ def _record(text_latency, audio_latency, cache_status, synthesis_costs=()):
     }
 
 
+def _share_record(*, share_initiated=False, share_completed=False, text_latency=100):
+    events = []
+    if share_initiated:
+        events.append({"event": "share_initiated"})
+    if share_completed:
+        events.append({"event": "share_completed"})
+    return {
+        "fortuneId": "mock_x",
+        "events": events,
+        "summary": {"textLatencyMs": text_latency, "audioLatencyMs": text_latency + 200, "cacheStatus": "hit"},
+    }
+
+
 class TestLoadRecords:
     def test_missing_file_returns_empty_list(self, tmp_path):
         assert load_records(tmp_path / "does-not-exist.jsonl") == []
@@ -96,6 +109,41 @@ class TestSummarize:
         assert summary["cacheHitRate"] is None  # unknown은 hit/miss 분모에서 제외
 
 
+class TestShareRate:
+    """T021: share_initiated/share_completed → 공유율(베타 임계 8%, v3 §13) 집계."""
+
+    def test_share_rates_none_when_no_eligible_sessions(self):
+        summary = summarize([])
+        assert summary["shareInitiatedRate"] is None
+        assert summary["shareCompletedRate"] is None
+
+    def test_share_rates_computed_over_eligible_sessions(self):
+        records = [
+            _share_record(share_initiated=True, share_completed=True),
+            _share_record(share_initiated=True, share_completed=False),
+            _share_record(share_initiated=False, share_completed=False),
+            _share_record(share_initiated=False, share_completed=False),
+        ]
+        summary = summarize(records)
+        assert summary["shareInitiatedRate"] == 0.5
+        assert summary["shareCompletedRate"] == 0.25
+
+    def test_share_completed_reported_via_separate_record_still_counted(self):
+        """부적 받기는 재생 리포트와 별도 /api/event 호출로 도착할 수 있다 —
+        textLatencyMs가 없는 그 레코드는 분모(eligible_sessions)엔 안 들어가지만
+        분자(share 카운트)에는 반영되어야 한다."""
+        records = [
+            _record(100, 300, "hit"),
+            {
+                "fortuneId": "mock_x",
+                "events": [{"event": "share_completed"}],
+                "summary": {"textLatencyMs": None, "audioLatencyMs": None, "cacheStatus": "unknown"},
+            },
+        ]
+        summary = summarize(records)
+        assert summary["shareCompletedRate"] == 1.0
+
+
 class TestFormatReport:
     def test_reports_pass_when_thresholds_met(self):
         records = [_record(100, 300, "hit") for _ in range(10)]
@@ -113,3 +161,14 @@ class TestFormatReport:
         report = format_report(summarize([]))
         assert "threshold" not in report
         assert "cost/session" not in report
+
+    def test_reports_pass_when_share_completed_rate_meets_threshold(self):
+        records = [_share_record(share_initiated=True, share_completed=True) for _ in range(10)]
+        report = format_report(summarize(records))
+        assert "shareCompletedRate" in report
+        assert "PASS" in report
+
+    def test_reports_below_threshold_when_share_completed_rate_low(self):
+        records = [_share_record(share_initiated=False, share_completed=False) for _ in range(10)]
+        report = format_report(summarize(records))
+        assert "BELOW threshold" in report

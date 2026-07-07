@@ -271,6 +271,83 @@ class TestPresynth:
         assert "already warm" in out
 
 
+class TestShareCardEndpoint:
+    """T021: GET /api/share-card?fortuneId=<id> — T006 렌더러를 실 재생 흐름에 연결."""
+
+    def test_valid_fortune_id_returns_svg(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/api/fortune/today?topic=love&date=2026-07-07")) as resp:
+                data = json.loads(resp.read())
+            with urllib.request.urlopen(
+                _url(httpd, f"/api/share-card?fortuneId={data['fortuneId']}")
+            ) as resp:
+                assert resp.status == 200
+                assert resp.headers.get("Content-Type", "").startswith("image/svg+xml")
+                body = resp.read().decode("utf-8")
+            assert body.startswith("<svg")
+            assert "오늘신당" in body
+        finally:
+            _stop(httpd, thread)
+
+    def test_unknown_fortune_id_returns_404(self):
+        httpd, thread = _start_server()
+        try:
+            try:
+                urllib.request.urlopen(_url(httpd, "/api/share-card?fortuneId=does-not-exist"))
+                raised = False
+            except urllib.error.HTTPError as e:
+                raised = True
+                assert e.code == 404
+            assert raised
+        finally:
+            _stop(httpd, thread)
+
+    def test_missing_fortune_id_param_returns_404(self):
+        httpd, thread = _start_server()
+        try:
+            try:
+                urllib.request.urlopen(_url(httpd, "/api/share-card"))
+                raised = False
+            except urllib.error.HTTPError as e:
+                raised = True
+                assert e.code == 404
+            assert raised
+        finally:
+            _stop(httpd, thread)
+
+    def test_share_card_does_not_leak_birth_fields_or_full_seed_hash(self):
+        httpd, thread = _start_server()
+        try:
+            path = (
+                "/api/fortune/today?topic=love&date=2026-07-07"
+                "&birth_year=1990&birth_month=5&birth_day=14&birth_hour=8"
+            )
+            with urllib.request.urlopen(_url(httpd, path)) as resp:
+                data = json.loads(resp.read())
+            with urllib.request.urlopen(
+                _url(httpd, f"/api/share-card?fortuneId={data['fortuneId']}")
+            ) as resp:
+                body = resp.read().decode("utf-8")
+            assert "1990" not in body
+            assert data["fortune"]["meta"]["seed_hash"] not in body
+        finally:
+            _stop(httpd, thread)
+
+
+class TestFortuneCacheEviction:
+    """세션 범위 상한 — 초과 시 가장 오래된 항목부터 제거 (메모리 누수 방지, 위험 완화)."""
+
+    def test_evicts_oldest_when_over_capacity(self):
+        cache = {}
+        limit = web_server._FORTUNE_CACHE_MAX
+        for i in range(limit + 1):
+            web_server._remember_fortune(cache, f"id{i}", {"n": i})
+        assert len(cache) == limit
+        assert "id0" not in cache
+        assert f"id{limit}" in cache
+
+
 class TestAudioRealEndpoint:
     def test_serves_existing_real_audio_file(self):
         httpd, thread = _start_server(backend="openai")

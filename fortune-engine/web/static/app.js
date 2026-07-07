@@ -6,6 +6,10 @@
   const startBtn = document.getElementById("start-btn");
   const textEl = document.getElementById("fortune-text");
   const statusEl = document.getElementById("status");
+  const shareBtn = document.getElementById("share-btn");
+  const shareStatusEl = document.getElementById("share-status");
+
+  let currentFortuneId = null;
 
   function renderText(script) {
     textEl.innerHTML = "";
@@ -33,6 +37,67 @@
     });
   }
 
+  function downloadBlob(blob, fileName) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function shareOrDownload(fortuneId, blob) {
+    const fileName = "hongyeon-share-" + fortuneId + ".svg";
+    if (window.navigator.share) {
+      const file = new File([blob], fileName, { type: "image/svg+xml" });
+      const canShareFile = !window.navigator.canShare || window.navigator.canShare({ files: [file] });
+      if (canShareFile) {
+        return window.navigator
+          .share({ files: [file], title: "오늘신당 홍연 부적" })
+          .catch(function () {
+            return downloadBlob(blob, fileName);
+          });
+      }
+    }
+    downloadBlob(blob, fileName);
+    return Promise.resolve();
+  }
+
+  // 재생 리포트(reportEvents)와 별도 시점에 눌리므로, 공유 이벤트는 매번 새 /api/event 호출로 보낸다.
+  function onShareTap() {
+    if (!currentFortuneId) {
+      return;
+    }
+    const fortuneId = currentFortuneId;
+    shareBtn.disabled = true;
+    shareStatusEl.textContent = "부적을 준비하는 중…";
+    reportEvents(fortuneId, Date.now(), [{ event: "share_initiated", clientTs: Date.now() }], []);
+
+    fetch("/api/share-card?fortuneId=" + encodeURIComponent(fortuneId))
+      .then(function (res) {
+        if (!res.ok) {
+          throw new Error("부적을 불러오지 못했어요");
+        }
+        return res.blob();
+      })
+      .then(function (blob) {
+        return shareOrDownload(fortuneId, blob);
+      })
+      .then(function () {
+        shareStatusEl.textContent = "부적을 받았어요";
+        reportEvents(fortuneId, Date.now(), [{ event: "share_completed", clientTs: Date.now() }], []);
+      })
+      .catch(function (err) {
+        shareStatusEl.textContent = "오류: " + err.message;
+        console.error(err);
+      })
+      .finally(function () {
+        shareBtn.disabled = false;
+      });
+  }
+
   function onTap() {
     const sessionStartMs = Date.now();
 
@@ -56,6 +121,11 @@
         renderText(data.script);
         clientEvents.push({ event: "first_text_visible", clientTs: Date.now() });
         statusEl.textContent = "음성을 불러오는 중…";
+
+        // 텍스트 노출 시점에 "부적 받기"를 노출한다 — 오디오 재생 성공 여부와 무관하다.
+        currentFortuneId = data.fortuneId;
+        shareStatusEl.textContent = "";
+        shareBtn.hidden = false;
 
         return fetch(data.audioUrl)
           .then(function (res) {
@@ -85,4 +155,5 @@
   }
 
   startBtn.addEventListener("click", onTap);
+  shareBtn.addEventListener("click", onShareTap);
 })();

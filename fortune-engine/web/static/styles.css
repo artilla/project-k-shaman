@@ -46,6 +46,22 @@ body {
   opacity: 0.6;
 }
 
+.share-button {
+  width: 100%;
+  margin-top: 20px;
+  padding: 14px;
+  font-size: 16px;
+  border: 2px solid #e6a0ff;
+  border-radius: 12px;
+  background: transparent;
+  color: #e6a0ff;
+  font-weight: 700;
+}
+
+.share-button:disabled {
+  opacity: 0.6;
+}
+
 .status {
   min-height: 20px;
   margin-top: 16px;
