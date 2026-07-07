@@ -25,6 +25,9 @@ state/autopilot_grant
 # T018: real TTS synthesis output (audio bytes — never commit)
 state/tts_cache/
 
+# T019: web playback session event log (runtime instrumentation, not source)
+state/events/
+
 # OS / editor
 .DS_Store
 .idea/

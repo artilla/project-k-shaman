@@ -1,7 +1,7 @@
 ---
 id: T019
 title: 재생 프론트 스켈레톤 — 탭 오디오 컨텍스트·텍스트 먼저·presynth 재생 + 3초 경로 실측 훅
-status: open
+status: done
 priority: P1
 safe: true               # 프론트 스켈레톤 + mock 파이프라인 — 과금·개인정보 경로 없음.
 persona: implementer

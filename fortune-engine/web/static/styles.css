@@ -1,0 +1,66 @@
+/* T019: 스켈레톤 스타일 — 디자인 폴리시는 non-goal, 모바일 뷰포트 가독성만 확보한다. */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  background: #1b1029;
+  color: #f5eefc;
+}
+
+.stage {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 24px 20px 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.title {
+  font-size: 28px;
+  margin: 12px 0 4px;
+}
+
+.subtitle {
+  margin: 0 0 24px;
+  opacity: 0.75;
+}
+
+.tap-button {
+  width: 100%;
+  padding: 16px;
+  font-size: 18px;
+  border: none;
+  border-radius: 12px;
+  background: #e6a0ff;
+  color: #1b1029;
+  font-weight: 700;
+}
+
+.tap-button:disabled {
+  opacity: 0.6;
+}
+
+.status {
+  min-height: 20px;
+  margin-top: 16px;
+  font-size: 14px;
+  opacity: 0.8;
+}
+
+.fortune-text {
+  margin-top: 20px;
+  text-align: left;
+  width: 100%;
+}
+
+.segment {
+  margin: 0 0 12px;
+  line-height: 1.6;
+  font-size: 16px;
+}
