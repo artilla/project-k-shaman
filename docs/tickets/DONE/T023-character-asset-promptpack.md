@@ -11,6 +11,8 @@ blocks: ["T024"]
 labels: ["character", "assets", "docs"]
 created: 2026-07-07
 spec_ref: docs/decisions/0002-character-asset-pipeline.md
+completed_at: 2026-07-08T00:35:36+09:00
+started_at: 2026-07-08T00:24:37+09:00
 ---
 
 # T023 — 홍연 에셋 프롬프트 팩 + 선정 킷
