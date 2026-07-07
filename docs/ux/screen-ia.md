@@ -212,6 +212,18 @@ S6 공유  (정적 부적 카드 이미지 · 외부 앱 공유)  ← share_clic
 - "다시 듣기" 버튼 (재생 실패 폴백)
 - "결과 카드 보기" 버튼 (blessing 완료 후 또는 언제든 접근 가능)
 
+**FSM 상태 ↔ 에셋 파일 매핑** (ADR-0002, T023 `docs/assets/hongyeon-promptpack.md`):
+
+> 에셋 부재 시 현재 플레이스홀더(수정구슬)로 폴백 — 에셋은 진행을 막지 않는다 (ADR-0002 폴백 불변식, T024).
+
+| FSM 상태 | 에셋 파일 | 비고 |
+|---|---|---|
+| `greeting` | `hongyeon-greeting.webp` | phase A 등장 애니메이션과 phase D 재생 시작 시 재사용 |
+| `idle` | `hongyeon-idle.webp` | phase B·C 대기/텍스트 노출 구간 |
+| `speaking` | `hongyeon-speaking.webp` | 음량 기반 입 모양 동기화는 근사(WebAudio AnalyserNode → 글로우/스케일 펄스) — 립싱크 아님 |
+| `blessing` | `hongyeon-blessing.webp` | 본문 완료 → blessing 세그먼트 |
+| (S5/S6 결과·공유 카드 전용) | `hongyeon-share-card.webp` | FSM 상태가 아닌 정적 카드 구성 요소 — §2 S5·S6 참조 |
+
 ---
 
 ### S5 — 결과 카드

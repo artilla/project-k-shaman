@@ -1,7 +1,7 @@
 ---
 id: T023
 title: 홍연 에셋 프롬프트 팩 + 선정 킷 — 상태 4컷·공유카드 1컷 생성 사양 정본화 (ADR-0002)
-status: open
+status: done
 priority: P1
 safe: true               # 문서/사양만 — 생성·과금은 운영자 세션에서 별도 수행.
 persona: planner
