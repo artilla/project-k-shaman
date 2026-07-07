@@ -1,7 +1,7 @@
 ---
 id: T020
 title: 실 TTS 오디오 서빙 + 3초 재생 경로 실측 — E2E 베타 데모 실경로 완성
-status: open
+status: done
 priority: P1
 safe: false              # 실 프로바이더 과금 호출 경로 (T018과 동일, master-spec §3 hold) — 실행엔 승인 마커 필요.
 persona: implementer
@@ -38,11 +38,11 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - T006 공유카드 프론트 연결(후속 티켓), 캐릭터 모션/연출, PWA·배포(§3 hold), 오디오 스트리밍 최적화(범위는 파일 서빙까지).
 
 ## 4. 수용 기준 (Acceptance Criteria)
-- [ ] 기본 실행(`python3 fortune-engine/web/server.py`)은 기존과 완전 동일 (mock 고정, 과금 0)
-- [ ] `--backend openai` + 키 존재: 탭 1회 → 텍스트 즉시 → **실 합성 음성** 재생, 이벤트 타임라인 완비
-- [ ] 같은 seed 재방문: `cache_hit` 경로 재생 (신규합성 0회) — 실 오디오 파일 재서빙
-- [ ] 실측 요약 1회 산출: `tap→first_audio_play` ms (presynth/cache_hit 경로), 신규합성 시 비용 추정 — 티켓 완료 노트 또는 `docs/`에 기록
-- [ ] 키·응답 원문이 코드/로그/픽스처에 없음, `python3 -m pytest tests/` GREEN (키 없는 환경)
+- [x] 기본 실행(`python3 fortune-engine/web/server.py`)은 기존과 완전 동일 (mock 고정, 과금 0)
+- [x] `--backend openai` + 키 존재: 탭 1회 → 텍스트 즉시 → **실 합성 음성** 재생, 이벤트 타임라인 완비
+- [x] 같은 seed 재방문: `cache_hit` 경로 재생 (신규합성 0회) — 실 오디오 파일 재서빙
+- [x] 실측 요약 1회 산출: `tap→first_audio_play` ms (presynth/cache_hit 경로), 신규합성 시 비용 추정 — 티켓 완료 노트 또는 `docs/`에 기록
+- [x] 키·응답 원문이 코드/로그/픽스처에 없음, `python3 -m pytest tests/` GREEN (키 없는 환경)
 
 ## 5. 테스트 계획
 
@@ -70,3 +70,12 @@ git revert <commit>   # 서버 플래그·서빙 경로·스크립트만. 기본
 ## 8. 메모 / 결정 이력
 
 - 2026-07-07 기안: T019 검증(스위트 215 GREEN·E2E 스모크) 직후. 마일스톤 ③ 잔여분 중 "소리가 진짜"가 최우선이라 판단 — 공유카드(T006 연결)는 후속.
+- 2026-07-07 구현 완료 + 실측 (승인 마커 docs/approvals/T020.md 기준 실행):
+  - 변경: `fortune-engine/web/pipeline.py`(`tts_backend` 옵트인 배선), `fortune-engine/web/server.py`(`--backend openai`/`--presynth` CLI, `/audio/real/*` 서빙, 키 없으면 기동 거부), `fortune-engine/web/measure_playback.py`(신규, 실측 요약 스크립트).
+  - 실측 (`OPENAI_API_KEY` 존재 환경, `--backend openai --presynth`로 실행):
+    - presynth 1회 실합성 발생 (신규), 이후 기본 seed 탭 요청은 fortune·tts 두 레이어 모두 `cache_hit` — 재방문 신규합성 0회 재확인.
+    - 실측 지연: `tap→first_text_visible` **29ms**, `tap→first_audio_play` **100ms** (둘 다 §1.6-② 3초 목표 대비 크게 여유).
+    - 실 오디오 파일 정상 서빙 확인 (`/audio/real/<hash>.mp3`, 642432 bytes, 유효 mp3).
+    - `measure_playback.py` 누적 로그(개발 중 축적된 mock 세션 포함 20건) 집계: cacheHitRate 94.7% (임계 ≥70% PASS), 세션당 추정 비용 $0.00075 (임계 ≤$0.01 PASS).
+  - 실과금: 이번 구현 세션 중 실제 청구된 OpenAI TTS 호출은 총 3회 — presynth 1회(추정 $0.015) + T018 기존 실계약 테스트(`test_real_synthesis_produces_audio_and_events`)가 셸에 이미 존재하던 `OPENAI_API_KEY` 때문에 의도치 않게 2회 자동 실행(각 추정 ~$0.01, 매우 짧은 고정 픽스처 텍스트). 총 추정 비용 ≈ $0.035 — 승인 한도(≤50회·≤$1) 내. 이후 검증은 `env -u OPENAI_API_KEY`로 명시 격리해 재발 방지.
+  - `./scripts/run_checks.sh`: pytest·ruff 등 코드 검증 항목 전부 GREEN. bats 회귀만 실패하는데, 이 실패는 `timeout`/`gtimeout` 바이너리가 이 로컬 macOS 환경에 없어서 발생하는 기존(T020 이전 master에서도 동일) 환경 문제이며 `tests/run-headless-timeout.bats`(T020 범위 밖)에 한정된다 — `git stash`로 비교해 사전 존재를 확인함.

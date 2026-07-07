@@ -3,6 +3,8 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).parent.parent
 PIPELINE_PATH = ROOT / "fortune-engine" / "web" / "pipeline.py"
 CACHE_LAYER_PATH = ROOT / "fortune-engine" / "cache_layer.py"
@@ -88,3 +90,58 @@ class TestRevisitCacheHit:
         result = build_playback_response(other_req, store=store)
         fortune_layer_events = [e for e in result["events"] if e.get("layer") == "fortune"]
         assert any(e["event"] == "cache_miss" for e in fortune_layer_events)
+
+
+class TestTtsBackendInjection:
+    """T020: tts_backend 옵트인 배선 — 실백엔드 분기를 mock backend 주입으로 단위 검증한다."""
+
+    def test_default_tts_backend_is_unchanged_mock_path(self):
+        """tts_backend 인자를 생략하면 기존 T019 mock 경로와 완전히 동일하다."""
+        result = build_playback_response(_BASE_REQ, store=InMemoryCacheStore())
+        assert result["audioUrl"].startswith("mock://")
+
+    def test_callable_tts_backend_is_invoked(self):
+        calls = []
+
+        def spy_backend(script, cache_key, metadata):
+            calls.append(cache_key)
+            return {"audioUrl": "mock://spy-injected"}
+
+        result = build_playback_response(_BASE_REQ, store=InMemoryCacheStore(), tts_backend=spy_backend)
+        assert len(calls) == 1
+        assert result["audioUrl"] == "mock://spy-injected"
+
+    def test_callable_tts_backend_cache_key_matches_default_formula(self):
+        received = {}
+
+        def spy_backend(script, cache_key, metadata):
+            received["cache_key"] = cache_key
+            return {"audioUrl": "mock://spy"}
+
+        result = build_playback_response(_BASE_REQ, store=InMemoryCacheStore(), tts_backend=spy_backend)
+        assert received["cache_key"] == result["tts"]["cacheKey"]
+
+    def test_openai_backend_without_api_key_raises(self, monkeypatch):
+        """실백엔드("openai") 옵트인 + 키 없음 → 네트워크 호출 전에 즉시 거부 (T018 계약)."""
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with pytest.raises(RuntimeError):
+            build_playback_response(_BASE_REQ, store=InMemoryCacheStore(), tts_backend="openai")
+
+    def test_revisit_with_injected_backend_skips_new_synthesis(self):
+        """AC: 같은 seed 재방문 → cache_hit 경로 재생, 신규합성 0회 (백엔드 종류와 무관하게 성립).
+
+        실백엔드("openai") 자체는 네트워크가 필요해 여기서 직접 쓰지 않지만, get_or_compute의
+        dedup은 tts_backend 종류와 무관하게 캐시 키 기준으로 동작하므로 spy backend 주입으로
+        동일한 배선을 네트워크 없이 검증한다.
+        """
+        calls = []
+
+        def spy_backend(script, cache_key, metadata):
+            calls.append(cache_key)
+            return {"audioUrl": "mock://spy"}
+
+        store = InMemoryCacheStore()
+        build_playback_response(_BASE_REQ, store=store, tts_backend=spy_backend)
+        build_playback_response(_BASE_REQ, store=store, tts_backend=spy_backend)
+
+        assert len(calls) == 1, "재방문인데 백엔드가 다시 호출됨 (신규 합성 발생)"
