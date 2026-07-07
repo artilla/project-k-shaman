@@ -7,6 +7,7 @@
   const startBtn = document.getElementById("start-btn");
   const statusEl = document.getElementById("status");
   const avatarEl = document.getElementById("avatar");
+  const avatarImageEl = document.getElementById("avatar-image");
 
   const fortuneCardEl = document.getElementById("fortune-card");
   const cardSummaryEl = document.getElementById("card-summary");
@@ -50,6 +51,11 @@
     done: "다 들었어요",
   };
 
+  // T024/ADR-0002: 상태별 정지컷 에셋(hongyeon-{state}.webp) — 기능 감지 후 존재하는 것만 스왑,
+  // 부재 시 현재 이모지 플레이스홀더 그대로 유지한다(폴백 불변식). 립싱크 아님.
+  const AVATAR_ASSET_STATES = ["greeting", "idle", "speaking", "blessing"];
+  const avatarAssetAvailable = {};
+
   let currentFortuneId = null;
   let currentScript = null;
   let currentAudioUrl = null;
@@ -58,9 +64,104 @@
   let audioEl = null;
   let segmentBoundaries = null; // narration 세그먼트별 누적 종료 시각(초)
 
+  // speaking 음량 글로우용 WebAudio 배선 — AudioContext/AnalyserNode는 프로세스당 한 번만 만들어
+  // 재사용한다(§11.2 autoplay 금지와 무관, 항상 사용자 제스처인 듣기/다시 듣기 탭 안에서만 생성).
+  let audioCtx = null;
+  let analyserNode = null;
+  let glowRafId = null;
+
+  function avatarAssetUrl(state) {
+    return "/static/assets/hongyeon-" + state + ".webp";
+  }
+
+  function preloadAvatarAssets() {
+    AVATAR_ASSET_STATES.forEach(function (state) {
+      if (state in avatarAssetAvailable) {
+        return;
+      }
+      const img = new Image();
+      img.onload = function () {
+        avatarAssetAvailable[state] = true;
+        if (avatarEl.className.indexOf("avatar--" + state) !== -1) {
+          applyAvatarAsset(state);
+        }
+      };
+      img.onerror = function () {
+        // 에셋 부재는 정상 경로다(운영자 미배치) — 조용히 폴백만 유지한다.
+        avatarAssetAvailable[state] = false;
+      };
+      img.src = avatarAssetUrl(state);
+    });
+  }
+
+  function applyAvatarAsset(state) {
+    if (!avatarAssetAvailable[state]) {
+      avatarImageEl.hidden = true;
+      avatarImageEl.classList.remove("avatar-image--visible");
+      return;
+    }
+    avatarImageEl.classList.remove("avatar-image--visible");
+    avatarImageEl.src = avatarAssetUrl(state);
+    avatarImageEl.hidden = false;
+    requestAnimationFrame(function () {
+      avatarImageEl.classList.add("avatar-image--visible");
+    });
+  }
+
   function setPlayerState(state) {
     playerStateEl.textContent = PLAYER_STATE_LABELS[state] || state;
-    avatarEl.className = "avatar avatar--" + (state === "done" ? "idle" : state);
+    const avatarState = state === "done" ? "idle" : state;
+    avatarEl.className = "avatar avatar--" + avatarState;
+    applyAvatarAsset(avatarState);
+  }
+
+  function ensureAudioAnalyser(audio) {
+    if (analyserNode) {
+      return analyserNode;
+    }
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) {
+      return null;
+    }
+    try {
+      audioCtx = new AudioContextClass();
+      const sourceNode = audioCtx.createMediaElementSource(audio);
+      analyserNode = audioCtx.createAnalyser();
+      analyserNode.fftSize = 256;
+      sourceNode.connect(analyserNode);
+      analyserNode.connect(audioCtx.destination);
+    } catch (err) {
+      analyserNode = null;
+    }
+    return analyserNode;
+  }
+
+  function startGlowLoop() {
+    if (!analyserNode) {
+      return;
+    }
+    const freqData = new Uint8Array(analyserNode.frequencyBinCount);
+    (function tick() {
+      if (!analyserNode) {
+        return;
+      }
+      analyserNode.getByteFrequencyData(freqData);
+      let sum = 0;
+      for (let i = 0; i < freqData.length; i++) {
+        sum += freqData[i];
+      }
+      const level = Math.min(1, sum / freqData.length / 128);
+      avatarEl.style.setProperty("--glow-level", level.toFixed(3));
+      glowRafId = requestAnimationFrame(tick);
+    })();
+  }
+
+  function stopGlowLoop() {
+    if (glowRafId) {
+      cancelAnimationFrame(glowRafId);
+      glowRafId = null;
+    }
+    avatarEl.style.setProperty("--glow-level", "0");
   }
 
   function renderScoreBars(scores) {
@@ -260,11 +361,13 @@
     playerProgressBarEl.style.width = "100%";
     setPlayerState("done");
     showReplayControls();
+    stopGlowLoop();
   }
 
   function onAudioError() {
     statusEl.textContent = "오디오 재생에 실패했어요. 다시 들어보세요.";
     showReplayControls();
+    stopGlowLoop();
   }
 
   function ensureAudioElement(audioUrl) {
@@ -283,14 +386,16 @@
   }
 
   // "듣기" 탭 = phase D 진입점. 여기서만 오디오를 실제로 연다 (autoplay 금지, v3 §11.2).
+  // AnalyserNode 연결도 같은 사용자 제스처 안에서만 이뤄진다(§11.2 전제 무회귀).
   function onListenTap() {
     if (!currentFortuneId || !currentAudioUrl) {
       return;
     }
     const audio = ensureAudioElement(currentAudioUrl);
+    ensureAudioAnalyser(audio);
     showPlayingControls();
     setPlayerState("greeting");
-    audio.play().catch(onAudioError);
+    audio.play().then(startGlowLoop).catch(onAudioError);
   }
 
   function onPlayPauseTap() {
@@ -298,10 +403,11 @@
       return;
     }
     if (audioEl.paused) {
-      audioEl.play().catch(onAudioError);
+      audioEl.play().then(startGlowLoop).catch(onAudioError);
       playPauseBtn.textContent = "일시정지";
     } else {
       audioEl.pause();
+      stopGlowLoop();
       playPauseBtn.textContent = "재생";
     }
   }
@@ -313,7 +419,7 @@
     audioEl.currentTime = 0;
     showPlayingControls();
     setPlayerState("greeting");
-    audioEl.play().catch(onAudioError);
+    audioEl.play().then(startGlowLoop).catch(onAudioError);
   }
 
   function onTap() {
@@ -338,6 +444,9 @@
         renderCard(data.fortune);
         statusEl.textContent = "";
         reportEvents(data.fortuneId, [{ event: "first_text_visible", clientTs: Date.now() }], data.events);
+        // 에셋 preload는 첫 텍스트 노출 이후 지연 로드 — first_text_visible·first_audio_play
+        // 지연에 영향 없음(§1.6-② 예산). fire-and-forget이며 완료를 기다리지 않는다.
+        preloadAvatarAssets();
 
         // phase D 플레이어 — "듣기" 탭 전까지는 오디오를 열지 않는다.
         resetPlayerControlsForListen();

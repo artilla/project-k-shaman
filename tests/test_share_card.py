@@ -1,4 +1,5 @@
 """T006: static Hongyeon share-card SVG renderer regression tests."""
+import base64
 import importlib.util
 import json
 import subprocess
@@ -119,3 +120,52 @@ def test_cli_writes_selected_sample(tmp_path):
     svg = target.read_text(encoding="utf-8")
     assert "손님님의 오늘 운세" in svg
     assert "코랄 핑크" in svg
+
+
+class TestShareCardIllustrationEmbed:
+    """T024: 공유카드 일러스트(hongyeon-share-card.webp) 존재 시 base64 임베드,
+    부재 시 기존 텍스트 카드 유지 (ADR-0002 폴백 불변식)."""
+
+    def test_falls_back_to_existing_card_when_illustration_missing(self, tmp_path):
+        fortune = _sample()
+        missing_path = tmp_path / "does-not-exist.webp"
+
+        svg = _mod.render_share_card_svg(fortune, nickname="민지", illustration_path=missing_path)
+
+        assert "<image" not in svg
+        assert "data:image/webp" not in svg
+
+    def test_embeds_illustration_as_base64_when_present(self, tmp_path):
+        fortune = _sample()
+        stub_path = tmp_path / "hongyeon-share-card.webp"
+        stub_bytes = b"RIFF____WEBPVP8 stub-1px-fixture"
+        stub_path.write_bytes(stub_bytes)
+
+        svg = _mod.render_share_card_svg(fortune, nickname="민지", illustration_path=stub_path)
+
+        assert "<image" in svg
+        expected_data_uri = "data:image/webp;base64," + base64.b64encode(stub_bytes).decode("ascii")
+        assert expected_data_uri in svg
+
+    def test_embed_does_not_leak_private_fields(self, tmp_path):
+        fortune = _sample()
+        stub_path = tmp_path / "hongyeon-share-card.webp"
+        stub_path.write_bytes(b"RIFF____WEBPVP8 stub-1px-fixture")
+
+        svg = _mod.render_share_card_svg(fortune, nickname="손님", illustration_path=stub_path)
+
+        forbidden = (
+            "birth",
+            "생년월일",
+            "출생시간",
+            "profile_hash",
+            "HMAC",
+            "hmac",
+            fortune["meta"]["seed_hash"],
+        )
+        for needle in forbidden:
+            assert needle not in svg
+
+    def test_default_illustration_path_points_to_static_assets_dir(self):
+        expected = _mod.HERE / "web" / "static" / "assets" / "hongyeon-share-card.webp"
+        assert _mod.DEFAULT_SHARE_CARD_ILLUSTRATION_PATH == expected

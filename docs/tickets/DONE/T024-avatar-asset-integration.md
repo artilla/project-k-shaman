@@ -1,7 +1,7 @@
 ---
 id: T024
 title: 아바타 에셋 프론트 통합 — FSM 상태별 이미지 스왑 + 음량 글로우 + 공유카드 일러스트 임베드 (에셋 부재 폴백 유지)
-status: open
+status: done
 priority: P1
 safe: true               # 프론트 정적 파일 + SVG 임베드 — 과금·키 경로 무변경.
 persona: implementer

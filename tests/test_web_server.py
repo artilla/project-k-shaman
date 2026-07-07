@@ -238,6 +238,114 @@ class TestStagePlaybackUXMarkup:
             _stop(httpd, thread)
 
 
+class TestAvatarAssetStaticServing:
+    """T024: 아바타 에셋(assets/hongyeon-*.webp)은 정적 서빙 규칙을 그대로 탄다 —
+    부재 시 404(프론트가 무음 폴백), 존재 시 image/webp로 서빙."""
+
+    def test_asset_missing_by_default_returns_404(self):
+        httpd, thread = _start_server()
+        try:
+            try:
+                urllib.request.urlopen(_url(httpd, "/static/assets/hongyeon-idle.webp"))
+                raised = False
+            except urllib.error.HTTPError as e:
+                raised = True
+                assert e.code == 404
+            assert raised
+        finally:
+            _stop(httpd, thread)
+
+    def test_asset_present_is_served_with_webp_content_type(self):
+        assets_dir = web_server._STATIC_DIR / "assets"
+        assets_dir.mkdir(parents=True, exist_ok=True)
+        stub_path = assets_dir / "hongyeon-idle.webp"
+        stub_bytes = b"RIFF____WEBPVP8 stub-1px-fixture"
+        stub_path.write_bytes(stub_bytes)
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/static/assets/hongyeon-idle.webp")) as resp:
+                assert resp.status == 200
+                assert resp.headers.get("Content-Type") == "image/webp"
+                assert resp.read() == stub_bytes
+        finally:
+            _stop(httpd, thread)
+            stub_path.unlink(missing_ok=True)
+            try:
+                assets_dir.rmdir()
+            except OSError:
+                pass
+
+
+class TestAvatarAssetFrontendWiring:
+    """T024: FSM 상태별 이미지 스왑·음량 글로우·지연 preload 배선이 app.js/index.html/styles.css에
+    존재하는지 문자열/구조 수준으로 잠근다 (브라우저 렌더링 자체는 수동 확인, 관례는 T022와 동일)."""
+
+    def test_index_html_has_avatar_image_element(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/")) as resp:
+                body = resp.read().decode("utf-8")
+            assert 'id="avatar-image"' in body
+            assert 'id="avatar"' in body  # 기존 훅 무회귀
+        finally:
+            _stop(httpd, thread)
+
+    def test_app_js_maps_fsm_states_to_asset_filenames(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/static/app.js")) as resp:
+                body = resp.read().decode("utf-8")
+            for state in ("greeting", "idle", "speaking", "blessing"):
+                assert f'"{state}"' in body, f"FSM 상태 누락: {state}"
+            assert "hongyeon-" in body
+            assert "/static/assets/" in body
+        finally:
+            _stop(httpd, thread)
+
+    def test_app_js_preload_is_feature_detected_and_silent_on_404(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/static/app.js")) as resp:
+                body = resp.read().decode("utf-8")
+            assert "onerror" in body
+            assert "onload" in body
+        finally:
+            _stop(httpd, thread)
+
+    def test_app_js_preload_call_happens_after_first_text_visible_report(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/static/app.js")) as resp:
+                body = resp.read().decode("utf-8")
+            report_idx = body.index('"first_text_visible"')
+            preload_call_idx = body.index("preloadAvatarAssets();")
+            assert preload_call_idx > report_idx, "에셋 preload가 첫 텍스트 노출보다 먼저 실행되면 지연 회귀"
+        finally:
+            _stop(httpd, thread)
+
+    def test_app_js_has_volume_reactive_glow_via_analyser_node(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/static/app.js")) as resp:
+                body = resp.read().decode("utf-8")
+            assert "createAnalyser" in body
+            assert "createMediaElementSource" in body
+            assert body.count("createMediaElementSource(") == 1, "AudioContext/analyser는 재사용해야 함(중복 생성 금지)"
+        finally:
+            _stop(httpd, thread)
+
+    def test_styles_css_has_avatar_image_crossfade_and_glow_variable(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/static/styles.css")) as resp:
+                body = resp.read().decode("utf-8")
+            assert ".avatar-image" in body
+            assert "transition" in body
+            assert "--glow-level" in body
+        finally:
+            _stop(httpd, thread)
+
+
 class TestBackendStartupGuard:
     """T020: --backend openai 옵트인인데 키가 없으면 기동 자체를 거부한다 (실수 과금 방지)."""
 

@@ -7,6 +7,7 @@ sharing, PNG rasterization, CDN upload, and paid APIs are separate tickets.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import textwrap
 from html import escape
@@ -17,6 +18,11 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_SAMPLES_PATH = HERE / "fortune-samples.v1.1.json"
 DEFAULT_WIDTH = 1080
 DEFAULT_HEIGHT = 1350
+
+# T024/ADR-0002: 선정된 일러스트가 배치되면(T023 promptpack 파일명 규칙) 여기서 읽어 base64 임베드한다.
+# 부재 시(베타 기본 상태) 카드는 이 상수와 무관하게 기존 텍스트 전용 레이아웃으로 렌더링된다.
+DEFAULT_SHARE_CARD_ILLUSTRATION_PATH = HERE / "web" / "static" / "assets" / "hongyeon-share-card.webp"
+_SHARE_CARD_ILLUSTRATION_BOX = {"x": 700, "y": 64, "size": 280}
 
 TOPIC_LABELS = {
     "total": "총운",
@@ -74,7 +80,11 @@ def render_share_card_svg(
     nickname: str | None = None,
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
+    illustration_path: Path | None = None,
 ) -> str:
+    resolved_illustration_path = (
+        illustration_path if illustration_path is not None else DEFAULT_SHARE_CARD_ILLUSTRATION_PATH
+    )
     meta = fortune.get("meta", {})
     lucky = fortune.get("lucky", {})
     scores = fortune.get("scores", {})
@@ -133,6 +143,9 @@ def render_share_card_svg(
         f'<circle cx="900" cy="160" r="92" fill="{accent}" opacity="0.16"/>',
         f'<circle cx="172" cy="1120" r="128" fill="{accent}" opacity="0.12"/>',
     ]
+
+    if resolved_illustration_path.is_file():
+        parts.extend(_illustration_block(resolved_illustration_path))
 
     y = 132
     parts.extend(
@@ -234,6 +247,27 @@ def _score_bars(scores: dict[str, Any], x: int, y: int, accent: str) -> list[str
         out.append(f'<rect x="{x + 112}" y="{row_y - 24}" width="{bar_width}" height="20" rx="10" fill="{accent}"/>')
         out.extend(_text(str(value), x + 500, row_y, size=25, fill="#6b4b58", weight=700))
     return out
+
+
+def _illustration_block(path: Path) -> list[str]:
+    """선정된 일러스트(T023 promptpack)를 카드 우상단에 base64 임베드한다 — 부재 시 호출되지 않는다."""
+    box = _SHARE_CARD_ILLUSTRATION_BOX
+    clip_id = "share-illustration-clip"
+    data_uri = _webp_data_uri(path)
+    return [
+        "<defs>",
+        f'  <clipPath id="{clip_id}">',
+        f'    <rect x="{box["x"]}" y="{box["y"]}" width="{box["size"]}" height="{box["size"]}" rx="28"/>',
+        "  </clipPath>",
+        "</defs>",
+        f'<image href="{data_uri}" x="{box["x"]}" y="{box["y"]}" width="{box["size"]}" height="{box["size"]}" '
+        f'preserveAspectRatio="xMidYMid slice" clip-path="url(#{clip_id})"/>',
+    ]
+
+
+def _webp_data_uri(path: Path) -> str:
+    encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:image/webp;base64,{encoded}"
 
 
 def _tint(hex_color: str) -> str:
