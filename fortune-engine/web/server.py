@@ -13,6 +13,8 @@
 T020: `--backend openai` 명시 옵트인 + OPENAI_API_KEY 존재 시에만 T018 실백엔드를 주입한다.
 기본 실행 경로(플래그 없음)는 T019와 완전히 동일 — mock 고정, 과금 0.
 """
+from __future__ import annotations  # T026 fix: `str | None` 주석을 3.9(anaconda 실행 환경)에서도 허용
+
 import argparse
 import hashlib
 import hmac
