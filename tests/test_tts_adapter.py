@@ -1,6 +1,9 @@
-"""T013: TTS adapter — determinism, cache key format, mock URL, defaults, duration, backend injection."""
+"""T013/T018: TTS adapter — determinism, cache key format, mock/real backend, events."""
 import importlib.util
+import os
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).parent.parent
 TTS_ADAPTER_PATH = ROOT / "fortune-engine" / "tts_adapter.py"
@@ -245,3 +248,87 @@ class TestBackendInjection:
         """Default mock backend returns mock:// — no network, no cost."""
         result = synthesize(_SAMPLE_SCRIPT)
         assert result["audioUrl"].startswith("mock://")
+
+
+class TestEventInstrumentation:
+    """T018: tts_generate_start/complete fire around backend invocation (v3 §17)."""
+
+    def test_events_fire_in_order(self):
+        events = []
+        synthesize(_SAMPLE_SCRIPT, event_sink=events.append)
+        assert [e["event"] for e in events] == ["tts_generate_start", "tts_generate_complete"]
+
+    def test_start_event_has_cache_key(self):
+        events = []
+        result = synthesize(_SAMPLE_SCRIPT, event_sink=events.append)
+        assert events[0]["cacheKey"] == result["cacheKey"]
+
+    def test_complete_event_has_latency(self):
+        events = []
+        synthesize(_SAMPLE_SCRIPT, event_sink=events.append)
+        assert "latencyMs" in events[1]
+        assert events[1]["latencyMs"] >= 0
+
+    def test_complete_event_has_cost_estimate(self):
+        """AC3: measured-cost log alongside each synthesis (ADR-0001 $0.015/min)."""
+        events = []
+        result = synthesize(_SAMPLE_SCRIPT, event_sink=events.append)
+        assert events[1]["costUsd"] == round(result["durationSec"] / 60 * 0.015, 5)
+        assert events[1]["costUsd"] > 0
+
+    def test_default_event_sink_does_not_raise(self):
+        """No event_sink injected — falls back to structured logging, no error."""
+        result = synthesize(_SAMPLE_SCRIPT)
+        assert result["audioUrl"].startswith("mock://")
+
+    def test_mock_backend_emits_exactly_one_pair(self):
+        events = []
+        synthesize(_SAMPLE_SCRIPT, event_sink=events.append)
+        assert len(events) == 2
+
+
+class TestOpenAIBackendKeyGuard:
+    """T018: openai_backend refuses to run without OPENAI_API_KEY — no accidental billing."""
+
+    def test_missing_api_key_raises(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with pytest.raises(RuntimeError):
+            _mod.openai_backend(
+                _SAMPLE_SCRIPT,
+                "tts:v1:openai:coral:deadbeef:1.0:bright",
+                {"model": "gpt-4o-mini-tts", "voice": "coral"},
+            )
+
+    def test_missing_api_key_via_synthesize(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with pytest.raises(RuntimeError):
+            synthesize(_SAMPLE_SCRIPT, backend=_mod.openai_backend)
+
+
+class TestOpenAIBackendContract:
+    """T018 contract test — real, billed OpenAI gpt-4o-mini-tts call.
+
+    Skipped by default (CI has no OPENAI_API_KEY — AC4). When run locally with
+    a key, stays within the approved budget (docs/approvals/T018.md): exactly
+    one short segment, one real synthesis call.
+    """
+
+    @pytest.mark.skipif(
+        not os.getenv("OPENAI_API_KEY"),
+        reason="requires OPENAI_API_KEY for a real, billed OpenAI TTS call",
+    )
+    def test_real_synthesis_produces_audio_and_events(self):
+        tiny_script = [
+            {"segment": "greeting", "type": "presynth", "text": "안녕하세요, 오늘의 손님."},
+        ]
+        events = []
+        result = synthesize(tiny_script, backend=_mod.openai_backend, event_sink=events.append)
+
+        assert result["audioUrl"].startswith("file://")
+        audio_path = Path(result["audioUrl"][len("file://"):])
+        try:
+            assert audio_path.exists()
+            assert audio_path.stat().st_size > 0
+            assert [e["event"] for e in events] == ["tts_generate_start", "tts_generate_complete"]
+        finally:
+            audio_path.unlink(missing_ok=True)

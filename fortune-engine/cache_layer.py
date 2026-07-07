@@ -6,7 +6,15 @@ To plug in a real backend, inject a store that implements get(key)/set(key, valu
 """
 import hashlib
 import json
+import logging
 from pathlib import Path
+
+_logger = logging.getLogger("fortune_engine.cache_layer")
+
+
+def _default_event_sink(event: dict) -> None:
+    """Structured log line for beta instrumentation hooks (v3 §17)."""
+    _logger.info(json.dumps(event, ensure_ascii=False))
 
 
 # ── Key helpers ─────────────────────────────────────────────────────────────
@@ -29,7 +37,7 @@ def fortune_cache_key(seed_hash: str) -> str:
 
 # ── get-or-compute ───────────────────────────────────────────────────────────
 
-def get_or_compute(store, key: str, compute_fn):
+def get_or_compute(store, key: str, compute_fn, *, layer: str = "unknown", event_sink=None):
     """Return cached value for key, or compute, store, and return it.
 
     Dedup invariant: if key is present in store, compute_fn is never called.
@@ -40,13 +48,21 @@ def get_or_compute(store, key: str, compute_fn):
                set(key, value). Also exposes hits/misses counters.
         key: cache key string.
         compute_fn: zero-argument callable returning the value to cache on miss.
+        layer: cache layer tag for instrumentation (e.g. "fortune", "tts"; v3 §17).
+        event_sink: callable(event: dict) for cache_hit/cache_miss.
+                    Default: structured log line via the standard logging module.
 
     Returns:
         Cached or freshly computed value.
     """
+    if event_sink is None:
+        event_sink = _default_event_sink
+
     cached = store.get(key)
     if cached is not None:
+        event_sink({"event": "cache_hit", "layer": layer, "key": key})
         return cached
+    event_sink({"event": "cache_miss", "layer": layer, "key": key})
     value = compute_fn()
     store.set(key, value)
     return value

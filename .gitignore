@@ -22,6 +22,8 @@ state/console-log.jsonl
 state/headless-diagnostics/
 state/loop_mode
 state/autopilot_grant
+# T018: real TTS synthesis output (audio bytes — never commit)
+state/tts_cache/
 
 # OS / editor
 .DS_Store

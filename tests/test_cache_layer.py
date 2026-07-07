@@ -300,3 +300,32 @@ class TestDeterminism:
         # Retrieving k1 again doesn't affect k2
         assert get_or_compute(store, "k1", lambda: "x") == "val1"
         assert get_or_compute(store, "k2", lambda: "x") == "val2"
+
+
+class TestEventInstrumentation:
+    """T018: cache_hit/cache_miss events fire with a layer tag (v3 §17)."""
+
+    def test_miss_emits_cache_miss_event(self):
+        store = InMemoryCacheStore()
+        events = []
+        get_or_compute(store, "k1", lambda: "v", layer="tts", event_sink=events.append)
+        assert events == [{"event": "cache_miss", "layer": "tts", "key": "k1"}]
+
+    def test_hit_emits_cache_hit_event(self):
+        store = InMemoryCacheStore()
+        events = []
+        get_or_compute(store, "k1", lambda: "v", layer="tts", event_sink=events.append)
+        get_or_compute(store, "k1", lambda: "v2", layer="tts", event_sink=events.append)
+        assert events[-1] == {"event": "cache_hit", "layer": "tts", "key": "k1"}
+
+    def test_default_layer_present_when_unspecified(self):
+        store = InMemoryCacheStore()
+        events = []
+        get_or_compute(store, "k1", lambda: "v", event_sink=events.append)
+        assert "layer" in events[0]
+
+    def test_default_event_sink_does_not_raise(self):
+        """No event_sink injected — falls back to structured logging, no error."""
+        store = InMemoryCacheStore()
+        result = get_or_compute(store, "k1", lambda: "v")
+        assert result == "v"

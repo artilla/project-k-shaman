@@ -206,13 +206,15 @@ def get_today_fortune(
 
     # Stage 1: fortune/text cache (fortune:v1:{seed_hash})
     f_key = fortune_cache_key(seed_hash)
-    fortune_data = get_or_compute(store, f_key, lambda: fortune_build_fn(request, seed_result))
+    fortune_data = get_or_compute(
+        store, f_key, lambda: fortune_build_fn(request, seed_result), layer="fortune"
+    )
 
     # Stage 2: TTS cache (tts:v1:{provider}:{voice}:{script_hash}:{speed}:{emotion})
     # Key verbatim matches tts_adapter.synthesize(script)["cacheKey"].
     script = fortune_data["script"]
     tts_key = _compute_tts_cache_key(script)
-    tts_result = get_or_compute(store, tts_key, lambda: tts_synthesize_fn(script))
+    tts_result = get_or_compute(store, tts_key, lambda: tts_synthesize_fn(script), layer="tts")
 
     return {
         "fortuneId": fortune_data["fortune_id"],

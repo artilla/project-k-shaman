@@ -1,7 +1,7 @@
 ---
 id: T018
 title: TTS 실경로 연결 — gpt-4o-mini-tts(coral) 어댑터 실구현 + presynth·캐시·이벤트 계측
-status: open
+status: done
 priority: P1
 safe: false              # 실 프로바이더 API 키·과금 호출 경로 (master-spec §3 hold) — 실행엔 승인 마커 필요.
 persona: implementer

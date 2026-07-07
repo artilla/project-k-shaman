@@ -1,6 +1,7 @@
-"""T010/T012/T016: Fortune API mock — 계약 경계, 결정적 응답, birth-의존, 2단 캐시 테스트."""
+"""T010/T012/T016/T018: Fortune API mock — 계약 경계, 결정적 응답, birth-의존, 2단 캐시·이벤트 테스트."""
 import importlib.util
 import json
+import logging
 from pathlib import Path
 
 import jsonschema
@@ -448,3 +449,40 @@ class TestCacheIntegration:
         assert "fortuneId" in result
         assert "fortune" in result
         assert result["audioUrl"].startswith("mock://")
+
+
+class TestCacheEventLayerTags:
+    """T018: fortune/tts 2단 캐시 이벤트에 계층 태그가 붙는다 (v3 §17).
+
+    동일 seed 재요청 → tts cache_hit(신규합성 0회), 변경 seed → tts cache_miss 1회.
+    """
+
+    @staticmethod
+    def _tts_events(records):
+        return [json.loads(r.message) for r in records if json.loads(r.message).get("layer") == "tts"]
+
+    def test_first_request_is_fortune_and_tts_cache_miss(self, caplog):
+        store = InMemoryCacheStore()
+        with caplog.at_level(logging.INFO, logger="fortune_engine.cache_layer"):
+            get_today_fortune(_BASE_REQ, store=store)
+        events = [json.loads(r.message) for r in caplog.records]
+        layers_and_kinds = [(e["layer"], e["event"]) for e in events]
+        assert ("fortune", "cache_miss") in layers_and_kinds
+        assert ("tts", "cache_miss") in layers_and_kinds
+
+    def test_same_seed_second_call_is_tts_cache_hit(self, caplog):
+        store = InMemoryCacheStore()
+        get_today_fortune(_BASE_REQ, store=store)
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="fortune_engine.cache_layer"):
+            get_today_fortune(_BASE_REQ, store=store)
+        assert [e["event"] for e in self._tts_events(caplog.records)] == ["cache_hit"]
+
+    def test_changed_seed_is_tts_cache_miss(self, caplog):
+        store = InMemoryCacheStore()
+        get_today_fortune(_BASE_REQ, store=store)
+        caplog.clear()
+        req2 = {**_BASE_REQ, "date": "2026-06-09"}
+        with caplog.at_level(logging.INFO, logger="fortune_engine.cache_layer"):
+            get_today_fortune(req2, store=store)
+        assert [e["event"] for e in self._tts_events(caplog.records)] == ["cache_miss"]
