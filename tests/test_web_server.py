@@ -246,7 +246,9 @@ class TestAvatarAssetStaticServing:
         httpd, thread = _start_server()
         try:
             try:
-                urllib.request.urlopen(_url(httpd, "/static/assets/hongyeon-idle.webp"))
+                # 실자산 커밋 후에도 유효하도록 "존재할 수 없는 상태명"으로 계약을 고정한다
+                # (T025에서 수정 — 원래는 hongyeon-idle.webp를 조회해 실자산과 충돌·삭제 사고).
+                urllib.request.urlopen(_url(httpd, "/static/assets/hongyeon-nonexistent-state.webp"))
                 raised = False
             except urllib.error.HTTPError as e:
                 raised = True
@@ -258,12 +260,15 @@ class TestAvatarAssetStaticServing:
     def test_asset_present_is_served_with_webp_content_type(self):
         assets_dir = web_server._STATIC_DIR / "assets"
         assets_dir.mkdir(parents=True, exist_ok=True)
-        stub_path = assets_dir / "hongyeon-idle.webp"
+        # 실자산 파일명과 절대 겹치지 않는 스텁 이름 사용 (실자산 삭제 사고 방지, T025)
+        stub_path = assets_dir / "hongyeon-stub-fixture.webp"
         stub_bytes = b"RIFF____WEBPVP8 stub-1px-fixture"
         stub_path.write_bytes(stub_bytes)
         httpd, thread = _start_server()
         try:
-            with urllib.request.urlopen(_url(httpd, "/static/assets/hongyeon-idle.webp")) as resp:
+            with urllib.request.urlopen(
+                _url(httpd, "/static/assets/hongyeon-stub-fixture.webp")
+            ) as resp:
                 assert resp.status == 200
                 assert resp.headers.get("Content-Type") == "image/webp"
                 assert resp.read() == stub_bytes
@@ -581,3 +586,58 @@ class TestAudioRealEndpoint:
             assert raised
         finally:
             _stop(httpd, thread)
+
+
+class TestLive2DIntegration:
+    """T025: Live2D 아바타 통합 — 벤더 자산 서빙·프론트 배선·폴백 계약."""
+
+    def test_model3_json_served_with_json_content_type(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(
+                _url(httpd, "/static/live2d/models/Mao/Mao.model3.json")
+            ) as resp:
+                assert resp.status == 200
+                assert "application/json" in resp.headers["Content-Type"]
+                json.loads(resp.read())
+        finally:
+            _stop(httpd, thread)
+
+    def test_moc3_and_runtime_scripts_served(self):
+        httpd, thread = _start_server()
+        try:
+            for path in (
+                "/static/live2d/models/Mao/Mao.moc3",
+                "/static/live2d/live2dcubismcore.min.js",
+                "/static/live2d/pixi.min.js",
+                "/static/live2d/cubism4.min.js",
+                "/static/live2d-avatar.js",
+            ):
+                with urllib.request.urlopen(_url(httpd, path)) as resp:
+                    assert resp.status == 200, path
+        finally:
+            _stop(httpd, thread)
+
+    def test_index_wires_live2d_before_app(self):
+        index = (web_server._STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        live2d_pos = index.find("/static/live2d-avatar.js")
+        app_pos = index.find("/static/app.js")
+        assert live2d_pos != -1 and app_pos != -1
+        assert live2d_pos < app_pos  # app.js가 window.HongyeonLive2D를 참조
+
+    def test_app_js_wiring_and_fallback_contract(self):
+        app_js = (web_server._STATIC_DIR / "app.js").read_text(encoding="utf-8")
+        # FSM·립싱크 배선
+        assert "HongyeonLive2D.setState" in app_js
+        assert "HongyeonLive2D.setMouth" in app_js
+        assert "HongyeonLive2D.init" in app_js
+        # T024 폴백 체계는 그대로 남아 있어야 한다 (정지컷·플레이스홀더)
+        assert "hongyeon-" in app_js
+        assert "preloadAvatarAssets" in app_js
+
+    def test_live2d_module_is_self_disabling_without_assets(self):
+        module = (web_server._STATIC_DIR / "live2d-avatar.js").read_text(encoding="utf-8")
+        # 자산 부재(404)·로드 실패 시 스스로 비활성 — 폴백 무간섭 계약
+        assert "HEAD" in module
+        assert "catch" in module
+        assert "ParamMouthOpenY" in module

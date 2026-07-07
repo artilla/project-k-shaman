@@ -111,8 +111,15 @@
   function setPlayerState(state) {
     playerStateEl.textContent = PLAYER_STATE_LABELS[state] || state;
     const avatarState = state === "done" ? "idle" : state;
-    avatarEl.className = "avatar avatar--" + avatarState;
+    const live2dActive =
+      window.HongyeonLive2D && window.HongyeonLive2D.isActive && window.HongyeonLive2D.isActive();
+    avatarEl.className =
+      "avatar avatar--" + avatarState + (live2dActive ? " avatar--live2d" : "");
     applyAvatarAsset(avatarState);
+    // T025: Live2D 활성 시 FSM 상태를 표정/모션으로 전달 (비활성이면 no-op)
+    if (window.HongyeonLive2D) {
+      window.HongyeonLive2D.setState(avatarState);
+    }
   }
 
   function ensureAudioAnalyser(audio) {
@@ -152,6 +159,10 @@
       }
       const level = Math.min(1, sum / freqData.length / 128);
       avatarEl.style.setProperty("--glow-level", level.toFixed(3));
+      // T025: 같은 음량 신호를 Live2D 입 열림(ParamMouthOpenY)에도 공급
+      if (window.HongyeonLive2D) {
+        window.HongyeonLive2D.setMouth(level);
+      }
       glowRafId = requestAnimationFrame(tick);
     })();
   }
@@ -162,6 +173,9 @@
       glowRafId = null;
     }
     avatarEl.style.setProperty("--glow-level", "0");
+    if (window.HongyeonLive2D) {
+      window.HongyeonLive2D.setMouth(0);
+    }
   }
 
   function renderScoreBars(scores) {
@@ -471,4 +485,11 @@
   playPauseBtn.addEventListener("click", onPlayPauseTap);
   replayBtn.addEventListener("click", onReplayTap);
   shareBtn.addEventListener("click", onShareTap);
+
+  // T025: Live2D 아바타 초기화 — 자산 없으면 스스로 비활성(폴백 유지).
+  // 탭 이전의 대기 화면에서 로드되므로 first_text_visible·first_audio_play
+  // 경로(§1.6-② 예산)에 선행하지 않는다.
+  if (window.HongyeonLive2D) {
+    window.HongyeonLive2D.init(avatarEl);
+  }
 })();
