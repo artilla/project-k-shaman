@@ -11,6 +11,8 @@ blocks: []
 labels: ["feature", "playback", "tts", "metrics", "cost"]
 created: 2026-07-07
 spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
+completed_at: 2026-07-07T18:52:03+09:00
+started_at: 2026-07-07T18:32:24+09:00
 ---
 
 # T020 — 실 TTS 오디오 서빙 + 3초 경로 실측
