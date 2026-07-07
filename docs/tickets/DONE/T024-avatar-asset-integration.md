@@ -11,6 +11,8 @@ blocks: []
 labels: ["feature", "frontend", "character", "playback"]
 created: 2026-07-07
 spec_ref: docs/ux/screen-ia.md#s4--캐릭터-stage
+completed_at: 2026-07-08T00:52:16+09:00
+started_at: 2026-07-08T00:36:38+09:00
 ---
 
 # T024 — 아바타 에셋 프론트 통합
