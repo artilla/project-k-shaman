@@ -91,6 +91,7 @@ Suggestions (선택):
 - 코드 직접 수정 (수정은 implementer 재호출)
 - 티켓 범위를 임의로 확장하는 제안
 - 같은 세션에서 구현과 리뷰를 모두 수행 (Cross-context를 깨면 의미 없음)
+- 헤드리스 호출 시 백그라운드 대기·질문으로 턴 종료 (당신의 턴이 곧 세션이다 — `skills/implementer.md` §2.1 ① 참조)
 
 ## 6. Single Commit 의무 (run_loop이 호출했을 때)
 리뷰 산출물(`docs/reviews/<TXXX>.md`)과 자기 티켓의 DONE 이동을 **단 하나의 commit**에 묶는다.
