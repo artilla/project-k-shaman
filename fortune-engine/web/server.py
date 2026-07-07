@@ -27,7 +27,7 @@ import wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 _WEB_DIR = Path(__file__).resolve().parent
 _ENGINE_DIR = _WEB_DIR.parent
@@ -174,7 +174,9 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _serve_static(self, rel_path: str) -> None:
-        rel_path = rel_path.lstrip("/") or "index.html"
+        # T025: percent-encoded 경로 복원 — Live2D 모델의 비ASCII 파일명(모션/표정)이
+        # %XX 인코딩으로 요청된다. 복원 후에도 아래 resolve() 경로 탈출 검사는 그대로 적용.
+        rel_path = unquote(rel_path).lstrip("/") or "index.html"
         candidate = (_STATIC_DIR / rel_path).resolve()
         if _STATIC_DIR not in candidate.parents and candidate != _STATIC_DIR:
             self._send_json(404, {"error": "not found"})

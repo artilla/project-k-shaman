@@ -44,7 +44,9 @@ window.HongyeonLive2D = (function () {
   }
 
   function detectModel() {
-    return fetch(MODEL_URL, { method: "HEAD" })
+    // GET 사용: 이 서버(http.server BaseHTTPRequestHandler)는 do_HEAD 미구현이라
+    // HEAD가 501을 반환한다. model3.json은 ~3KB라 GET 감지 비용이 무시 가능하다.
+    return fetch(MODEL_URL)
       .then(function (res) { return res.ok; })
       .catch(function () { return false; });
   }
@@ -83,6 +85,9 @@ window.HongyeonLive2D = (function () {
           if (!window.PIXI || !window.PIXI.live2d || !window.Live2DCubismCore) {
             throw new Error("live2d runtime missing after script load");
           }
+          // 캔버스/앱 생성 전에 컨테이너를 무대 크기로 확장한다 — 96px 상태에서 만들면
+          // PIXI가 96×96으로 고정돼 좌상단에 작게 붙는다 (실측). 실패 시 catch에서 원복.
+          container.classList.add("avatar--live2d");
           var canvas = document.createElement("canvas");
           canvas.id = "avatar-live2d";
           canvas.className = "avatar-live2d";
@@ -107,12 +112,12 @@ window.HongyeonLive2D = (function () {
           // 립싱크: 모델 업데이트 뒤에 입 파라미터를 덮어쓴다 (LOW priority → 프레임 마지막)
           window.PIXI.Ticker.shared.add(applyMouth, null, window.PIXI.UPDATE_PRIORITY.LOW);
           active = true;
-          container.classList.add("avatar--live2d");
           setState(lastState);
         })
         .catch(function (err) {
-          // 어떤 실패든 폴백 유지 — 콘솔 경고만 남긴다.
+          // 어떤 실패든 폴백 유지 — 콘솔 경고만 남기고 컨테이너 확장을 원복한다.
           console.warn("[live2d] disabled:", err && err.message ? err.message : err);
+          container.classList.remove("avatar--live2d");
           active = false;
         });
     });

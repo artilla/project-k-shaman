@@ -58,3 +58,12 @@ spec_ref: docs/research/live2d-avatar-research.md
 
 ## 6. 메모 / 결정 이력
 - 2026-07-08 기안: 운영자 지시 "홍연 모델 대신 live2d avatar로 구현" — L0을 즉시 실행으로 승격.
+- 2026-07-08 브라우저 실검증(Claude-in-Chrome)에서 잡은 결함 3건 (후속 커밋으로 수정):
+  ① 기능 감지 HEAD 요청 — 이 서버(http.server)는 do_HEAD 미구현이라 501 → 모듈이 항상 비활성.
+    GET 감지로 전환 (model3.json ~3KB라 비용 무시 가능).
+  ② 컨테이너 확장 순서 — avatar--live2d 클래스를 모델 로드 후에 붙이면 PIXI가 96×96으로 고정돼
+    좌상단에 작게 렌더. 앱 생성 전 확장, 실패 시 catch에서 원복.
+  ③ 서버가 percent-encoded 경로를 unquote하지 않아 비ASCII 파일명(모션/표정 中文名) 전부 404 —
+    표정/모션이 조용히 죽는 문제. unquote 추가 (resolve() 경로 탈출 검사는 유지).
+- 실검증 결과: idle 렌더+모션 ✓, greeting 표정(happy)+TapBody 모션 ✓, 재생 중 음량 신호
+  0.002→0.300 요동(립싱크 구동) ✓, 콘솔 에러 0 ✓, 전 스위트 276 GREEN.

@@ -637,7 +637,9 @@ class TestLive2DIntegration:
 
     def test_live2d_module_is_self_disabling_without_assets(self):
         module = (web_server._STATIC_DIR / "live2d-avatar.js").read_text(encoding="utf-8")
-        # 자산 부재(404)·로드 실패 시 스스로 비활성 — 폴백 무간섭 계약
-        assert "HEAD" in module
+        # 자산 부재(404)·로드 실패 시 스스로 비활성 — 폴백 무간섭 계약.
+        # 감지는 GET이어야 한다: 이 서버는 do_HEAD 미구현이라 HEAD가 501을 반환한다 (실측).
+        assert "detectModel" in module
+        assert '"HEAD"' not in module
         assert "catch" in module
         assert "ParamMouthOpenY" in module
