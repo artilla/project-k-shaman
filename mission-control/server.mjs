@@ -7,7 +7,7 @@
 
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
-import { readFileSync, existsSync, readdirSync, statSync, realpathSync, watch, appendFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync, realpathSync, watch, appendFileSync, mkdirSync, openSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve, sep, basename } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -4665,6 +4665,9 @@ function execPlan(payload) {
     return {
       script: 'open_project_mc.sh',
       args,
+      // MC 프로세스의 PATH에 node가 없을 수 있다(GUI/launchd 기동 등) — 지금 이 서버를
+      // 돌리는 node 바이너리를 그대로 물려준다 (ADR-0078 plan.env 선례, 서버 권위 값).
+      env: { NODE_BIN: process.execPath },
       cliCommand: `./scripts/open_project_mc.sh ${targetPath}${port !== undefined ? ' --port ' + port : ''}`,
     };
   }
@@ -4743,6 +4746,10 @@ function execPlan(payload) {
     return {
       script: 'run_loop.sh',
       args: [ticketId],
+      // ADR-0208 (T306): 루프는 티켓당 수 분~수십 분 — 동기 exec의 120s 워치독이
+      // run_loop를 중도 SIGTERM하고 claude 프로세스 그룹만 고아로 남기는 실결함이
+      // 있었다 (2026-07-07 T018 실측 2회). 분리 디스패치로 즉시 응답한다.
+      detach: true,
       cliCommand: `./scripts/run_loop.sh ${ticketId}`,
     };
   }
@@ -4796,6 +4803,34 @@ function execPlan(payload) {
 }
 
 function runScript(plan) {
+  // ADR-0208 (T306): 장시간 루프 디스패치는 동기 HTTP 요청에 태우지 않는다.
+  // plan.detach === true → 분리 프로세스 그룹으로 기동하고 즉시 응답. 출력은
+  // state/dispatch/<ticket>-<ts>.log 로 (진행 관측은 기존 .ralph/logs·이벤트가 담당).
+  if (plan.detach) {
+    try {
+      const tag = String(plan.args?.[0] || plan.script).replace(/[^A-Za-z0-9._-]+/g, '-');
+      const dispatchDir = join(ROOT, 'state', 'dispatch');
+      mkdirSync(dispatchDir, { recursive: true });
+      const logPath = join(dispatchDir, `${tag}-${new Date().toISOString().replace(/[:.]/g, '-')}.log`);
+      appendFileSync(logPath, `# dispatch ${plan.cliCommand}\n`);
+      const out = openSync(logPath, 'a');
+      const child = spawn(join(ROOT, 'scripts', plan.script), plan.args, {
+        cwd: ROOT,
+        env: { ...process.env, EDITOR: process.env.EDITOR || 'true', ...(plan.env || {}) },
+        stdio: ['ignore', out, out],
+        detached: true,
+      });
+      child.unref();
+      closeSync(out);
+      return Promise.resolve({
+        exitCode: 0,
+        stdoutTail: `[dispatched] ${plan.cliCommand} (pid ${child.pid})\n진행: 보드 카드·.ralph/logs — 디스패치 로그: ${logPath.slice(ROOT.length + 1)}`,
+        cliCommand: plan.cliCommand,
+      });
+    } catch (error) {
+      return Promise.resolve({ exitCode: 127, stdoutTail: String(error), cliCommand: plan.cliCommand });
+    }
+  }
   return new Promise(resolve => {
     // ADR-0062: optional stdin so a writer script (ticket_body.sh) can receive
     // freeform multi-line input safely (never via argv). Absent plan.stdin keeps
