@@ -11,6 +11,8 @@ blocks: []
 labels: ["feature", "frontend", "playback", "ux"]
 created: 2026-07-07
 spec_ref: docs/ux/screen-ia.md#s4--캐릭터-stage
+completed_at: 2026-07-07T20:09:22+09:00
+started_at: 2026-07-07T19:51:12+09:00
 ---
 
 # T022 — S4 무대 재생 UX 최소판 (E2E 베타 데모 마무리 2/2)
