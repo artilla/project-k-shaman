@@ -859,22 +859,92 @@ EOF
   # ────────── 9. 페르소나가 commit + DONE 이동을 했는지 검증 ──────────
   # 운영 관련 경로에 미커밋 변경이 있으면 실패.
   # 비운영 사용자 파일(docs/manyfast-service-analysis.md 등)은 검사하지 않음.
-  if [ -n "$(_op_dirty_lines)" ]; then
-    echo "❌ 워킹 트리에 미커밋 변경이 남음 — 페르소나가 commit 의무를 어김."
-    add_failure "$id" "no-commit" "${i:-0}" "$ticket"
-    save_headless_diagnostics "$id" "no-commit" "$timeout_seconds"
-    if in_isolated_worktree; then
-      git reset --hard HEAD 2>/dev/null || true
+  #
+  # T308: rc=0인데 커밋/DONE 이동이 안 됐다면, 실패 처리 전에 "마무리 세션"을
+  # 사이클당 딱 1회 재디스패치한다(무한 루프 금지) — WIP 품질은 양호한데 세션이
+  # 커밋 의무(§2 절차 7–8) 전에 끝나는 패턴(runbook §3.7 분기 1 operator 회수)을
+  # 줄이기 위함. idle-exit(125)·timeout(124)은 이미 그 이전(§7)에서 반환되므로
+  # 이 블록에 도달하지 않는다 — 재프롬프트는 "정상 종료 후 마무리 누락"에만 적용.
+  local wip_stage reprompted=0
+  while :; do
+    wip_stage=""
+    if [ -n "$(_op_dirty_lines)" ]; then
+      wip_stage="no-commit"
+    elif [ -f "$ticket" ]; then
+      wip_stage="no-done-move"
     fi
-    return 7
-  fi
 
-  if [ -f "$ticket" ]; then
-    echo "❌ 페르소나가 티켓을 docs/tickets/DONE/ 로 이동하지 않음."
-    add_failure "$id" "no-done-move" "${i:-0}" "$ticket"
-    save_headless_diagnostics "$id" "no-done-move" "$timeout_seconds"
-    return 8
-  fi
+    [ -z "$wip_stage" ] && break
+
+    if [ "$reprompted" = "1" ]; then
+      echo "❌ 재프롬프트 후에도 미완(stage=$wip_stage) — 실패 처리."
+      add_failure "$id" "$wip_stage" "${i:-0}" "$ticket"
+      save_headless_diagnostics "$id" "$wip_stage" "$timeout_seconds"
+      if [ "$wip_stage" = "no-commit" ] && in_isolated_worktree; then
+        git reset --hard HEAD 2>/dev/null || true
+      fi
+      if [ "$wip_stage" = "no-commit" ]; then return 7; else return 8; fi
+    fi
+
+    echo "⚠️  세션이 커밋 없이 끝남(stage=$wip_stage) — 마무리 세션 1회 재프롬프트."
+    session_event "$id" system reprompt "stage=$wip_stage" 2>/dev/null || true
+    reprompted=1
+
+    local reprompt_prompt
+    reprompt_prompt=$(cat <<EOF
+당신은 \`$skill_file\`의 페르소나로 동작합니다.
+이 페르소나의 규칙을 그대로 따르고, 그 외에 어떤 행동도 하지 마세요.
+
+## 상황
+직전 세션이 이 티켓을 커밋 없이 끝냈습니다 (stage=$wip_stage). 새 세션이 이어받았습니다.
+
+## 처리할 티켓
+파일 경로: $ticket
+
+## 지시
+1. \`git status\`와 \`git diff\`로 직전 세션의 WIP를 검토하세요.
+2. WIP가 티켓 수용 기준 내라면 $skill_file §2 절차 5–8(검증 → 단일 commit → DONE 이동)만
+   완료하세요. 새 기능을 추가하거나 범위를 넓히지 마세요.
+3. WIP가 수용 기준에 못 미치면, 가장 보수적인 방법으로 마저 구현한 뒤 동일 절차(5–8)를
+   따르세요.
+
+## 참고 (수정 금지)
+- $skill_file
+- docs/runbook.md (특히 §3 실패 처리, §4 보안 3요소)
+- docs/master-spec.md  ← planner만 수정 가능
+EOF
+)
+
+    echo "🤖 마무리 세션(재프롬프트) 디스패치... (stage=$wip_stage)" | tee -a "$headless_log"
+    local reprompt_rc
+    set +e
+    CLAUDE_TIMEOUT_SECONDS="$timeout_seconds" \
+      RALPH_SESSION_META_FILE="$reservation_meta" \
+      RALPH_STATE_ROOT="$SESSION_STATE_ROOT" \
+      ./scripts/run_headless.sh "$reprompt_prompt" "$ROOT" 2>&1 | tee -a "$headless_log"
+    reprompt_rc=${PIPESTATUS[0]}
+    set -e
+
+    if [ "$reprompt_rc" -ne 0 ]; then
+      echo "❌ 재프롬프트 헤드리스 세션 실패(rc=$reprompt_rc)."
+      add_failure "$id" "$wip_stage" "${i:-0}" "$ticket"
+      save_headless_diagnostics "$id" "$wip_stage" "$timeout_seconds" "$reprompt_rc"
+      if [ "$wip_stage" = "no-commit" ] && in_isolated_worktree; then
+        git reset --hard HEAD 2>/dev/null || true
+      fi
+      if [ "$wip_stage" = "no-commit" ]; then return 7; else return 8; fi
+    fi
+
+    if ! ./scripts/run_checks.sh; then
+      echo "❌ 재프롬프트 후 run_checks.sh 실패"
+      add_failure "$id" "checks-failed" "${i:-0}" "$ticket"
+      save_headless_diagnostics "$id" "checks-failed" "$timeout_seconds"
+      if in_isolated_worktree; then
+        git reset --hard HEAD 2>/dev/null || true
+      fi
+      return 6
+    fi
+  done
 
   # ────────── 10. 계측 (ADR-0046): 완료 타임스탬프 영속 ──────────
   # DONE 티켓 frontmatter에 completed_at / started_at(reservation meta)을 durable하게
