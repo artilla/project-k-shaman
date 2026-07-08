@@ -31,6 +31,7 @@ window.HongyeonLive2D = (function () {
   var app = null;
   var mouthLevel = 0;
   var lastState = "idle";
+  var currentContainer = null; // v2: S0 히어로 ↔ S4 스테이지 프레임 간 이동 지원
 
   function loadScript(src) {
     return new Promise(function (resolve, reject) {
@@ -63,17 +64,25 @@ window.HongyeonLive2D = (function () {
   }
 
   function fitModel(container) {
-    // 전신 모델을 상반신 중심으로 확대 배치 (스파이크 수준의 근사 크롭)
+    // 전신 모델을 상반신 중심으로 확대 배치 (스파이크 수준의 근사 크롭).
+    // v2: 컨테이너마다 배율이 다르다 — S4 소형 프레임 기본 2.4, S0 대형 히어로는
+    // data-live2d-zoom / data-live2d-anchor-y 로 조절한다.
     var w = container.clientWidth;
     var h = container.clientHeight;
-    var scale = (w / model.width) * 2.4;
+    var zoom = parseFloat(container.dataset.live2dZoom || "2.4");
+    var anchorY = parseFloat(container.dataset.live2dAnchorY || "0.12");
+    // model.width는 현재 스케일 반영값 — 재호출(moveTo) 시 복리 확대를 막기 위해
+    // 자연 크기(스케일 1) 기준으로 측정한다.
+    model.scale.set(1);
+    var scale = (w / model.width) * zoom;
     model.scale.set(scale);
-    model.anchor.set(0.5, 0.12);
+    model.anchor.set(0.5, anchorY);
     model.x = w / 2;
     model.y = 0;
   }
 
   function init(container) {
+    currentContainer = container;
     detectModel().then(function (exists) {
       if (!exists) {
         return; // 자산 없음 → 완전 비활성 (폴백 체계 무간섭)
@@ -87,16 +96,18 @@ window.HongyeonLive2D = (function () {
           }
           // 캔버스/앱 생성 전에 컨테이너를 무대 크기로 확장한다 — 96px 상태에서 만들면
           // PIXI가 96×96으로 고정돼 좌상단에 작게 붙는다 (실측). 실패 시 catch에서 원복.
-          container.classList.add("avatar--live2d");
+          // v2: 로드 중 moveTo()가 호출됐을 수 있으므로 항상 currentContainer 기준으로 부착한다.
+          var target = currentContainer;
+          target.classList.add("avatar--live2d");
           var canvas = document.createElement("canvas");
           canvas.id = "avatar-live2d";
           canvas.className = "avatar-live2d";
-          container.appendChild(canvas);
+          target.appendChild(canvas);
 
           app = new window.PIXI.Application({
             view: canvas,
-            width: container.clientWidth,
-            height: container.clientHeight,
+            width: target.clientWidth,
+            height: target.clientHeight,
             backgroundAlpha: 0,
             antialias: true,
             autoDensity: true,
@@ -107,7 +118,12 @@ window.HongyeonLive2D = (function () {
         })
         .then(function (loaded) {
           model = loaded;
-          fitModel(container);
+          // 로드 완료 시점의 컨테이너로 최종 배치 (로드 중 화면 전환 대응)
+          if (app.view.parentElement !== currentContainer) {
+            moveTo(currentContainer);
+          } else {
+            fitModel(currentContainer);
+          }
           app.stage.addChild(model);
           // 립싱크: 모델 업데이트 뒤에 입 파라미터를 덮어쓴다 (LOW priority → 프레임 마지막)
           window.PIXI.Ticker.shared.add(applyMouth, null, window.PIXI.UPDATE_PRIORITY.LOW);
@@ -117,10 +133,33 @@ window.HongyeonLive2D = (function () {
         .catch(function (err) {
           // 어떤 실패든 폴백 유지 — 콘솔 경고만 남기고 컨테이너 확장을 원복한다.
           console.warn("[live2d] disabled:", err && err.message ? err.message : err);
-          container.classList.remove("avatar--live2d");
+          if (currentContainer) {
+            currentContainer.classList.remove("avatar--live2d");
+          }
           active = false;
         });
     });
+  }
+
+  // v2: 캔버스를 다른 컨테이너로 이동 (S0 온보딩 히어로 ↔ S4 스테이지 프레임).
+  // WebGL 컨텍스트는 DOM 이동에서 유지된다 — 렌더러 크기와 모델 배치만 새 컨테이너에 맞춘다.
+  function moveTo(container) {
+    var prev = currentContainer;
+    currentContainer = container;
+    if (!app || !app.view) {
+      return; // 아직 로드 전 — init/로드 완료 시 currentContainer 기준으로 부착된다.
+    }
+    if (prev && prev !== container) {
+      prev.classList.remove("avatar--live2d");
+    }
+    container.classList.add("avatar--live2d");
+    if (app.view.parentElement !== container) {
+      container.appendChild(app.view);
+    }
+    app.renderer.resize(container.clientWidth, container.clientHeight);
+    if (model) {
+      fitModel(container);
+    }
   }
 
   function setState(state) {
@@ -151,5 +190,5 @@ window.HongyeonLive2D = (function () {
     return active;
   }
 
-  return { init: init, setState: setState, setMouth: setMouth, isActive: isActive };
+  return { init: init, moveTo: moveTo, setState: setState, setMouth: setMouth, isActive: isActive };
 })();
