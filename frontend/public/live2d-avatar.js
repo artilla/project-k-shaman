@@ -97,8 +97,9 @@ window.HongyeonLive2D = (function () {
           // 캔버스/앱 생성 전에 컨테이너를 무대 크기로 확장한다 — 96px 상태에서 만들면
           // PIXI가 96×96으로 고정돼 좌상단에 작게 붙는다 (실측). 실패 시 catch에서 원복.
           // v2: 로드 중 moveTo()가 호출됐을 수 있으므로 항상 currentContainer 기준으로 부착한다.
+          // FOUC 수정: avatar--live2d 클래스(정지컷 숨김)는 모델 로드 완료 후에만 붙인다 —
+          // 여기서 붙이면 모델 로드 1~2초 동안 히어로가 사라져 검은 빈 영역이 보인다.
           var target = currentContainer;
-          target.classList.add("avatar--live2d");
           var canvas = document.createElement("canvas");
           canvas.id = "avatar-live2d";
           canvas.className = "avatar-live2d";
@@ -128,7 +129,15 @@ window.HongyeonLive2D = (function () {
           // 립싱크: 모델 업데이트 뒤에 입 파라미터를 덮어쓴다 (LOW priority → 프레임 마지막)
           window.PIXI.Ticker.shared.add(applyMouth, null, window.PIXI.UPDATE_PRIORITY.LOW);
           active = true;
+          currentContainer.classList.add("avatar--live2d"); // 이제부터 정지컷 대신 캔버스
           setState(lastState);
+          // 창 리사이즈 대응 — 렌더러 크기·모델 fit이 stale해지는 레이아웃 버그 수정
+          window.addEventListener("resize", function () {
+            if (active && currentContainer) {
+              app.renderer.resize(currentContainer.clientWidth, currentContainer.clientHeight);
+              fitModel(currentContainer);
+            }
+          });
         })
         .catch(function (err) {
           // 어떤 실패든 폴백 유지 — 콘솔 경고만 남기고 컨테이너 확장을 원복한다.
@@ -152,7 +161,9 @@ window.HongyeonLive2D = (function () {
     if (prev && prev !== container) {
       prev.classList.remove("avatar--live2d");
     }
-    container.classList.add("avatar--live2d");
+    if (active) {
+      container.classList.add("avatar--live2d"); // 로드 전이면 정지컷 유지 (FOUC 방지)
+    }
     if (app.view.parentElement !== container) {
       container.appendChild(app.view);
     }

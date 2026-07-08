@@ -97,7 +97,7 @@ input::placeholder { color: rgba(245, 238, 252, 0.35); }
   cursor: pointer;
 }
 
-.glass-button--icon {
+.glass-button.glass-button--icon {
   width: 34px;
   height: 34px;
   padding: 0;
@@ -107,6 +107,11 @@ input::placeholder { color: rgba(245, 238, 252, 0.35); }
   font-size: 20px;
   line-height: 1;
   color: var(--gold);
+}
+
+.back-glyph {
+  display: block;
+  transform: translateY(-0.09em);
 }
 
 .logo-mark {
@@ -330,8 +335,9 @@ input::placeholder { color: rgba(245, 238, 252, 0.35); }
   top: 2%;
   left: 0;
   right: 0;
-  height: 56vh;
-  max-height: 60vh;
+  /* 하단 콘텐츠 블록 위에서 끝나도록 앵커 — 낮은 뷰포트 겹침 버그 수정 (frontend와 동일) */
+  bottom: 340px;
+  min-height: 180px;
 }
 
 .s0-hero {

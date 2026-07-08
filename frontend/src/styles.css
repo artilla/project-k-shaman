@@ -97,7 +97,9 @@ input::placeholder { color: rgba(245, 238, 252, 0.35); }
   cursor: pointer;
 }
 
-.glass-button--icon {
+/* .glass-button(13px)이 파일 뒤쪽에 선언돼 동일 특이성으로 이기는 문제 →
+   복합 선택자로 특이성 상승 (뒤로 가기 화살표가 13px로 렌더되던 버그) */
+.glass-button.glass-button--icon {
   width: 34px;
   height: 34px;
   padding: 0;
@@ -107,6 +109,12 @@ input::placeholder { color: rgba(245, 238, 252, 0.35); }
   font-size: 20px;
   line-height: 1;
   color: var(--gold);
+}
+
+/* ‹(U+2039) 잉크가 em 중심보다 아래에 있는 폰트 특성 광학 보정 (캔버스 측정 기반) */
+.back-glyph {
+  display: block;
+  transform: translateY(-0.09em);
 }
 
 .logo-mark {
@@ -330,8 +338,10 @@ input::placeholder { color: rgba(245, 238, 252, 0.35); }
   top: 2%;
   left: 0;
   right: 0;
-  height: 56vh;
-  max-height: 60vh;
+  /* 하단 콘텐츠 블록(워드마크+CTA ≈ 340px) 위에서 끝나도록 앵커 — 낮은 뷰포트에서
+     캐릭터가 텍스트를 침범하지 않는다 (고정 56vh 겹침 버그 수정) */
+  bottom: 340px;
+  min-height: 180px;
 }
 
 .s0-hero {

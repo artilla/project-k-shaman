@@ -15,7 +15,7 @@ export function TopBar(props: {
       <div className="top-bar-left">
         {showBack && (
           <button className="glass-button glass-button--icon" type="button" aria-label="뒤로 가기" onClick={onBack}>
-            ‹
+            <span className="back-glyph">‹</span>
           </button>
         )}
         <button className="logo-pill" type="button" aria-label="홈으로" onClick={onHome}>
