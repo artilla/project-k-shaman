@@ -378,24 +378,35 @@ class _Handler(BaseHTTPRequestHandler):
         )
         self.end_headers()
 
+    def _redirect_auth_error(self) -> None:
+        """콜백 실패 시 JSON 에러 대신 S0으로 돌려보낸다 — 프론트가 배너를 띄운다."""
+        self.send_response(302)
+        self.send_header("Location", "/?auth_error=1")
+        # 만료된 state 쿠키 정리
+        self.send_header(
+            "Set-Cookie",
+            f"{_OAUTH_STATE_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+        )
+        self.end_headers()
+
     def _handle_auth_callback(self, provider: str, query: dict) -> None:
         if provider not in _OAUTH_PROVIDERS:
             self._send_json(404, {"error": "unknown provider"})
             return
         code = query.get("code", [None])[0]
         if not code:
-            self._send_json(400, {"error": "missing code"})
+            self._redirect_auth_error()
             return
         state = query.get("state", [None])[0]
         expected_state = _parse_cookie_header(self.headers.get("Cookie", "")).get(_OAUTH_STATE_COOKIE_NAME)
         if not state or not expected_state or not hmac.compare_digest(state, expected_state):
-            self._send_json(400, {"error": "invalid state"})
+            self._redirect_auth_error()
             return
         try:
             profile = _oauth_token_and_profile(provider, code, redirect_uri=self._oauth_redirect_uri(provider))
         except Exception:
             _logger.exception("oauth token exchange failed for provider=%s", provider)
-            self._send_json(502, {"error": "oauth exchange failed"})
+            self._redirect_auth_error()
             return
         session_id = secrets.token_hex(16)
         self.server.sessions[session_id] = {"provider": provider, "nickname": profile.get("nickname")}
@@ -413,6 +424,17 @@ class _Handler(BaseHTTPRequestHandler):
         if session_id is None:
             return None
         return self.server.sessions.get(session_id)
+
+    def _require_session(self):
+        """재생·부적 게이트 — 세션 없으면 401을 보내고 None을 반환한다.
+
+        운세 텍스트(/api/fortune/today)는 게스트 허용을 유지하고,
+        오디오·부적 카드만 로그인 필요(클라이언트 게이트와 동일 정책).
+        """
+        session = self._current_session()
+        if session is None:
+            self._send_json(401, {"error": "login required"})
+        return session
 
     def _handle_auth_me(self) -> None:
         session = self._current_session()
@@ -477,6 +499,8 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/fortune/today":
             self._handle_fortune_today(query)
         elif parsed.path == "/api/share-card":
+            if self._require_session() is None:
+                return
             self._handle_share_card(query)
         elif parsed.path == "/api/auth/providers":
             self._handle_auth_providers()
@@ -487,9 +511,13 @@ class _Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/auth/me":
             self._handle_auth_me()
         elif parsed.path.startswith("/audio/mock/") and parsed.path.endswith(".wav"):
+            if self._require_session() is None:
+                return
             key_hash = parsed.path[len("/audio/mock/"):-len(".wav")]
             self._handle_audio_mock(key_hash)
         elif parsed.path.startswith("/audio/real/") and parsed.path.endswith(".mp3"):
+            if self._require_session() is None:
+                return
             key_hash = parsed.path[len("/audio/real/"):-len(".mp3")]
             self._handle_audio_real(key_hash)
         elif parsed.path == "/" or parsed.path.startswith("/static/") or parsed.path == "/index.html":

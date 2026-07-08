@@ -44,6 +44,19 @@ def _stop(httpd, thread):
     httpd.server_close()
 
 
+def _login_headers(httpd):
+    """오디오·부적 게이트용 — 서버 메모리에 세션을 직접 심고 서명 쿠키 헤더를 돌려준다."""
+    session_id = "testsession0001"
+    httpd.sessions[session_id] = {"provider": "google", "nickname": "테스트"}
+    value = web_server._make_session_cookie_value(session_id, httpd.session_secret)
+    return {"Cookie": f"shindang_session={value}"}
+
+
+def _open(httpd, path, headers=None):
+    req = urllib.request.Request(_url(httpd, path), headers=headers or {})
+    return urllib.request.urlopen(req)
+
+
 class TestFortuneEndpoint:
     def test_returns_json_envelope_with_playable_audio_url(self):
         httpd, thread = _start_server()
@@ -108,7 +121,7 @@ class TestAudioEndpoint:
         try:
             with urllib.request.urlopen(_url(httpd, "/api/fortune/today?topic=love&date=2026-07-07")) as resp:
                 data = json.loads(resp.read())
-            with urllib.request.urlopen(_url(httpd, data["audioUrl"])) as resp:
+            with _open(httpd, data["audioUrl"], headers=_login_headers(httpd)) as resp:
                 assert resp.status == 200
                 assert resp.headers.get("Content-Type") == "audio/wav"
                 body = resp.read()
@@ -117,11 +130,26 @@ class TestAudioEndpoint:
         finally:
             _stop(httpd, thread)
 
+    def test_audio_requires_login(self):
+        httpd, thread = _start_server()
+        try:
+            with urllib.request.urlopen(_url(httpd, "/api/fortune/today?topic=love&date=2026-07-07")) as resp:
+                data = json.loads(resp.read())
+            try:
+                urllib.request.urlopen(_url(httpd, data["audioUrl"]))
+                raised = False
+            except urllib.error.HTTPError as e:
+                raised = True
+                assert e.code == 401
+            assert raised
+        finally:
+            _stop(httpd, thread)
+
     def test_invalid_audio_key_rejected(self):
         httpd, thread = _start_server()
         try:
             try:
-                urllib.request.urlopen(_url(httpd, "/audio/mock/../../etc-passwd.wav"))
+                _open(httpd, "/audio/mock/../../etc-passwd.wav", headers=_login_headers(httpd))
                 raised = False
             except urllib.error.HTTPError as e:
                 raised = True
@@ -474,8 +502,8 @@ class TestShareCardEndpoint:
         try:
             with urllib.request.urlopen(_url(httpd, "/api/fortune/today?topic=love&date=2026-07-07")) as resp:
                 data = json.loads(resp.read())
-            with urllib.request.urlopen(
-                _url(httpd, f"/api/share-card?fortuneId={data['fortuneId']}")
+            with _open(
+                httpd, f"/api/share-card?fortuneId={data['fortuneId']}", headers=_login_headers(httpd)
             ) as resp:
                 assert resp.status == 200
                 assert resp.headers.get("Content-Type", "").startswith("image/svg+xml")
@@ -485,11 +513,24 @@ class TestShareCardEndpoint:
         finally:
             _stop(httpd, thread)
 
+    def test_share_card_requires_login(self):
+        httpd, thread = _start_server()
+        try:
+            try:
+                urllib.request.urlopen(_url(httpd, "/api/share-card?fortuneId=whatever"))
+                raised = False
+            except urllib.error.HTTPError as e:
+                raised = True
+                assert e.code == 401
+            assert raised
+        finally:
+            _stop(httpd, thread)
+
     def test_unknown_fortune_id_returns_404(self):
         httpd, thread = _start_server()
         try:
             try:
-                urllib.request.urlopen(_url(httpd, "/api/share-card?fortuneId=does-not-exist"))
+                _open(httpd, "/api/share-card?fortuneId=does-not-exist", headers=_login_headers(httpd))
                 raised = False
             except urllib.error.HTTPError as e:
                 raised = True
@@ -502,7 +543,7 @@ class TestShareCardEndpoint:
         httpd, thread = _start_server()
         try:
             try:
-                urllib.request.urlopen(_url(httpd, "/api/share-card"))
+                _open(httpd, "/api/share-card", headers=_login_headers(httpd))
                 raised = False
             except urllib.error.HTTPError as e:
                 raised = True
@@ -520,8 +561,8 @@ class TestShareCardEndpoint:
             )
             with urllib.request.urlopen(_url(httpd, path)) as resp:
                 data = json.loads(resp.read())
-            with urllib.request.urlopen(
-                _url(httpd, f"/api/share-card?fortuneId={data['fortuneId']}")
+            with _open(
+                httpd, f"/api/share-card?fortuneId={data['fortuneId']}", headers=_login_headers(httpd)
             ) as resp:
                 body = resp.read().decode("utf-8")
             assert "1990" not in body
@@ -553,7 +594,7 @@ class TestAudioRealEndpoint:
         fixture_bytes = b"\xff\xfb\x90\x00fake-mp3-fixture"
         fixture_path.write_bytes(fixture_bytes)
         try:
-            with urllib.request.urlopen(_url(httpd, f"/audio/real/{key_hash}.mp3")) as resp:
+            with _open(httpd, f"/audio/real/{key_hash}.mp3", headers=_login_headers(httpd)) as resp:
                 assert resp.status == 200
                 assert resp.headers.get("Content-Type") == "audio/mpeg"
                 assert resp.read() == fixture_bytes
@@ -566,7 +607,7 @@ class TestAudioRealEndpoint:
         try:
             missing_hash = "0" * 64
             try:
-                urllib.request.urlopen(_url(httpd, f"/audio/real/{missing_hash}.mp3"))
+                _open(httpd, f"/audio/real/{missing_hash}.mp3", headers=_login_headers(httpd))
                 raised = False
             except urllib.error.HTTPError as e:
                 raised = True
@@ -579,11 +620,24 @@ class TestAudioRealEndpoint:
         httpd, thread = _start_server(backend="openai")
         try:
             try:
-                urllib.request.urlopen(_url(httpd, "/audio/real/../../etc-passwd.mp3"))
+                _open(httpd, "/audio/real/../../etc-passwd.mp3", headers=_login_headers(httpd))
                 raised = False
             except urllib.error.HTTPError as e:
                 raised = True
                 assert e.code == 404
+            assert raised
+        finally:
+            _stop(httpd, thread)
+
+    def test_real_audio_requires_login(self):
+        httpd, thread = _start_server(backend="openai")
+        try:
+            try:
+                urllib.request.urlopen(_url(httpd, f"/audio/real/{'0' * 64}.mp3"))
+                raised = False
+            except urllib.error.HTTPError as e:
+                raised = True
+                assert e.code == 401
             assert raised
         finally:
             _stop(httpd, thread)
@@ -790,30 +844,37 @@ class TestOAuthLoginRedirect:
 class TestOAuthCallback:
     """T026: GET /api/auth/callback/{provider} — 코드 교환 경로를 실 네트워크 없이 monkeypatch로 고정."""
 
-    def test_missing_code_returns_400(self):
+    def test_missing_code_redirects_to_auth_error(self):
         httpd, thread = _start_server()
         try:
             resp, body = _raw_get(httpd, "/api/auth/callback/google")
-            assert resp.status == 400
+            assert resp.status == 302
+            assert resp.getheader("Location") == "/?auth_error=1"
         finally:
             _stop(httpd, thread)
 
-    def test_state_mismatch_returns_400(self):
+    def test_state_mismatch_redirects_to_auth_error(self):
         httpd, thread = _start_server()
         try:
             resp, body = _raw_get(
                 httpd, "/api/auth/callback/google?code=abc&state=bad",
                 headers={"Cookie": "shindang_oauth_state=good"},
             )
-            assert resp.status == 400
+            assert resp.status == 302
+            assert resp.getheader("Location") == "/?auth_error=1"
+            # 실패 시 세션 쿠키가 생기지 않고 state 쿠키만 정리된다
+            set_cookie = resp.getheader("Set-Cookie") or ""
+            assert "shindang_session=" not in set_cookie
+            assert "shindang_oauth_state=" in set_cookie and "Max-Age=0" in set_cookie
         finally:
             _stop(httpd, thread)
 
-    def test_missing_state_cookie_returns_400(self):
+    def test_missing_state_cookie_redirects_to_auth_error(self):
         httpd, thread = _start_server()
         try:
             resp, body = _raw_get(httpd, "/api/auth/callback/google?code=abc&state=st1")
-            assert resp.status == 400
+            assert resp.status == 302
+            assert resp.getheader("Location") == "/?auth_error=1"
         finally:
             _stop(httpd, thread)
 
@@ -851,7 +912,7 @@ class TestOAuthCallback:
         finally:
             _stop(httpd, thread)
 
-    def test_exchange_failure_returns_502(self, monkeypatch):
+    def test_exchange_failure_redirects_to_auth_error(self, monkeypatch):
         def fake_exchange(provider, code, *, redirect_uri):
             raise RuntimeError("network unreachable")
 
@@ -863,7 +924,9 @@ class TestOAuthCallback:
                 httpd, "/api/auth/callback/google?code=authcode123&state=st1",
                 headers={"Cookie": "shindang_oauth_state=st1"},
             )
-            assert resp.status == 502
+            assert resp.status == 302
+            assert resp.getheader("Location") == "/?auth_error=1"
+            assert "shindang_session=" not in (resp.getheader("Set-Cookie") or "")
         finally:
             _stop(httpd, thread)
 
@@ -914,7 +977,8 @@ class TestAuthMeAndLogout:
 class TestGuestFlowNonRegression:
     """AC: 키 없는 환경(기본)에서 게스트 흐름(탭→재생)이 무회귀해야 한다."""
 
-    def test_fortune_and_share_flow_unaffected_by_auth_scaffold(self, monkeypatch):
+    def test_fortune_text_stays_guest_but_share_requires_login(self, monkeypatch):
+        """정책 변경(2026-07-08): 운세 텍스트는 게스트 유지, 재생·부적은 로그인 게이트."""
         monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
         monkeypatch.delenv("KAKAO_REST_API_KEY", raising=False)
         httpd, thread = _start_server()
@@ -922,8 +986,15 @@ class TestGuestFlowNonRegression:
             with urllib.request.urlopen(_url(httpd, "/api/fortune/today?topic=love&date=2026-07-07")) as resp:
                 data = json.loads(resp.read())
             assert data["audioUrl"].startswith("/audio/mock/")
-            with urllib.request.urlopen(
-                _url(httpd, f"/api/share-card?fortuneId={data['fortuneId']}")
+            try:
+                urllib.request.urlopen(_url(httpd, f"/api/share-card?fortuneId={data['fortuneId']}"))
+                raised = False
+            except urllib.error.HTTPError as e:
+                raised = True
+                assert e.code == 401
+            assert raised
+            with _open(
+                httpd, f"/api/share-card?fortuneId={data['fortuneId']}", headers=_login_headers(httpd)
             ) as resp:
                 assert resp.status == 200
         finally:
