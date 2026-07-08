@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <meta name="design_doc_mode" content="canvas">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Song+Myung&amp;family=Gowun+Batang:wght@400;700&amp;family=Noto+Sans+KR:wght@400;500;700;900&amp;display=swap" rel="stylesheet">
+  <style>
+    body{margin:0;background:#f0eee9;font-family:'Noto Sans KR',system-ui,sans-serif}
+    a{color:#8a6d1f}a:hover{color:#5f4a12}
+    .dv-turn{padding:40px 44px 32px;border-bottom:1px solid rgba(0,0,0,.08);scroll-margin-top:16px}
+    .dv-thd{display:flex;align-items:baseline;gap:10px;margin:0 0 20px}
+    .dv-tid{font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#1a1a1a;color:#fff;border-radius:4px;text-decoration:none}
+    .dv-tname{font:600 13px/1.2 system-ui,sans-serif;color:#1a1a1a}
+    .dv-opts{display:flex;flex-wrap:wrap;gap:28px;align-items:flex-start}
+    .dv-opt{flex:none;display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px}
+    .dv-oid{font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none}
+    .dv-olabel{display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)}
+    .dv-card{max-width:100%;background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.06);overflow:hidden}
+    .dv-opt:target .dv-oid{background:#2a78d6;color:#fff}
+    .dv-next{margin:22px 0 0;font:12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.5)}
+    @keyframes ts-breathe{0%,100%{transform:translateX(-50%) scale(1)}50%{transform:translateX(-50%) scale(1.03)}}
+  </style>
+</helmet>
+
+<section class="dv-turn" id="t1">
+  <div class="dv-thd"><a class="dv-tid" href="#t1">1</a><span class="dv-tname">메인 화면(S4) 리디자인 — 3가지 방향 + 결과 상태</span></div>
+  <div class="dv-opts">
+
+    <!-- ══ 1a 프로토타입 충실안 ══ -->
+    <div class="dv-opt" id="1a">
+      <div class="dv-olabel"><a class="dv-oid" href="#1a">1a</a>프로토타입 충실 — 무대 카드 + 단청 팔레트</div>
+      <div class="dv-card" style="width: 390px;">
+        <div data-screen-label="1a 메인" style="position: relative; width: 390px; height: 800px; background: #16101E; color: #F5EEFC; font-family: 'Noto Sans KR', sans-serif; display: flex; flex-direction: column; overflow: hidden;">
+          <div aria-hidden="true" style="position: absolute; inset: 0; pointer-events: none; background: radial-gradient(circle at 50% -5%, rgba(201,24,74,.42), transparent 52%), radial-gradient(circle at 12% 34%, rgba(242,183,5,.14), transparent 42%), radial-gradient(circle at 88% 62%, rgba(123,44,191,.2), transparent 48%);"></div>
+          <div style="position: relative; display: flex; align-items: center; justify-content: space-between; padding: 22px 24px 0;">
+            <div style="display: flex; flex-direction: column; gap: 2px;">
+              <div style="font-size: 10px; letter-spacing: .3em; color: #F2B705; font-weight: 700;">TODAY SHINDANG</div>
+              <div style="font-family: 'Song Myung', serif; font-size: 22px;">오늘신당</div>
+            </div>
+            <button style="padding: 8px 14px; border: 1px solid rgba(245,238,252,.25); border-radius: 999px; background: rgba(255,255,255,.04); color: #F5EEFC; font-size: 12px; font-family: inherit; cursor: pointer;">로그인</button>
+          </div>
+          <div style="position: relative; display: flex; align-items: center; gap: 8px; padding: 14px 24px 0;">
+            <div style="display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 999px; background: rgba(242,183,5,.12); border: 1px solid rgba(242,183,5,.3);">
+              <span style="font-size: 12px; font-weight: 700; color: #F2B705;">하늘이님</span>
+              <span style="width: 1px; height: 10px; background: rgba(242,183,5,.35);"></span>
+              <span style="font-size: 11px; color: rgba(245,238,252,.65); cursor: pointer;">변경</span>
+            </div>
+          </div>
+          <div style="position: relative; flex: 1; margin: 16px 24px 0; border-radius: 20px; overflow: hidden; background: radial-gradient(circle at 50% 18%, rgba(201,24,74,.34), rgba(22,16,30,.65) 78%); border: 1px solid rgba(242,183,5,.28); display: flex; align-items: flex-end;">
+            <img src="assets/hongyeon-idle.webp" alt="홍연" style="position: absolute; top: 4%; left: 50%; transform: translateX(-50%); width: 86%; animation: ts-breathe 3.2s ease-in-out infinite;">
+            <div style="position: relative; width: 100%; padding: 18px 20px 16px; background: linear-gradient(180deg, transparent, rgba(15,10,20,.92) 55%); display: flex; flex-direction: column; gap: 3px;">
+              <div style="display: flex; align-items: baseline; gap: 8px;">
+                <span style="font-family: 'Song Myung', serif; font-size: 22px;">홍연</span>
+                <span style="font-size: 10px; padding: 3px 8px; border-radius: 999px; background: rgba(242,183,5,.16); color: #F2B705; font-weight: 700;">오늘의 기운 준비 완료</span>
+              </div>
+              <div style="font-size: 12px; color: rgba(245,238,252,.68);">하늘이님의 오늘을 무대 위에서 읽어드릴게요</div>
+            </div>
+          </div>
+          <div style="position: relative; padding: 18px 24px 30px; display: flex; flex-direction: column; gap: 10px;">
+            <button style="width: 100%; padding: 17px; border: none; border-radius: 14px; background: #C9184A; color: #FFF; font-size: 17px; font-weight: 700; font-family: inherit; cursor: pointer; box-shadow: 0 8px 28px rgba(201,24,74,.45);">탭하여 오늘의 운세 보기</button>
+            <div style="font-size: 11px; text-align: center; color: rgba(245,238,252,.42);">하루 한 번, 홍연의 1분 운세 공연</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ 1b 몰입 무대안 ══ -->
+    <div class="dv-opt" id="1b">
+      <div class="dv-olabel"><a class="dv-oid" href="#1b">1b</a>발전안 — 풀블리드 캐릭터 + 글래스 오버레이</div>
+      <div class="dv-card" style="width: 390px;">
+        <div data-screen-label="1b 메인" style="position: relative; width: 390px; height: 800px; background: #0F0A14; color: #F5EEFC; font-family: 'Noto Sans KR', sans-serif; overflow: hidden;">
+          <img src="assets/hongyeon-greeting.webp" alt="홍연" style="position: absolute; top: 6%; left: 50%; transform: translateX(-50%); width: 108%; filter: drop-shadow(0 30px 60px rgba(201,24,74,.4));">
+          <div aria-hidden="true" style="position: absolute; inset: 0; background: radial-gradient(circle at 50% 0%, rgba(201,24,74,.5), transparent 55%), linear-gradient(180deg, rgba(15,10,20,.25) 0%, transparent 22%, transparent 46%, rgba(15,10,20,.94) 74%, #0F0A14 90%); pointer-events: none;"></div>
+          <div style="position: absolute; top: 0; left: 0; right: 0; display: flex; align-items: center; justify-content: space-between; padding: 20px 22px;">
+            <div style="display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: 999px; background: rgba(15,10,20,.45); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border: 1px solid rgba(245,238,252,.14);">
+              <span style="font-family: 'Song Myung', serif; font-size: 15px;">오늘신당</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <div style="display: flex; align-items: center; gap: 7px; padding: 8px 12px; border-radius: 999px; background: rgba(15,10,20,.45); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border: 1px solid rgba(245,238,252,.14);">
+                <span style="width: 7px; height: 7px; border-radius: 50%; background: #F2B705;"></span>
+                <span style="font-size: 12px; font-weight: 500;">하늘이님</span>
+              </div>
+              <button style="padding: 8px 13px; border: 1px solid rgba(245,238,252,.18); border-radius: 999px; background: rgba(15,10,20,.45); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); color: rgba(245,238,252,.75); font-size: 12px; font-family: inherit; cursor: pointer;">로그인</button>
+            </div>
+          </div>
+          <div style="position: absolute; left: 0; right: 0; bottom: 0; padding: 0 24px 32px; display: flex; flex-direction: column; gap: 14px;">
+            <div style="display: flex; flex-direction: column; gap: 6px;">
+              <div style="font-size: 11px; letter-spacing: .28em; color: #F2B705; font-weight: 700;">오늘의 무대가 열렸어요</div>
+              <div style="font-family: 'Song Myung', serif; font-size: 28px; line-height: 1.3;">하늘이님,<br>오늘의 기운을 들어볼까요?</div>
+            </div>
+            <button style="width: 100%; padding: 18px; border: none; border-radius: 16px; background: linear-gradient(135deg, #E0245E, #C9184A); color: #FFF; font-size: 17px; font-weight: 700; font-family: inherit; cursor: pointer; box-shadow: 0 10px 32px rgba(201,24,74,.5);">탭하여 오늘의 운세 보기</button>
+            <div style="display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 11px; color: rgba(245,238,252,.45);">
+              <span>1분 음성 공연</span><span style="opacity:.4;">·</span><span>하루 한 번 무료</span><span style="opacity:.4;">·</span><span style="text-decoration: underline; cursor: pointer;">프로필 변경</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ 1c 부적 카드안 ══ -->
+    <div class="dv-opt" id="1c">
+      <div class="dv-olabel"><a class="dv-oid" href="#1c">1c</a>새 방향 — 금선 부적 프레임 · 세로 타이포</div>
+      <div class="dv-card" style="width: 390px;">
+        <div data-screen-label="1c 메인" style="position: relative; width: 390px; height: 800px; background: #0C0A12; color: #EFE8DA; font-family: 'Gowun Batang', serif; display: flex; flex-direction: column; overflow: hidden;">
+          <div aria-hidden="true" style="position: absolute; inset: 0; pointer-events: none; background: radial-gradient(ellipse at 50% 110%, rgba(138,109,31,.18), transparent 60%);"></div>
+          <div style="position: relative; display: flex; align-items: center; justify-content: space-between; padding: 24px 26px 0;">
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <span style="width: 26px; height: 26px; border: 1px solid #C9A24B; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; color: #C9A24B;">神</span>
+              <span style="font-size: 17px; letter-spacing: .14em; font-weight: 700;">오늘신당</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 12px; font-family: 'Noto Sans KR', sans-serif;">
+              <span style="font-size: 12px; color: rgba(239,232,218,.75);">하늘이님 <span style="color: rgba(201,162,75,.9); text-decoration: underline; text-underline-offset: 3px; cursor: pointer;">변경</span></span>
+              <span style="font-size: 12px; color: rgba(239,232,218,.5); cursor: pointer;">로그인</span>
+            </div>
+          </div>
+          <div style="position: relative; flex: 1; display: flex; align-items: stretch; gap: 14px; padding: 22px 26px 0;">
+            <div style="flex: none; display: flex; flex-direction: column; justify-content: space-between; align-items: center; padding: 4px 0 10px;">
+              <div style="writing-mode: vertical-rl; font-size: 13px; letter-spacing: .5em; color: rgba(201,162,75,.85);">오늘의기운</div>
+              <div style="width: 1px; flex: 1; margin: 12px 0; background: linear-gradient(180deg, rgba(201,162,75,.5), transparent);"></div>
+              <div style="writing-mode: vertical-rl; font-size: 11px; letter-spacing: .4em; color: rgba(239,232,218,.4);">홍연신점</div>
+            </div>
+            <div style="position: relative; flex: 1; border-radius: 18px 18px 60px 60px; border: 1px solid rgba(201,162,75,.55); background: radial-gradient(circle at 50% 12%, rgba(201,24,74,.24), rgba(12,10,18,.4) 75%); overflow: hidden; display: flex; align-items: flex-end;">
+              <div style="position: absolute; top: 10px; left: 10px; right: 10px; bottom: 10px; border: 1px solid rgba(201,162,75,.22); border-radius: 12px 12px 52px 52px; pointer-events: none;"></div>
+              <img src="assets/hongyeon-idle.webp" alt="홍연" style="position: absolute; top: 6%; left: 50%; transform: translateX(-50%); width: 92%;">
+              <div style="position: relative; width: 100%; padding: 20px 18px 24px; background: linear-gradient(180deg, transparent, rgba(12,10,18,.94) 60%); text-align: center; display: flex; flex-direction: column; gap: 5px;">
+                <div style="font-size: 21px; font-weight: 700; letter-spacing: .06em;">홍연</div>
+                <div style="font-family: 'Noto Sans KR', sans-serif; font-size: 12px; color: rgba(239,232,218,.6);">붉은 단청의 퍼포머 · 연애 · 자신감 · 대인관계</div>
+              </div>
+            </div>
+          </div>
+          <div style="position: relative; padding: 20px 26px 30px; display: flex; flex-direction: column; gap: 10px;">
+            <button style="width: 100%; padding: 17px; border: 1px solid #C9A24B; border-radius: 4px; background: transparent; color: #C9A24B; font-size: 16px; font-weight: 700; letter-spacing: .12em; font-family: 'Gowun Batang', serif; cursor: pointer;">오늘의 운세 청하기</button>
+            <div style="font-family: 'Noto Sans KR', sans-serif; font-size: 11px; text-align: center; color: rgba(239,232,218,.4);">하루 한 번 · 홍연의 1분 음성 신점</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ══ 1d 결과 상태 (1b 언어) ══ -->
+    <div class="dv-opt" id="1d">
+      <div class="dv-olabel"><a class="dv-oid" href="#1d">1d</a>결과 상태 — <a class="dv-oid" href="#1b">1b</a> 언어로 카드·플레이어·부적</div>
+      <div class="dv-card" style="width: 390px;">
+        <div data-screen-label="1d 결과" style="position: relative; width: 390px; height: 800px; background: #0F0A14; color: #F5EEFC; font-family: 'Noto Sans KR', sans-serif; display: flex; flex-direction: column; overflow: hidden;">
+          <div aria-hidden="true" style="position: absolute; inset: 0; pointer-events: none; background: radial-gradient(circle at 50% -8%, rgba(201,24,74,.45), transparent 48%);"></div>
+          <div style="position: relative; display: flex; align-items: center; gap: 12px; padding: 20px 22px 0;">
+            <div style="position: relative; width: 62px; height: 62px; border-radius: 50%; overflow: hidden; border: 2px solid rgba(242,183,5,.5); background: radial-gradient(circle at 50% 20%, rgba(201,24,74,.4), #16101E); flex: none;">
+              <img src="assets/hongyeon-speaking.webp" alt="홍연" style="position: absolute; top: 8%; left: 50%; transform: translateX(-50%); width: 150%;">
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 2px; flex: 1;">
+              <div style="font-family: 'Song Myung', serif; font-size: 17px;">홍연이 전하는 오늘</div>
+              <div style="font-size: 11px; color: #F2B705;">하늘이님 · 7월 8일 화요일</div>
+            </div>
+            <button style="padding: 7px 12px; border: 1px solid rgba(245,238,252,.2); border-radius: 999px; background: transparent; color: rgba(245,238,252,.7); font-size: 11px; font-family: inherit; cursor: pointer;">닫기</button>
+          </div>
+          <div style="position: relative; margin: 16px 22px 0; padding: 20px; border-radius: 18px; background: rgba(255,255,255,.05); border: 1px solid rgba(242,183,5,.25); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); display: flex; flex-direction: column; gap: 16px; overflow: hidden;">
+            <div style="font-family: 'Song Myung', serif; font-size: 19px; line-height: 1.55;">"막혔던 인연의 물꼬가 트이는 날. 먼저 건네는 인사가 복을 부릅니다."</div>
+            <div style="display: flex; flex-direction: column; gap: 9px;">
+              <div style="display: grid; grid-template-columns: 44px 1fr 30px; align-items: center; gap: 10px; font-size: 12px;">
+                <span style="color: rgba(245,238,252,.65);">연애</span>
+                <span style="height: 7px; border-radius: 4px; background: rgba(255,255,255,.1); overflow: hidden; display: block;"><span style="display: block; height: 100%; width: 86%; border-radius: 4px; background: linear-gradient(90deg, #C9184A, #E0245E);"></span></span>
+                <span style="text-align: right; color: #F2B705; font-weight: 700;">86</span>
+              </div>
+              <div style="display: grid; grid-template-columns: 44px 1fr 30px; align-items: center; gap: 10px; font-size: 12px;">
+                <span style="color: rgba(245,238,252,.65);">금전</span>
+                <span style="height: 7px; border-radius: 4px; background: rgba(255,255,255,.1); overflow: hidden; display: block;"><span style="display: block; height: 100%; width: 62%; border-radius: 4px; background: linear-gradient(90deg, #C9184A, #E0245E);"></span></span>
+                <span style="text-align: right; color: rgba(245,238,252,.8); font-weight: 700;">62</span>
+              </div>
+              <div style="display: grid; grid-template-columns: 44px 1fr 30px; align-items: center; gap: 10px; font-size: 12px;">
+                <span style="color: rgba(245,238,252,.65);">대인</span>
+                <span style="height: 7px; border-radius: 4px; background: rgba(255,255,255,.1); overflow: hidden; display: block;"><span style="display: block; height: 100%; width: 78%; border-radius: 4px; background: linear-gradient(90deg, #C9184A, #E0245E);"></span></span>
+                <span style="text-align: right; color: rgba(245,238,252,.8); font-weight: 700;">78</span>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 12px; background: rgba(242,183,5,.08); border: 1px solid rgba(242,183,5,.22);">
+              <span style="width: 18px; height: 18px; border-radius: 50%; background: #C9184A; border: 1px solid rgba(255,255,255,.4); flex: none;"></span>
+              <div style="display: flex; flex-direction: column; gap: 1px;">
+                <span style="font-size: 12px; font-weight: 700; color: #F2B705;">행운의 색 · 진홍</span>
+                <span style="font-size: 11px; color: rgba(245,238,252,.65);">행운의 물건 · 붉은 실 팔찌</span>
+              </div>
+            </div>
+            <div style="font-size: 12px; color: rgba(245,238,252,.55); line-height: 1.6;">오늘 피할 것 — 오후의 성급한 약속, 빌려주는 돈</div>
+          </div>
+          <div style="position: relative; margin: auto 22px 0; padding: 14px 16px; border-radius: 16px; background: rgba(255,255,255,.05); border: 1px solid rgba(245,238,252,.12); display: flex; align-items: center; gap: 14px;">
+            <button style="width: 46px; height: 46px; border-radius: 50%; border: none; background: #F2B705; color: #16101E; font-size: 16px; font-weight: 900; font-family: inherit; cursor: pointer; flex: none;">▶</button>
+            <div style="flex: 1; display: flex; flex-direction: column; gap: 7px;">
+              <div style="display: flex; justify-content: space-between; font-size: 11px; color: rgba(245,238,252,.6);"><span>홍연의 음성 풀이</span><span>0:22 / 1:04</span></div>
+              <div style="height: 5px; border-radius: 3px; background: rgba(255,255,255,.12); overflow: hidden;"><div style="height: 100%; width: 34%; border-radius: 3px; background: #F2B705;"></div></div>
+            </div>
+          </div>
+          <div style="position: relative; padding: 14px 22px 28px;">
+            <button style="width: 100%; padding: 16px; border: none; border-radius: 14px; background: #C9184A; color: #FFF; font-size: 16px; font-weight: 700; font-family: inherit; cursor: pointer; box-shadow: 0 8px 26px rgba(201,24,74,.4);">오늘의 부적 받기</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  <p class="dv-next">다음 시도: "<a class="dv-oid" href="#1b">1b</a>로 확정하고 전체 플로우에 적용" · "<a class="dv-oid" href="#1c">1c</a>의 금선 프레임을 <a class="dv-oid" href="#1a">1a</a>에 섞어줘" · "확정안을 index.html + styles.css 코드로 만들어줘"</p>
+</section>
+
+</x-dc>
+</body>
+</html>
