@@ -325,6 +325,35 @@ class TestRateLimits:
         assert time_mod is not None
 
 
+# ── 꿈 부적 SVG ──
+class TestDreamShareCard:
+    def test_requires_login(self, client):
+        assert client.get("/api/dream/share-card?symbols=뱀").status_code == 401
+
+    def test_renders_svg_from_symbols(self, fastapi_app, client):
+        login(fastapi_app, client)
+        res = client.get("/api/dream/share-card?symbols=뱀,물")
+        assert res.status_code == 200
+        assert res.headers["content-type"].startswith("image/svg+xml")
+        assert res.text.startswith("<svg")
+        assert "꿈 · 뱀" in res.text and "꿈 · 물" in res.text
+        assert "오늘신당 · 꿈부적" in res.text
+
+    def test_invalid_symbols_400(self, fastapi_app, client):
+        login(fastapi_app, client)
+        assert client.get("/api/dream/share-card?symbols=없는상징").status_code == 400
+        assert client.get("/api/dream/share-card").status_code == 400
+
+    def test_symbols_capped_and_no_nickname_leak(self, fastapi_app, client):
+        """상징 3개 초과는 잘리고, 닉네임은 공용 기본값(손님)만 사용 — 개인정보 미포함."""
+        login(fastapi_app, client)
+        res = client.get("/api/dream/share-card?symbols=뱀,물,불,돈")
+        assert res.status_code == 200
+        assert "꿈 · 돈" not in res.text
+        assert "손님" in res.text
+        assert "테스트" not in res.text  # 세션 닉네임을 카드에 넣지 않는다
+
+
 # ── dream 순수 로직 단위 테스트 ──
 class TestDreamLogic:
     def test_detect_defaults_to_water(self):

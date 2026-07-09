@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 
 _ROOT = Path(__file__).resolve().parent.parent
 
-from backend import core, dream, ratelimit  # noqa: E402 — 헬퍼(레거시에서 승격)·꿈 해몽·리미터
+from backend import core, dream, dream_card, ratelimit  # noqa: E402 — 헬퍼·꿈 해몽·꿈 부적·리미터
 
 _logger = logging.getLogger("fortune_engine.backend")
 
@@ -183,6 +183,19 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         cache_key = "dream:" + result["dreamId"]
         result["audioUrl"] = core.mock_audio_url_for(cache_key)
         return result
+
+    # ── 꿈 부적 SVG (로그인 필요, 무저장 — 상징 조합만으로 풀이 재구성) ──
+    @app.get("/api/dream/share-card")
+    def dream_share_card(request: Request):
+        gate = login_required(request)
+        if gate:
+            return gate
+        raw = request.query_params.get("symbols", "")
+        symbols = [s for s in (part.strip() for part in raw.split(",")) if s in dream.SYMBOLS]
+        if not symbols:
+            return JSONResponse({"error": "valid symbols required"}, status_code=400)
+        svg = dream_card.render_dream_card_svg(symbols[: dream.MAX_SYMBOLS], nickname=core.SHARE_CARD_NICKNAME)
+        return Response(svg, media_type="image/svg+xml; charset=utf-8")
 
     # ── 인증 ──
     @app.get("/api/auth/providers")

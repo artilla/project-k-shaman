@@ -29,6 +29,10 @@ export interface DreamResponse {
   audioUrl: string;
 }
 
+export function dreamShareCardUrl(symbolLabels: string[]): string {
+  return `/api/dream/share-card?symbols=${encodeURIComponent(symbolLabels.join(","))}`;
+}
+
 export async function interpretDream(text: string, symbols: string[]): Promise<DreamResponse> {
   const res = await fetch("/api/dream/interpret", {
     method: "POST",

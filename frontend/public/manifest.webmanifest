@@ -1,0 +1,16 @@
+{
+  "name": "오늘신당 — 홍연 운세",
+  "short_name": "오늘신당",
+  "description": "AI 무당 홍연의 1분 운세 공연. 오늘의 기운을 무대 위에서 듣다.",
+  "lang": "ko",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0A070E",
+  "theme_color": "#0F0A14",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

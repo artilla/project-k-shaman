@@ -12,7 +12,7 @@ import { S0Onboarding, S1CharIntro, S2ProfileForm, S3TopicSelect } from "./compo
 import { S4Stage } from "./components/Stage";
 import { S5ResultCard } from "./components/ResultCard";
 import { D1DreamInput, D2DreamStage, D3DreamTalisman } from "./components/DreamScreens";
-import { interpretDream, type DreamResponse } from "./lib/dream";
+import { dreamShareCardUrl, interpretDream, type DreamResponse } from "./lib/dream";
 
 function downloadBlob(blob: Blob, fileName: string) {
   const url = URL.createObjectURL(blob);
@@ -263,6 +263,19 @@ export default function App() {
       .finally(() => setDreamLoading(false));
   }, [dreamLoading, go, player, requireLogin]);
 
+  const handleDreamSaveImage = useCallback(() => {
+    if (!requireLogin() || !dreamData) return;
+    const labels = dreamData.reading.symbols.map((s) => s.label);
+    fetch(dreamShareCardUrl(labels))
+      .then((res) => {
+        if (!res.ok) throw new Error("꿈 부적을 불러오지 못했어요");
+        return res.blob();
+      })
+      .then((blob) => shareOrDownload(dreamData.dreamId, blob))
+      .then(() => showToast("꿈 부적을 받았어요"))
+      .catch((err: Error) => showToast(err.message)); // D3는 토스트가 유일한 피드백 채널
+  }, [dreamData, requireLogin, showToast]);
+
   const handleCopyLink = useCallback(() => {
     setSheetOpen(false);
     const url = window.location.origin + "/";
@@ -343,7 +356,7 @@ export default function App() {
         <D3DreamTalisman
           reading={dreamData.reading}
           nickname={nickname}
-          onSaveImage={() => showToast("꿈 부적 이미지 저장은 곧 열려요")}
+          onSaveImage={handleDreamSaveImage}
           onOpenShare={() => setSheetOpen(true)}
           onRestart={() => { setDreamData(null); go("d1", false); }}
         />
