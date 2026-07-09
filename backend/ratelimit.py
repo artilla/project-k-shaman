@@ -25,6 +25,8 @@ LIMITS = {
     "dream": (_int_env("RL_DREAM_PER_HOUR", 10), 3600),
     "login": (_int_env("RL_LOGIN_PER_10MIN", 10), 600),
     "event": (_int_env("RL_EVENT_PER_HOUR", 120), 3600),
+    # 실 TTS 합성(과금) 트리거 — 듣기 탭 시점에만 호출된다 (text-first 분리, 리뷰 P1-3)
+    "tts": (_int_env("RL_TTS_PER_HOUR", 20), 3600),
 }
 
 # 일일 사용 상한 (UTC 자정 기준 고정 윈도우) — "하루 N회" 제품 정책.

@@ -45,11 +45,74 @@ class TestFortune:
             assert key in data
         assert data["audioUrl"].startswith("/audio/mock/")
 
-    def test_birth_query_is_deterministic(self, client):
-        path = "/api/fortune/today?topic=love&date=2026-07-07&birth_year=1995&birth_month=3&birth_day=21"
-        first = client.get(path).json()
-        second = client.get(path).json()
+    def test_post_birth_body_is_deterministic(self, client):
+        """리뷰 P1-2: birth 원문은 POST 본문으로만 — 결정성은 유지된다."""
+        body = {"topic": "love", "date": "2026-07-07", "birth_year": 1995, "birth_month": 3, "birth_day": 21}
+        first = client.post("/api/fortune/today", json=body).json()
+        second = client.post("/api/fortune/today", json=body).json()
         assert first["fortuneId"] == second["fortuneId"]
+
+    def test_get_ignores_birth_query_params(self, client):
+        """GET은 birth 쿼리를 받지 않는다 (URL·접근 로그 노출 방지) — 무시되어 비개인화와 동일."""
+        with_birth = client.get(
+            "/api/fortune/today?topic=love&date=2026-07-07&birth_year=1995&birth_month=3&birth_day=21"
+        ).json()
+        without = client.get("/api/fortune/today?topic=love&date=2026-07-07").json()
+        assert with_birth["fortuneId"] == without["fortuneId"]
+
+    def test_date_changes_fortune(self, client):
+        """리뷰 P1-1: 날짜가 seed에 반영돼 다른 날은 다른 운세가 나온다."""
+        a = client.get("/api/fortune/today?topic=love&date=2026-07-07").json()
+        b = client.get("/api/fortune/today?topic=love&date=2026-07-08").json()
+        assert a["fortuneId"] != b["fortuneId"]
+        assert a["fortune"]["meta"]["date"] == "2026-07-07"
+
+    def test_invalid_topic_400(self, client):
+        assert client.get("/api/fortune/today?topic=hack").status_code == 400
+
+    def test_invalid_birth_400(self, client):
+        res = client.post("/api/fortune/today", json={"topic": "love", "birth_year": "abc"})
+        assert res.status_code == 400
+
+    def test_fortune_never_runs_real_tts(self, fastapi_app, client, monkeypatch):
+        """리뷰 P1-3(text-first): openai 모드여도 텍스트 API는 실 합성을 호출하지 않는다."""
+        calls = []
+        original = core.build_playback_response
+
+        def spy(req, **kwargs):
+            calls.append(kwargs.get("tts_backend"))
+            return original(req, tts_backend=None)
+
+        monkeypatch.setattr(core, "build_playback_response", spy)
+        fastapi_app.state.tts_backend_mode = "openai"
+        res = client.get("/api/fortune/today?topic=love&date=2026-07-07")
+        assert res.status_code == 200
+        assert calls == [None]
+        assert res.json()["audioUrl"].startswith("/audio/real/")
+
+
+# ── TTS 준비 (실 합성·과금 분리 지점) ──
+class TestTtsPrepare:
+    def test_requires_login(self, client):
+        assert client.post("/api/tts/prepare", json={"topic": "love"}).status_code == 401
+
+    def test_returns_audio_url_when_logged_in(self, fastapi_app, client):
+        login(fastapi_app, client)
+        res = client.post("/api/tts/prepare", json={"topic": "love", "date": "2026-07-07"})
+        assert res.status_code == 200
+        assert res.json()["audioUrl"].startswith("/audio/mock/")
+
+    def test_matches_fortune_audio_url(self, fastapi_app, client):
+        """동일 파라미터의 운세 응답 audioUrl과 prepare 결과가 일치 — 클라 cacheKey 신뢰 없음."""
+        login(fastapi_app, client)
+        body = {"topic": "love", "date": "2026-07-07", "birth_year": 1995, "birth_month": 3, "birth_day": 21}
+        fortune_url = client.post("/api/fortune/today", json=body).json()["audioUrl"]
+        prepare_url = client.post("/api/tts/prepare", json=body).json()["audioUrl"]
+        assert fortune_url == prepare_url
+
+    def test_invalid_topic_400(self, fastapi_app, client):
+        login(fastapi_app, client)
+        assert client.post("/api/tts/prepare", json={"topic": "hack"}).status_code == 400
 
 
 # ── 게이트: 재생·부적·꿈 해몽 로그인 필요 (US-9) ──
@@ -145,11 +208,11 @@ class TestShareCardPrivacy:
     def test_share_card_does_not_leak_birth_fields_or_seed_hash(self, fastapi_app, client):
         """T021 개인정보 최소화 — SVG에 생년 원문·seed_hash가 노출되면 안 된다."""
         login(fastapi_app, client)
-        path = (
-            "/api/fortune/today?topic=love&date=2026-07-07"
-            "&birth_year=1990&birth_month=5&birth_day=14&birth_hour=8"
-        )
-        data = client.get(path).json()
+        body = {
+            "topic": "love", "date": "2026-07-07",
+            "birth_year": 1990, "birth_month": 5, "birth_day": 14, "birth_hour": 8,
+        }
+        data = client.post("/api/fortune/today", json=body).json()
         svg = client.get(f"/api/share-card?fortuneId={data['fortuneId']}").text
         assert "1990" not in svg
         assert data["fortune"]["meta"]["seed_hash"] not in svg
@@ -237,6 +300,31 @@ class TestCoreHelpers:
             core.validate_backend_startup("openai", has_api_key=False)
         core.validate_backend_startup("openai", has_api_key=True)
         core.validate_backend_startup("mock", has_api_key=False)
+
+    def test_cache_get_or_compute_is_atomic(self):
+        """리뷰 P1-9: 동일 키 병렬 miss에서 compute가 1회만 실행된다 (중복 과금 방지)."""
+        import threading
+        import time as time_mod
+        cache_layer = core._load_engine_module("cache_layer")
+        get_or_compute = cache_layer.get_or_compute
+
+        store = cache_layer.InMemoryCacheStore()
+        calls = []
+
+        def slow_compute():
+            calls.append(1)
+            time_mod.sleep(0.05)
+            return {"v": 1}
+
+        threads = [
+            threading.Thread(target=lambda: get_or_compute(store, "same-key", slow_compute, layer="tts"))
+            for _ in range(8)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(calls) == 1
 
 
 class TestCallbackFlows:

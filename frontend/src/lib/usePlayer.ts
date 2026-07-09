@@ -175,7 +175,10 @@ export function usePlayer(options: {
 
   const stop = useCallback(() => {
     const audio = audioRef.current;
-    if (audio && !audio.paused) audio.pause();
+    if (audio && !audio.paused) {
+      audio.pause();
+      setPhase("paused"); // 리뷰 P2: 화면 이탈 정지 후 phase가 playing으로 남던 불일치 수정
+    }
     stopGlowLoop();
   }, [stopGlowLoop]);
 

@@ -51,10 +51,16 @@ export function validateProfileInput(nickname: string, birthDateRaw: string): Pr
   return errors;
 }
 
-/** 당일 재방문 유지, 하루 차이 +1, 그 외 1로 리셋 — v2 프로토타입과 동일 규칙. */
+function localDateString(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** 당일 재방문 유지, 하루 차이 +1, 그 외 1로 리셋 — v2 프로토타입과 동일 규칙.
+ *  리뷰 P2: UTC(toISOString) 기준이라 KST 오전 9시에 날짜가 바뀌던 문제 → 기기 로컬 날짜 사용. */
 export function computeStreak(): number {
   try {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDateString();
     const raw = JSON.parse(window.localStorage.getItem(STREAK_STORAGE_KEY) || "null");
     let count = 1;
     if (raw && raw.lastDate) {

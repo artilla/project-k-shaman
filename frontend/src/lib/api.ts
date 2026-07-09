@@ -21,24 +21,47 @@ export function reportEvents(
   });
 }
 
-export function buildFortuneUrl(profile: Profile | null, topic: string): string {
-  const params = new URLSearchParams();
+/** 기기 로컬 기준 오늘 날짜 (리뷰 P1-1: 날짜 미전송으로 매일 같은 운세가 나오던 버그). */
+export function localToday(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/** 운세 요청 본문 — birth 원문은 URL이 아닌 POST body로만 보낸다 (리뷰 P1-2, URL·로그 노출 방지). */
+export function buildFortuneBody(profile: Profile | null, topic: string): Record<string, unknown> {
+  const body: Record<string, unknown> = { topic, date: localToday() };
   if (profile && profile.birthYear && profile.birthMonth && profile.birthDay) {
-    params.set("birth_year", String(profile.birthYear));
-    params.set("birth_month", String(profile.birthMonth));
-    params.set("birth_day", String(profile.birthDay));
+    body.birth_year = profile.birthYear;
+    body.birth_month = profile.birthMonth;
+    body.birth_day = profile.birthDay;
     if (profile.birthHour !== null && profile.birthHour !== undefined) {
-      params.set("birth_hour", String(profile.birthHour));
+      body.birth_hour = profile.birthHour;
     }
   }
-  params.set("topic", topic);
-  return `/api/fortune/today?${params.toString()}`;
+  return body;
 }
 
 export async function fetchFortune(profile: Profile | null, topic: string): Promise<FortuneResponse> {
-  const res = await fetch(buildFortuneUrl(profile, topic));
+  const res = await fetch("/api/fortune/today", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(buildFortuneBody(profile, topic)),
+  });
   if (res.status === 429) throw new Error("오늘 준비된 무대는 여기까지예요. 내일 다시 찾아주세요.");
   if (!res.ok) throw new Error(`운세를 불러오지 못했어요 (${res.status})`);
+  return res.json();
+}
+
+/** 듣기 탭 시점의 실 TTS 준비 (리뷰 P1-3 text-first 분리 — 합성·과금은 로그인 게이트 뒤 여기서만). */
+export async function prepareTts(profile: Profile | null, topic: string): Promise<{ audioUrl: string }> {
+  const res = await fetch("/api/tts/prepare", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(buildFortuneBody(profile, topic)),
+  });
+  if (res.status === 401) throw new Error("LOGIN_REQUIRED");
+  if (res.status === 429) throw new Error("지금은 요청이 많아요. 잠시 후 다시 들어보세요.");
+  if (!res.ok) throw new Error(`음성 준비에 실패했어요 (${res.status})`);
   return res.json();
 }
 

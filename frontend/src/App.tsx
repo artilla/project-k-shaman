@@ -2,7 +2,7 @@
 // 텍스트 먼저(v3 §11.1) · autoplay 금지(§11.2) · 프로필 로컬 우선(§12) ·
 // 재생/부적 로그인 게이트(US-9, 서버 401 이중 차단) · 이벤트 훅 무회귀.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchFortune, fetchMe, fetchProviders, loginUrl, logout, markSessionStart, reportEvents, shareCardUrl } from "./lib/api";
+import { fetchFortune, fetchMe, fetchProviders, loginUrl, logout, markSessionStart, prepareTts, reportEvents, shareCardUrl } from "./lib/api";
 import { computeStreak, loadStoredProfile, saveStoredProfile } from "./lib/profile";
 import { usePlayer } from "./lib/usePlayer";
 import type { AuthSession, FortuneResponse, Profile, ScreenName } from "./lib/types";
@@ -25,7 +25,7 @@ function downloadBlob(blob: Blob, fileName: string) {
   URL.revokeObjectURL(url);
 }
 
-async function shareOrDownload(fortuneId: string, blob: Blob) {
+async function shareOrDownload(fortuneId: string, blob: Blob): Promise<"shared" | "downloaded" | "cancelled"> {
   const fileName = `hongyeon-share-${fortuneId}.svg`;
   if (window.navigator.share) {
     const file = new File([blob], fileName, { type: "image/svg+xml" });
@@ -33,13 +33,15 @@ async function shareOrDownload(fortuneId: string, blob: Blob) {
     if (canShareFile) {
       try {
         await window.navigator.share({ files: [file], title: "오늘신당 홍연 부적" });
-        return;
-      } catch {
-        /* 사용자가 취소하거나 미지원 → 다운로드 폴백 */
+        return "shared";
+      } catch (err) {
+        // 리뷰 P3: 사용자 취소(AbortError)는 실패가 아니다 — 다운로드 폴백·완료 계측 금지
+        if ((err as DOMException)?.name === "AbortError") return "cancelled";
       }
     }
   }
   downloadBlob(blob, fileName);
+  return "downloaded";
 }
 
 export default function App() {
@@ -70,6 +72,8 @@ export default function App() {
   const s0HeroRef = useRef<HTMLDivElement | null>(null);
   const s4AvatarRef = useRef<HTMLDivElement | null>(null);
   const d2AvatarRef = useRef<HTMLDivElement | null>(null);
+  // 리뷰 P1-4: 요청 세대 토큰 — 늦게 도착한 응답이 다른 화면의 플레이어를 덮지 않도록
+  const requestGen = useRef(0);
   const live2dInitRequested = useRef(false);
   const [live2dActive, setLive2dActive] = useState(false);
 
@@ -99,7 +103,10 @@ export default function App() {
     setScreen((prev) => {
       if (prev === next) return prev;
       if (push) navHistory.current.push(prev);
-      if ((prev === "s4" || prev === "d2") && prev !== next) player.stop();
+      if ((prev === "s4" || prev === "d2") && prev !== next) {
+        player.stop();
+        requestGen.current += 1; // 재생 화면 이탈 → 진행 중 요청 응답 무효화 (P1-4)
+      }
       return next;
     });
     setSheetOpen(false);
@@ -163,7 +170,40 @@ export default function App() {
 
   const handleLogin = useCallback((provider: "google" | "kakao") => {
     reportEvents(null, [{ event: "login_" + provider, clientTs: Date.now() }]);
+    // 리뷰 P1-5: OAuth 복귀 시 보던 화면·주제를 복원하기 위해 저장 (꿈 원문은 프라이버시상 미보존)
+    try {
+      sessionStorage.setItem("shindang.pendingReturn", JSON.stringify({ screen, topic: selectedTopic }));
+    } catch { /* 저장 불가 환경 — 복원 없이 진행 */ }
     window.location.href = loginUrl(provider);
+  }, [screen, selectedTopic]);
+
+  // OAuth 성공 복귀 — 저장해 둔 화면·주제 복원 (P1-5)
+  useEffect(() => {
+    if (!session.loggedIn) return;
+    let raw: string | null = null;
+    try {
+      raw = sessionStorage.getItem("shindang.pendingReturn");
+      if (raw) sessionStorage.removeItem("shindang.pendingReturn");
+    } catch { return; }
+    if (!raw) return;
+    try {
+      const pending = JSON.parse(raw) as { screen?: string; topic?: string };
+      if (pending.topic) setSelectedTopic(pending.topic);
+      if (pending.screen && pending.screen.startsWith("d")) {
+        go("d1", false);
+        showToast("로그인되었어요 — 꿈을 들려주세요");
+      } else if (pending.screen && pending.screen !== "s0") {
+        go("s3", false); // 운세는 결정적이라 주제 선택에서 재요청해도 동일 결과
+        showToast("로그인되었어요 — 이어서 운세를 보세요");
+      }
+    } catch { /* 손상된 값은 무시 */ }
+  }, [session.loggedIn, go, showToast]);
+
+  // 리뷰 P2: 서버 세션 소멸(재시작 등) 후에도 최초 boolean을 신뢰하던 문제 — 포커스 시 재검증
+  useEffect(() => {
+    const revalidate = () => fetchMe().then(setSession).catch(() => {});
+    window.addEventListener("focus", revalidate);
+    return () => window.removeEventListener("focus", revalidate);
   }, []);
 
   const handleLogout = useCallback(() => {
@@ -192,19 +232,44 @@ export default function App() {
     setStatusMessage(null);
     player.reset();
     go("s4");
+    const gen = ++requestGen.current; // P1-4: go()의 이탈 무효화 이후에 세대 발급
     fetchFortune(profile, selectedTopic)
       .then((data) => {
+        if (requestGen.current !== gen) return; // 화면 이탈·후속 요청 발생 → 늦은 응답 폐기
         setFortuneData(data);
         // 텍스트 먼저 — 오디오를 기다리지 않고 즉시 노출, 이벤트 계약 유지
         reportEvents(data.fortuneId, [{ event: "first_text_visible", clientTs: Date.now() }], data.events ?? []);
         player.setSource(data.audioUrl, data.script);
       })
       .catch((err: Error) => {
+        if (requestGen.current !== gen) return;
         setStatusMessage("오류: " + err.message);
         console.error(err);
       })
       .finally(() => setFortuneLoading(false));
   }, [fortuneLoading, go, player, profile, selectedTopic]);
+
+  // 듣기 — 실 TTS 합성·과금은 이 시점에만 (리뷰 P1-3 text-first 분리)
+  const handleListen = useCallback(() => {
+    if (!requireLogin() || !fortuneData) return;
+    const gen = requestGen.current;
+    prepareTts(profile, selectedTopic || "total")
+      .then(({ audioUrl }) => {
+        if (requestGen.current !== gen || !fortuneData) return;
+        if (audioUrl !== fortuneData.audioUrl) {
+          player.setSource(audioUrl, fortuneData.script);
+        }
+        player.listen();
+      })
+      .catch((err: Error) => {
+        if (err.message === "LOGIN_REQUIRED") {
+          setSession({ loggedIn: false }); // 세션 소멸 감지 → 재로그인 유도 (P2)
+          requireLogin("세션이 만료됐어요. 다시 로그인하면 이어서 들려드릴게요.");
+        } else {
+          showToast(err.message);
+        }
+      });
+  }, [fortuneData, player, profile, requireLogin, selectedTopic, showToast]);
 
   const handleSaveImage = useCallback(() => {
     if (!requireLogin() || !fortuneData) return;
@@ -216,8 +281,9 @@ export default function App() {
         return res.blob();
       })
       .then((blob) => shareOrDownload(fortuneData.fortuneId, blob))
-      .then(() => {
+      .then((outcome) => {
         setShareStatus(null);
+        if (outcome === "cancelled") return; // 사용자 취소 — 완료 계측·토스트 없음 (P3)
         showToast("부적 카드를 받았어요");
         reportEvents(fortuneData.fortuneId, [{ event: "share_completed", clientTs: Date.now() }]);
       })
@@ -241,8 +307,10 @@ export default function App() {
     setDreamStatus(null);
     player.reset();
     go("d2");
+    const gen = ++requestGen.current; // P1-4
     interpretDream(text, symbols)
       .then((data) => {
+        if (requestGen.current !== gen) return;
         setDreamData(data);
         // 프라이버시: 이벤트에는 상징 라벨만 — 꿈 원문은 어디에도 남기지 않는다
         reportEvents(null, [{
@@ -253,7 +321,9 @@ export default function App() {
         player.setSource(data.audioUrl, data.script);
       })
       .catch((err: Error) => {
+        if (requestGen.current !== gen) return;
         if (err.message === "LOGIN_REQUIRED") {
+          setSession({ loggedIn: false });
           go("s3", false);
           requireLogin("세션이 만료됐어요. 다시 로그인하면 홍연이 이어서 풀어드릴게요.");
         } else {
@@ -272,7 +342,10 @@ export default function App() {
         return res.blob();
       })
       .then((blob) => shareOrDownload(dreamData.dreamId, blob))
-      .then(() => showToast("꿈 부적을 받았어요"))
+      .then((outcome) => {
+        if (outcome === "cancelled") return; // 사용자 취소는 실패가 아니다 (P3)
+        showToast("꿈 부적을 받았어요");
+      })
       .catch((err: Error) => showToast(err.message)); // D3는 토스트가 유일한 피드백 채널
   }, [dreamData, requireLogin, showToast]);
 
@@ -371,7 +444,7 @@ export default function App() {
           avatarState={player.avatarState}
           progressPct={player.progressPct}
           live2dActive={live2dActive}
-          onListen={() => { if (requireLogin()) player.listen(); }}
+          onListen={handleListen}
           onPlayPause={() => { if (requireLogin()) player.playPause(); }}
           onReplay={() => { if (requireLogin()) player.replay(); }}
           onViewCard={() => go("s5")}
@@ -395,7 +468,7 @@ export default function App() {
       <ShareSheet
         open={sheetOpen}
         onClose={() => setSheetOpen(false)}
-        onSystemShare={handleSaveImage}
+        onSystemShare={screen === "d3" ? handleDreamSaveImage : handleSaveImage}
         onCopyLink={handleCopyLink}
         onMockShare={showToast}
       />

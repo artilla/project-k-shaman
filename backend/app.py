@@ -99,33 +99,94 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         resp.set_cookie(STATE_COOKIE, "", path="/", httponly=True, samesite="lax", max_age=0)
         return resp
 
+    # ── 운세 요청 파싱·검증 (리뷰 P2: 잘못된 birth 500 / 잘못된 topic 200 방지) ──
+    _VALID_TOPICS = {"total", "love", "money", "work", "rel"}
+
+    def _parse_fortune_request(params: dict):
+        """query/body 공용 파서. (request dict, error response) 튜플을 반환한다."""
+        topic = str(params.get("topic", core.DEFAULT_TOPIC))
+        if topic not in _VALID_TOPICS:
+            return None, JSONResponse({"error": "invalid topic"}, status_code=400)
+        req = {
+            "date": str(params.get("date", core.DEFAULT_DATE)),
+            "topic": topic,
+            "character_id": str(params.get("character_id", core.DEFAULT_CHARACTER_ID)),
+        }
+        for field in ("birth_year", "birth_month", "birth_day", "birth_hour"):
+            value = params.get(field)
+            if value is None or value == "":
+                continue
+            try:
+                req[field] = int(value)
+            except (TypeError, ValueError):
+                return None, JSONResponse({"error": f"invalid {field}"}, status_code=400)
+        return req, None
+
+    def _audio_url_for(cache_key: str) -> str:
+        return (
+            core.real_audio_url_for(cache_key)
+            if app.state.tts_backend_mode == "openai"
+            else core.mock_audio_url_for(cache_key)
+        )
+
+    def _fortune_response(req: dict) -> dict:
+        # 리뷰 P1-3(text-first): 텍스트 API는 실 TTS를 절대 실행하지 않는다(tts_backend=None,
+        # mock 합성은 즉시·무과금). 실 합성은 로그인 게이트 뒤 /api/tts/prepare에서만 일어난다.
+        result = core.build_playback_response(req, tts_backend=None)
+        cache_key = result["tts"]["cacheKey"]
+        core.remember_fortune(app.state.fortune_cache_by_id, result["fortuneId"], result["fortune"])
+        return {**result, "audioUrl": _audio_url_for(cache_key)}
+
     # ── 운세 (게스트 허용) ──
     @app.get("/api/fortune/today")
-    def fortune_today(request: Request):
+    def fortune_today_get(request: Request):
+        """레거시 호환 GET — 리뷰 P1-2에 따라 birth 원문은 받지 않는다(topic·date만)."""
         gate = rate_gate(request, "fortune") or daily_gate(request, "fortune-daily")
         if gate:
             return gate
-        req = {
-            "date": request.query_params.get("date", core.DEFAULT_DATE),
-            "topic": request.query_params.get("topic", core.DEFAULT_TOPIC),
-            "character_id": request.query_params.get("character_id", core.DEFAULT_CHARACTER_ID),
-        }
-        for field in ("birth_year", "birth_month", "birth_day", "birth_hour"):
-            value = request.query_params.get(field)
-            if value is not None:
-                req[field] = int(value)
+        params = {k: v for k, v in request.query_params.items() if not k.startswith("birth_")}
+        req, err = _parse_fortune_request(params)
+        if err:
+            return err
+        return _fortune_response(req)
 
+    @app.post("/api/fortune/today")
+    async def fortune_today_post(request: Request):
+        """개인화 운세 — birth 필드는 URL이 아닌 본문으로만 받는다 (URL·접근 로그 노출 방지)."""
+        gate = rate_gate(request, "fortune") or daily_gate(request, "fortune-daily")
+        if gate:
+            return gate
+        try:
+            payload = json.loads(await request.body() or b"{}")
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "invalid body"}, status_code=400)
+        req, err = _parse_fortune_request(payload)
+        if err:
+            return err
+        return _fortune_response(req)
+
+    # ── TTS 준비 (로그인 필요 — 실 합성·과금은 여기서만, 듣기 탭 시점) ──
+    @app.post("/api/tts/prepare")
+    async def tts_prepare(request: Request):
+        gate = login_required(request) or rate_gate(request, "tts")
+        if gate:
+            return gate
+        try:
+            payload = json.loads(await request.body() or b"{}")
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        req, err = _parse_fortune_request(payload if isinstance(payload, dict) else {})
+        if err:
+            return err
+        # 클라이언트가 준 cacheKey를 신뢰하지 않는다 — 동일 파라미터로 서버가 재계산·합성
+        # (캐시 hit면 무과금, miss면 여기서 합성·과금. mock 모드는 항상 무과금)
         backend_mode = app.state.tts_backend_mode
         tts_backend = "openai" if backend_mode == "openai" else None
         result = core.build_playback_response(req, tts_backend=tts_backend)
         cache_key = result["tts"]["cacheKey"]
-        audio_url = (
-            core.real_audio_url_for(cache_key)
-            if backend_mode == "openai"
-            else core.mock_audio_url_for(cache_key)
-        )
-        core.remember_fortune(app.state.fortune_cache_by_id, result["fortuneId"], result["fortune"])
-        return {**result, "audioUrl": audio_url}
+        return {"audioUrl": _audio_url_for(cache_key), "durationSec": result.get("durationSec")}
 
     # ── 부적 카드 (로그인 필요) ──
     @app.get("/api/share-card")

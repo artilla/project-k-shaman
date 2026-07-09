@@ -7,9 +7,22 @@ To plug in a real backend, inject a store that implements get(key)/set(key, valu
 import hashlib
 import json
 import logging
+import threading
+from collections import defaultdict
 from pathlib import Path
 
 _logger = logging.getLogger("fortune_engine.cache_layer")
+
+# 리뷰 P1-9: miss→compute→set 경합으로 동일 키 compute가 중복 실행되던 문제 —
+# 키별 락으로 단일 프로세스 내 원자성을 보장한다 (실 TTS 중복 과금·파일 쓰기 경합 방지).
+# 다중 프로세스 배포 시에는 store 계층(Redis SETNX 등)에서 해결한다 (§3 hold).
+_key_locks: dict = defaultdict(threading.Lock)
+_key_locks_guard = threading.Lock()
+
+
+def _lock_for(key: str) -> threading.Lock:
+    with _key_locks_guard:
+        return _key_locks[key]
 
 
 def _default_event_sink(event: dict) -> None:
@@ -62,10 +75,17 @@ def get_or_compute(store, key: str, compute_fn, *, layer: str = "unknown", event
     if cached is not None:
         event_sink({"event": "cache_hit", "layer": layer, "key": key})
         return cached
-    event_sink({"event": "cache_miss", "layer": layer, "key": key})
-    value = compute_fn()
-    store.set(key, value)
-    return value
+
+    # 키별 락 + 이중 확인 — 동시 miss에서도 compute_fn은 프로세스당 1회만 실행된다 (P1-9)
+    with _lock_for(key):
+        cached = store.get(key)
+        if cached is not None:
+            event_sink({"event": "cache_hit", "layer": layer, "key": key})
+            return cached
+        event_sink({"event": "cache_miss", "layer": layer, "key": key})
+        value = compute_fn()
+        store.set(key, value)
+        return value
 
 
 # ── Store implementations ────────────────────────────────────────────────────
