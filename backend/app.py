@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 import sys
 from pathlib import Path
@@ -29,6 +30,8 @@ _LEGACY_WEB = _ROOT / "fortune-engine" / "web"
 sys.path.insert(0, str(_LEGACY_WEB))
 
 import server as legacy  # noqa: E402 — fortune-engine/web/server.py (헬퍼 재사용)
+
+from backend import dream  # noqa: E402 — 꿈 해몽 순수 로직
 
 _logger = logging.getLogger("fortune_engine.backend")
 
@@ -130,6 +133,28 @@ def create_app(*, backend: str = "mock") -> FastAPI:
             return JSONResponse({"error": "audio not found"}, status_code=404)
         return Response(path.read_bytes(), media_type="audio/mpeg")
 
+    # ── 꿈 해몽 (로그인 필요 — 사용자 확정 정책, LLM 도입 시 최대 비용 엔드포인트) ──
+    @app.post("/api/dream/interpret")
+    async def dream_interpret(request: Request):
+        gate = login_required(request)
+        if gate:
+            return gate
+        try:
+            payload = json.loads(await request.body() or b"{}")
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        text = payload.get("text", "")
+        selected = payload.get("symbols", [])
+        if not isinstance(text, str) or not isinstance(selected, list):
+            return JSONResponse({"error": "invalid body"}, status_code=400)
+        if not text.strip() and not selected:
+            return JSONResponse({"error": "text or symbols required"}, status_code=400)
+        # 프라이버시 불변식: 꿈 원문은 interpret() 안에서만 소비 — 저장·로깅 금지 (v3 §12 정신)
+        result = dream.interpret(text, selected)
+        cache_key = "dream:" + result["dreamId"]
+        result["audioUrl"] = legacy._mock_audio_url_for(cache_key)
+        return result
+
     # ── 인증 ──
     @app.get("/api/auth/providers")
     def auth_providers():
@@ -193,6 +218,18 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         resp.set_cookie(SESSION_COOKIE, "", path="/", httponly=True, samesite="lax", max_age=0)
         return resp
 
+    # 개발 전용: SHINDANG_DEV_LOGIN=1 일 때만 노출 — 게이트 뒤 플로우(QA)를 실 OAuth 키 없이
+    # 확인하기 위한 가짜 세션. 프로덕션 환경에 절대 설정하지 말 것 (기본 비활성).
+    if os.getenv("SHINDANG_DEV_LOGIN") == "1":
+        @app.get("/api/auth/dev-login")
+        def dev_login():
+            session_id = secrets.token_hex(16)
+            app.state.sessions[session_id] = {"provider": "dev", "nickname": "하늘이"}
+            cookie_value = legacy._make_session_cookie_value(session_id, app.state.session_secret)
+            resp = RedirectResponse("/", status_code=302)
+            resp.set_cookie(SESSION_COOKIE, cookie_value, path="/", httponly=True, samesite="lax")
+            return resp
+
     # ── 이벤트 수집 ──
     @app.post("/api/event")
     async def event(request: Request):
@@ -220,8 +257,6 @@ def create_app(*, backend: str = "mock") -> FastAPI:
 
     return app
 
-
-import os  # noqa: E402
 
 # TTS_BACKEND=openai 시 실백엔드 (OPENAI_API_KEY 필요 — legacy validate와 동일 가드)
 _mode = os.getenv("TTS_BACKEND", "mock")

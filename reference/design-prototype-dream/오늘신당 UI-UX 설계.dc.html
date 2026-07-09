@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <meta name="design_doc_mode" content="canvas">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Song+Myung&amp;family=Noto+Sans+KR:wght@400;500;700;900&amp;display=swap" rel="stylesheet">
+  <style>
+    body { margin: 0; background: #0F0A14; }
+    a { color: #F2B705; } a:hover { color: #FFD54D; }
+    @keyframes ts-breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.03); } }
+    @keyframes ts-glow { 0%,100% { opacity: .45; } 50% { opacity: .9; } }
+    input::placeholder { color: rgba(245,238,252,.35); }
+  </style>
+</helmet>
+
+<div style="min-height: 100vh; background: #0F0A14; padding: 48px 40px 72px; font-family: 'Noto Sans KR', sans-serif; color: #F5EEFC; display: flex; flex-direction: column; align-items: center; gap: 36px;">
+
+  <div style="text-align: center; max-width: 720px; display: flex; flex-direction: column; gap: 10px;">
+    <div style="font-size: 13px; letter-spacing: .3em; color: #F2B705; font-weight: 700;">오늘신당 — UI/UX 설계</div>
+    <div style="font-family: 'Song Myung', serif; font-size: 40px; line-height: 1.25;">오늘의 기운을 무대 위에서 듣다</div>
+    <div style="font-size: 14px; color: rgba(245,238,252,.6); line-height: 1.7;">screen-ia.md의 S0–S6 전체 플로우를 인터랙티브 프로토타입으로 설계했습니다. 폰 화면을 직접 탭해 진행하거나, 오른쪽 플로우 맵에서 화면으로 바로 이동할 수 있어요.</div>
+  </div>
+
+  <div style="display: flex; flex-wrap: wrap; gap: 48px; align-items: flex-start; justify-content: center;">
+
+    <!-- ══════════ 인터랙티브 프로토타입 (iPhone) ══════════ -->
+    <x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" dark="{{ true }}" hint-size="430px,900px">
+      <div style="position: relative; width: 100%; height: 100%; min-height: 760px; background: #16101E; overflow: hidden; display: flex; flex-direction: column; font-family: 'Noto Sans KR', sans-serif; color: #F5EEFC;">
+
+        <!-- 무대 조명 레이어 -->
+        <sc-if value="{{ stageLighting }}" hint-placeholder-val="{{ true }}">
+          <div aria-hidden="true" style="position: absolute; inset: 0; pointer-events: none; background: radial-gradient(circle at 50% -5%, rgba(201,24,74,.42), transparent 52%), radial-gradient(circle at 12% 34%, rgba(242,183,5,.14), transparent 42%), radial-gradient(circle at 88% 62%, rgba(123,44,191,.2), transparent 48%);"></div>
+        </sc-if>
+
+        <!-- ── S0 온보딩 ── -->
+        <sc-if value="{{ isS0 }}" hint-placeholder-val="{{ true }}">
+          <div data-screen-label="S0 온보딩" style="position: relative; flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; padding: 32px 28px 40px; text-align: center;">
+            <img src="assets/hongyeon-greeting.webp" alt="홍연" style="position: absolute; top: 6%; left: 50%; transform: translateX(-50%); width: 78%; filter: drop-shadow(0 24px 48px rgba(201,24,74,.35));">
+            <div style="position: absolute; inset: 0; background: linear-gradient(180deg, transparent 42%, rgba(22,16,30,.92) 68%, #16101E 82%); pointer-events: none;"></div>
+            <div style="position: relative; display: flex; flex-direction: column; gap: 8px; align-items: center; width: 100%;">
+              <div style="font-size: 12px; letter-spacing: .32em; color: #F2B705; font-weight: 700;">TODAY SHINDANG</div>
+              <div style="font-family: 'Song Myung', serif; font-size: 40px; line-height: 1.2;">오늘신당</div>
+              <div style="font-size: 15px; color: rgba(245,238,252,.72); line-height: 1.6; margin-bottom: 20px;">오늘의 기운을 무대 위에서 듣다.<br>AI 무당 홍연의 1분 운세 공연.</div>
+              <button onClick="{{ goS1 }}" style="width: 100%; padding: 17px; border: none; border-radius: 14px; background: #C9184A; color: #FFF; font-size: 17px; font-weight: 700; font-family: inherit; cursor: pointer; box-shadow: 0 8px 28px rgba(201,24,74,.45);">운세 보러 가기</button>
+              <div style="display: flex; gap: 10px; width: 100%; margin-top: 10px;">
+                <button onClick="{{ goS1 }}" style="flex: 1; padding: 13px; border: 1px solid rgba(245,238,252,.22); border-radius: 12px; background: rgba(255,255,255,.04); color: #F5EEFC; font-size: 13px; font-weight: 500; font-family: inherit; cursor: pointer;">Google로 계속</button>
+                <button onClick="{{ goS1 }}" style="flex: 1; padding: 13px; border: 1px solid rgba(245,238,252,.22); border-radius: 12px; background: rgba(255,255,255,.04); color: #F5EEFC; font-size: 13px; font-weight: 500; font-family: inherit; cursor: pointer;">카카오로 계속</button>
+              </div>
+              <div style="font-size: 11px; color: rgba(245,238,252,.42); margin-top: 12px;">가입 없이 게스트로 첫 운세를 볼 수 있어요 · <a href="#" style="color: rgba(242,183,5,.85); text-decoration: none;">개인정보 처리</a></div>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- ── S1 무당 확인 ── -->
+        <sc-if value="{{ isS1 }}" hint-placeholder-val="{{ false }}">
+          <div data-screen-label="S1 무당 선택" style="position: relative; flex: 1; display: flex; flex-direction: column; padding: 24px 28px 40px; gap: 18px;">
+            <div style="font-size: 13px; color: rgba(245,238,252,.55);">오늘의 무당</div>
+            <div style="font-family: 'Song Myung', serif; font-size: 27px; line-height: 1.3;">홍연이 오늘의 무대를<br>준비하고 있어요</div>
+            <div style="position: relative; flex: 1; min-height: 340px; border-radius: 20px; overflow: hidden; background: radial-gradient(circle at 50% 20%, rgba(201,24,74,.32), rgba(22,16,30,.6) 75%); border: 1px solid rgba(242,183,5,.28); display: flex; align-items: flex-end;">
+              <img src="assets/hongyeon-idle.webp" alt="홍연" style="position: absolute; top: 4%; left: 50%; transform: translateX(-50%); width: 82%;">
+              <div style="position: relative; width: 100%; padding: 18px 20px; background: linear-gradient(180deg, transparent, rgba(15,10,20,.9) 45%); display: flex; flex-direction: column; gap: 4px;">
+                <div style="display: flex; align-items: baseline; gap: 8px;">
+                  <span style="font-family: 'Song Myung', serif; font-size: 24px;">홍연</span>
+                  <span style="font-size: 11px; padding: 3px 8px; border-radius: 999px; background: rgba(242,183,5,.16); color: #F2B705; font-weight: 700;">베타 단독</span>
+                </div>
+                <div style="font-size: 13px; color: rgba(245,238,252,.7);">붉은 단청의 에너지형 퍼포머 · 연애운 · 자신감 · 대인관계</div>
+              </div>
+            </div>
+            <button onClick="{{ goS2 }}" style="width: 100%; padding: 17px; border: none; border-radius: 14px; background: #C9184A; color: #FFF; font-size: 17px; font-weight: 700; font-family: inherit; cursor: pointer; box-shadow: 0 8px 28px rgba(201,24,74,.4);">홍연에게 듣기</button>
+          </div>
+        </sc-if>
+
+        <!-- ── S2 입력 ── -->
+        <sc-if value="{{ isS2 }}" hint-placeholder-val="{{ false }}">
+          <div data-screen-label="S2 입력" style="position: relative; flex: 1; display: flex; flex-direction: column; padding: 24px 28px 40px; gap: 6px;">
+            <div style="font-size: 13px; color: rgba(245,238,252,.55);">2 / 4</div>
+            <div style="font-family: 'Song Myung', serif; font-size: 25px; line-height: 1.35; margin-bottom: 16px;">시작 전 몇 가지만<br>알려주세요</div>
+            <label for="ts-nick" style="font-size: 12px; color: rgba(245,238,252,.6); margin-bottom: 6px;">닉네임 (최대 10자)</label>
+            <input id="ts-nick" type="text" value="{{ nickname }}" onChange="{{ onNickname }}" placeholder="닉네임을 입력해주세요" style="width: 100%; padding: 14px; font-size: 15px; border-radius: 12px; border: 1px solid rgba(242,183,5,.3); background: rgba(255,255,255,.05); color: #F5EEFC; font-family: inherit; outline: none; margin-bottom: 16px;">
+            <label for="ts-birth" style="font-size: 12px; color: rgba(245,238,252,.6); margin-bottom: 6px;">생년월일</label>
+            <input id="ts-birth" type="date" value="{{ birthDate }}" onChange="{{ onBirthDate }}" style="width: 100%; padding: 14px; font-size: 15px; border-radius: 12px; border: 1px solid rgba(242,183,5,.3); background: rgba(255,255,255,.05); color: #F5EEFC; font-family: inherit; outline: none; margin-bottom: 16px; color-scheme: dark;">
+            <label for="ts-hour" style="font-size: 12px; color: rgba(245,238,252,.6); margin-bottom: 6px;">출생시간 (선택)</label>
+            <select id="ts-hour" value="{{ birthHour }}" onChange="{{ onBirthHour }}" style="width: 100%; padding: 14px; font-size: 15px; border-radius: 12px; border: 1px solid rgba(242,183,5,.3); background: rgba(255,255,255,.05); color: #F5EEFC; font-family: inherit; outline: none;">
+              <option value="">모름</option>
+              <option value="23">자시 (23:00–01:00)</option>
+              <option value="2">축시 (01:00–03:00)</option>
+              <option value="6">묘시 (05:00–07:00)</option>
+              <option value="8">진시 (07:00–09:00)</option>
+              <option value="12">오시 (11:00–13:00)</option>
+              <option value="16">신시 (15:00–17:00)</option>
+              <option value="20">술시 (19:00–21:00)</option>
+            </select>
+            <div style="flex: 1;"></div>
+            <div style="font-size: 11px; line-height: 1.6; color: rgba(245,238,252,.45); margin-bottom: 12px;">입력 정보는 오늘의 운세 생성에만 사용되며 이 기기에만 저장됩니다. 서버에는 해시값만 전달돼요.</div>
+            <button onClick="{{ goS3 }}" disabled="{{ s2Disabled }}" style="width: 100%; padding: 17px; border: none; border-radius: 14px; background: {{ s2BtnBg }}; color: #FFF; font-size: 17px; font-weight: 700; font-family: inherit; cursor: pointer;">다음</button>
+          </div>
+        </sc-if>
+
+        <!-- ── S3 주제 선택 ── -->
+        <sc-if value="{{ isS3 }}" hint-placeholder-val="{{ false }}">
+          <div data-screen-label="S3 주제 선택" style="position: relative; flex: 1; display: flex; flex-direction: column; padding: 24px 28px 40px; gap: 6px;">
+            <div style="font-size: 13px; color: rgba(245,238,252,.55);">3 / 4</div>
+            <div style="font-family: 'Song Myung', serif; font-size: 25px; line-height: 1.35; margin-bottom: 20px;">오늘 어떤 기운이<br>궁금하세요?</div>
+            <div style="display: flex; flex-direction: column; gap: 10px;">
+              <sc-for list="{{ topics }}" as="t" hint-placeholder-count="5">
+                <button onClick="{{ t.pick }}" style="display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-radius: 14px; border: 1px solid {{ t.border }}; background: {{ t.bg }}; color: #F5EEFC; font-family: inherit; font-size: 16px; font-weight: 500; cursor: pointer; text-align: left;">
+                  <span>{{ t.label }}</span>
+                  <span style="font-size: 12px; color: {{ t.sub }};">{{ t.desc }}</span>
+                </button>
+              </sc-for>
+            </div>
+            <div style="flex: 1;"></div>
+            <button onClick="{{ startFortune }}" disabled="{{ s3Disabled }}" style="width: 100%; padding: 17px; border: none; border-radius: 14px; background: {{ s3BtnBg }}; color: #FFF; font-size: 17px; font-weight: 700; font-family: inherit; cursor: pointer;">운세 보기</button>
+          </div>
+        </sc-if>
+
+        <!-- ── S4 캐릭터 스테이지 ── -->
+        <sc-if value="{{ isS4 }}" hint-placeholder-val="{{ false }}">
+          <div data-screen-label="S4 캐릭터 스테이지" style="position: relative; flex: 1; display: flex; flex-direction: column; padding: 16px 24px 32px; overflow-y: auto;">
+
+            <!-- 아바타 무대 -->
+            <div style="position: relative; width: 210px; height: 210px; margin: 4px auto 8px; flex-shrink: 0;">
+              <div aria-hidden="true" style="position: absolute; inset: -18px; border-radius: 50%; background: radial-gradient(circle, rgba(242,183,5,.3), transparent 65%); animation: ts-glow 2.4s ease-in-out infinite;"></div>
+              <div style="position: relative; width: 100%; height: 100%; border-radius: 50%; overflow: hidden; border: 2px solid rgba(242,183,5,.4); background: radial-gradient(circle at 50% 24%, rgba(201,24,74,.45), #241428 78%); animation: ts-breathe 3.2s ease-in-out infinite;">
+                <img src="assets/hongyeon-idle.webp" alt="" style="position: absolute; top: 4%; left: 50%; transform: translateX(-50%); width: 96%; opacity: {{ opIdle }}; transition: opacity .3s ease;">
+                <img src="assets/hongyeon-greeting.webp" alt="" style="position: absolute; top: 4%; left: 50%; transform: translateX(-50%); width: 96%; opacity: {{ opGreeting }}; transition: opacity .3s ease;">
+                <img src="assets/hongyeon-speaking.webp" alt="홍연" style="position: absolute; top: 4%; left: 50%; transform: translateX(-50%); width: 96%; opacity: {{ opSpeaking }}; transition: opacity .3s ease;">
+                <img src="assets/hongyeon-blessing.webp" alt="" style="position: absolute; top: 4%; left: 50%; transform: translateX(-50%); width: 96%; opacity: {{ opBlessing }}; transition: opacity .3s ease;">
+              </div>
+            </div>
+
+            <!-- phase B: 로딩 -->
+            <sc-if value="{{ isLoading }}" hint-placeholder-val="{{ false }}">
+              <div style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; text-align: center;">
+                <div style="font-size: 15px; color: rgba(245,238,252,.8);">홍연이 오늘의 기운을 읽고 있어요…</div>
+                <div style="width: 120px; height: 4px; border-radius: 2px; background: rgba(255,255,255,.1); overflow: hidden;">
+                  <div style="width: 40%; height: 100%; border-radius: 2px; background: #F2B705; animation: ts-glow 1.1s ease-in-out infinite;"></div>
+                </div>
+              </div>
+            </sc-if>
+
+            <!-- phase C/D: 텍스트 즉시 노출 + 플레이어 -->
+            <sc-if value="{{ isText }}" hint-placeholder-val="{{ false }}">
+              <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div style="padding: 18px; border-radius: 16px; background: rgba(255,255,255,.05); border: 1px solid rgba(242,183,5,.22); display: flex; flex-direction: column; gap: 12px;">
+                  <div style="font-size: 16px; font-weight: 700; line-height: 1.55;">{{ summary1 }}<br>{{ summary2 }}</div>
+                  <div style="font-size: 13px; line-height: 1.6; color: rgba(245,238,252,.75);">{{ scoresLine }}</div>
+                  <div style="display: flex; flex-direction: column; gap: 7px;">
+                    <sc-for list="{{ scores }}" as="s" hint-placeholder-count="5">
+                      <div style="display: grid; grid-template-columns: 58px 1fr 30px; align-items: center; gap: 10px; font-size: 12px;">
+                        <span style="color: rgba(245,238,252,.7);">{{ s.label }}</span>
+                        <span style="height: 7px; border-radius: 4px; background: rgba(255,255,255,.1); overflow: hidden; display: block;">
+                          <span style="display: block; height: 100%; border-radius: 4px; width: {{ s.pct }}; background: linear-gradient(90deg, #C9184A, #F2B705);"></span>
+                        </span>
+                        <span style="text-align: right; color: rgba(245,238,252,.6);">{{ s.value }}</span>
+                      </div>
+                    </sc-for>
+                  </div>
+                  <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px;">
+                    <span style="width: 15px; height: 15px; border-radius: 50%; background: #FF7B9C; border: 1px solid rgba(255,255,255,.4); display: inline-block;"></span>
+                    <span>행운 색 <strong>코랄 핑크</strong></span>
+                    <span style="color: rgba(245,238,252,.4);">·</span>
+                    <span>행운 아이템 <strong>작은 손거울</strong></span>
+                  </div>
+                  <div style="font-size: 12px; line-height: 1.6; color: rgba(245,238,252,.62); border-top: 1px solid rgba(255,255,255,.08); padding-top: 10px;">피하면 좋아요 — {{ avoid }}</div>
+                </div>
+
+                <!-- 글래스 플레이어 (autoplay 금지 — 듣기 탭으로만 재생) -->
+                <div style="padding: 14px 16px; border-radius: 16px; background: rgba(255,255,255,.08); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); border: 1px solid rgba(255,255,255,.14); display: flex; flex-direction: column; gap: 10px;">
+                  <div style="display: flex; justify-content: space-between; font-size: 12px; color: rgba(245,238,252,.7);">
+                    <span aria-live="polite">{{ playerLabel }}</span>
+                    <span style="color: #F2B705;">{{ segmentLabel }}</span>
+                  </div>
+                  <div style="height: 5px; border-radius: 3px; background: rgba(255,255,255,.12); overflow: hidden;">
+                    <div style="height: 100%; border-radius: 3px; background: #F2B705; width: {{ progressPct }}; transition: width .15s linear;"></div>
+                  </div>
+                  <div style="display: flex; gap: 10px;">
+                    <sc-if value="{{ showListen }}" hint-placeholder-val="{{ true }}">
+                      <button onClick="{{ listen }}" style="flex: 1; padding: 13px; border: none; border-radius: 12px; background: #C9184A; color: #FFF; font-size: 15px; font-weight: 700; font-family: inherit; cursor: pointer;">듣기</button>
+                    </sc-if>
+                    <sc-if value="{{ showReplay }}" hint-placeholder-val="{{ false }}">
+                      <button onClick="{{ listen }}" style="flex: 1; padding: 13px; border: 2px solid rgba(242,183,5,.6); border-radius: 12px; background: transparent; color: #F2B705; font-size: 15px; font-weight: 700; font-family: inherit; cursor: pointer;">다시 듣기</button>
+                    </sc-if>
+                    <sc-if value="{{ showCardBtn }}" hint-placeholder-val="{{ false }}">
+                      <button onClick="{{ goS5 }}" style="flex: 1; padding: 13px; border: none; border-radius: 12px; background: #F2B705; color: #241428; font-size: 15px; font-weight: 700; font-family: inherit; cursor: pointer;">결과 카드 보기</button>
+                    </sc-if>
+                  </div>
+                </div>
+              </div>
+            </sc-if>
+          </div>
+        </sc-if>
+
+        <!-- ── S5 결과 카드 ── -->
+        <sc-if value="{{ isS5 }}" hint-placeholder-val="{{ false }}">
+          <div data-screen-label="S5 결과 카드" style="position: relative; flex: 1; display: flex; flex-direction: column; padding: 20px 28px 36px; gap: 14px; overflow-y: auto;">
+            <div style="font-family: 'Song Myung', serif; font-size: 22px;">오늘의 부적 카드</div>
+
+            <!-- 부적 카드 -->
+            <div style="position: relative; border-radius: 20px; overflow: hidden; background: linear-gradient(160deg, #2A1030, #4A0E24 70%); border: 1.5px solid rgba(242,183,5,.5); padding: 20px; display: flex; flex-direction: column; gap: 10px;">
+              <div aria-hidden="true" style="position: absolute; inset: 6px; border: 1px solid rgba(242,183,5,.3); border-radius: 15px; pointer-events: none;"></div>
+              <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px; letter-spacing: .18em; color: #F2B705; font-weight: 700;">
+                <span>2026 . 07 . 08</span><span>연애운</span>
+              </div>
+              <div style="display: flex; gap: 14px; align-items: center;">
+                <img src="assets/hongyeon-share-card.webp" alt="홍연" style="width: 96px; height: 96px; border-radius: 50%; object-fit: cover; object-position: top; border: 2px solid #FF7B9C; flex-shrink: 0;">
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                  <div style="font-family: 'Song Myung', serif; font-size: 17px; line-height: 1.45;">{{ summary1 }}</div>
+                  <div style="font-size: 12px; color: rgba(245,238,252,.72);">{{ nicknameLabel }} 님을 위한 홍연의 축원</div>
+                </div>
+              </div>
+              <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px;">
+                <span style="font-size: 11px; padding: 5px 10px; border-radius: 999px; background: rgba(255,123,156,.18); color: #FF7B9C; font-weight: 700;">행운 색 코랄 핑크</span>
+                <span style="font-size: 11px; padding: 5px 10px; border-radius: 999px; background: rgba(242,183,5,.14); color: #F2B705; font-weight: 700;">행운 아이템 작은 손거울</span>
+              </div>
+              <div style="font-size: 10px; letter-spacing: .24em; color: rgba(245,238,252,.4); text-align: right;">오늘신당</div>
+            </div>
+
+            <div style="font-size: 12px; line-height: 1.6; color: rgba(245,238,252,.6);">{{ blessing }}</div>
+
+            <div style="display: flex; gap: 10px;">
+              <button onClick="{{ saveCard }}" style="flex: 1; padding: 15px; border: 2px solid rgba(242,183,5,.55); border-radius: 13px; background: transparent; color: #F2B705; font-size: 15px; font-weight: 700; font-family: inherit; cursor: pointer;">{{ saveLabel }}</button>
+              <button onClick="{{ openSheet }}" style="flex: 1; padding: 15px; border: none; border-radius: 13px; background: #C9184A; color: #FFF; font-size: 15px; font-weight: 700; font-family: inherit; cursor: pointer;">공유하기</button>
+            </div>
+
+            <!-- 재방문 유도 -->
+            <div style="display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-radius: 14px; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.09);">
+              <div style="display: flex; flex-direction: column; gap: 2px;">
+                <span style="font-size: 13px; font-weight: 700;">3일 연속 방문 중</span>
+                <span style="font-size: 11px; color: rgba(245,238,252,.55);">내일도 홍연의 무대가 열려요</span>
+              </div>
+              <button onClick="{{ noop }}" style="padding: 9px 14px; border: none; border-radius: 999px; background: rgba(242,183,5,.15); color: #F2B705; font-size: 12px; font-weight: 700; font-family: inherit; cursor: pointer;">내일 알림 받기</button>
+            </div>
+            <button onClick="{{ restart }}" style="padding: 10px; border: none; background: none; color: rgba(245,238,252,.45); font-size: 12px; font-family: inherit; cursor: pointer; text-decoration: underline;">처음부터 다시 보기</button>
+          </div>
+        </sc-if>
+
+        <!-- ── S6 공유 바텀 시트 ── -->
+        <sc-if value="{{ sheetOpen }}" hint-placeholder-val="{{ false }}">
+          <div data-screen-label="S6 공유" style="position: absolute; inset: 0; z-index: 30; display: flex; flex-direction: column; justify-content: flex-end;">
+            <div onClick="{{ closeSheet }}" style="position: absolute; inset: 0; background: rgba(10,6,14,.55);"></div>
+            <div style="position: relative; border-radius: 22px 22px 0 0; background: rgba(38,26,46,.85); backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); border-top: 1px solid rgba(255,255,255,.16); padding: 12px 24px 40px; display: flex; flex-direction: column; gap: 16px;">
+              <div style="width: 40px; height: 4px; border-radius: 2px; background: rgba(245,238,252,.3); margin: 0 auto;"></div>
+              <div style="font-size: 16px; font-weight: 700; text-align: center;">부적 카드 공유</div>
+              <div style="display: flex; justify-content: space-around;">
+                <sc-for list="{{ shareTargets }}" as="st" hint-placeholder-count="4">
+                  <button onClick="{{ st.tap }}" style="display: flex; flex-direction: column; align-items: center; gap: 8px; border: none; background: none; color: rgba(245,238,252,.8); font-size: 11px; font-family: inherit; cursor: pointer;">
+                    <span style="width: 52px; height: 52px; border-radius: 50%; background: {{ st.bg }}; display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 900; color: {{ st.fg }};">{{ st.initial }}</span>
+                    {{ st.label }}
+                  </button>
+                </sc-for>
+              </div>
+              <button onClick="{{ copyLink }}" style="padding: 14px; border: 1px solid rgba(245,238,252,.22); border-radius: 12px; background: rgba(255,255,255,.05); color: #F5EEFC; font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer;">{{ copyLabel }}</button>
+            </div>
+          </div>
+        </sc-if>
+      </div>
+    </x-import>
+
+    <!-- ══════════ 설계 문서 패널 ══════════ -->
+    <sc-if value="{{ showSpec }}" hint-placeholder-val="{{ true }}">
+      <div style="width: 400px; display: flex; flex-direction: column; gap: 22px;">
+
+        <div style="display: flex; flex-direction: column; gap: 10px;">
+          <div style="font-size: 12px; letter-spacing: .2em; color: #F2B705; font-weight: 700;">플로우 맵 — 탭하면 해당 화면으로 이동</div>
+          <div style="display: flex; flex-direction: column; gap: 6px;">
+            <sc-for list="{{ flowSteps }}" as="f" hint-placeholder-count="6">
+              <button onClick="{{ f.jump }}" style="display: flex; align-items: center; gap: 12px; padding: 11px 14px; border-radius: 12px; border: 1px solid {{ f.border }}; background: {{ f.bg }}; color: #F5EEFC; font-family: inherit; cursor: pointer; text-align: left;">
+                <span style="font-size: 11px; font-weight: 900; color: {{ f.idColor }}; width: 22px;">{{ f.id }}</span>
+                <span style="display: flex; flex-direction: column; gap: 1px;">
+                  <span style="font-size: 14px; font-weight: 700;">{{ f.name }}</span>
+                  <span style="font-size: 11px; color: rgba(245,238,252,.55);">{{ f.note }}</span>
+                </span>
+              </button>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 10px;">
+          <div style="font-size: 12px; letter-spacing: .2em; color: #F2B705; font-weight: 700;">비주얼 시스템</div>
+          <div style="display: flex; gap: 8px;">
+            <span title="먹색 #16101E" style="flex: 1; height: 44px; border-radius: 10px; background: #16101E; border: 1px solid rgba(255,255,255,.14);"></span>
+            <span title="진홍 #C9184A" style="flex: 1; height: 44px; border-radius: 10px; background: #C9184A;"></span>
+            <span title="금빛 #F2B705" style="flex: 1; height: 44px; border-radius: 10px; background: #F2B705;"></span>
+            <span title="코랄 핑크 #FF7B9C" style="flex: 1; height: 44px; border-radius: 10px; background: #FF7B9C;"></span>
+            <span title="은백 #F5EEFC" style="flex: 1; height: 44px; border-radius: 10px; background: #F5EEFC;"></span>
+          </div>
+          <div style="font-size: 12px; line-height: 1.7; color: rgba(245,238,252,.65);">캐릭터 시트 §6 팔레트 기준 — 먹색 무대 위 진홍(홍연 시그니처)·금빛(행운 하이라이트). 기존 연보라 버튼(#e6a0ff)은 캐릭터와 무관해 진홍 계열로 교체. 디스플레이 서체는 Song Myung(전통 미감), 본문은 Noto Sans KR.</div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 10px;">
+          <div style="font-size: 12px; letter-spacing: .2em; color: #F2B705; font-weight: 700;">핵심 UX 결정</div>
+          <div style="display: flex; flex-direction: column; gap: 8px; font-size: 12.5px; line-height: 1.65; color: rgba(245,238,252,.75);">
+            <div style="padding: 12px 14px; border-radius: 12px; background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08);"><strong style="color: #F5EEFC;">텍스트 먼저, autoplay 금지</strong> — S4에서 운세 텍스트는 API 응답 즉시 노출, 음성은 "듣기" 탭으로만 시작 (v3 §11 준수).</div>
+            <div style="padding: 12px 14px; border-radius: 12px; background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08);"><strong style="color: #F5EEFC;">글래스는 절제해서</strong> — 반투명 블러는 플레이어와 공유 바텀 시트 등 임시 레이어에만. 본 콘텐츠는 불투명 카드.</div>
+            <div style="padding: 12px 14px; border-radius: 12px; background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08);"><strong style="color: #F5EEFC;">공유는 바텀 시트</strong> — S6를 별도 화면 대신 S5 위의 바텀 시트로 처리해 흐름 이탈 최소화.</div>
+            <div style="padding: 12px 14px; border-radius: 12px; background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08);"><strong style="color: #F5EEFC;">아바타 상태 크로스페이드</strong> — idle → greeting → speaking → blessing 4종 에셋을 300ms 페이드로 전환, 재생 세그먼트와 동기화.</div>
+            <div style="padding: 12px 14px; border-radius: 12px; background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08);"><strong style="color: #F5EEFC;">게스트 우선 온보딩</strong> — 가입 없이 1탭 시작, 소셜 로그인은 보조. 개인정보는 로컬 우선 + 해시 전송 안내.</div>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+  &quot;stageLighting&quot;: { &quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;무대 연출&quot; },
+  &quot;fastPlayback&quot;: { &quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: false, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;무대 연출&quot; },
+  &quot;showSpecPanel&quot;: { &quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;레이아웃&quot; }
+}">
+class Component extends DCLogic {
+  state = {
+    screen: 's0',
+    nickname: '', birthDate: '', birthHour: '',
+    topic: '',
+    phase: 'idle',        // s4: loading | text
+    player: 'idle',       // idle | greeting | speaking | blessing | done
+    progress: 0,
+    sheetOpen: false,
+    saved: false,
+    copied: false,
+  };
+
+  clearTimers() {
+    (this._timers || []).forEach(t => clearTimeout(t));
+    if (this._interval) clearInterval(this._interval);
+    this._timers = [];
+  }
+
+  go(screen) {
+    this.clearTimers();
+    const st = { screen, sheetOpen: false };
+    if (screen === 's4') {
+      st.phase = 'loading'; st.player = 'idle'; st.progress = 0;
+      this._timers = [setTimeout(() => this.setState({ phase: 'text' }), this.dur(1800))];
+    }
+    this.setState(st);
+  }
+
+  dur(ms) { return (this.props.fastPlayback ?? false) ? ms / 4 : ms; }
+
+  listen() {
+    this.clearTimers();
+    this.setState({ player: 'greeting', progress: 0 });
+    const total = this.dur(11000);
+    const t0 = Date.now();
+    this._interval = setInterval(() => {
+      const p = Math.min(100, ((Date.now() - t0) / total) * 100);
+      let player = 'greeting';
+      if (p >= 100) player = 'done';
+      else if (p >= 78) player = 'blessing';
+      else if (p >= 16) player = 'speaking';
+      this.setState({ progress: p, player });
+      if (p >= 100) { clearInterval(this._interval); this._interval = null; }
+    }, 80);
+  }
+
+  componentWillUnmount() { this.clearTimers(); }
+
+  renderVals() {
+    const s = this.state;
+    const topicList = [
+      { key: 'all', label: '총운', desc: '오늘 하루의 큰 흐름' },
+      { key: 'love', label: '연애', desc: '홍연의 강점 운세' },
+      { key: 'money', label: '금전', desc: '재물의 기운' },
+      { key: 'work', label: '일 / 학업', desc: '집중과 성취' },
+      { key: 'rel', label: '인간관계', desc: '사람 사이의 온도' },
+    ];
+    const scores = [
+      { label: '연애', value: 88 }, { label: '금전', value: 61 },
+      { label: '일/학업', value: 55 }, { label: '인간관계', value: 79 },
+      { label: '컨디션', value: 48 },
+    ].map(x => ({ ...x, pct: x.value + '%' }));
+
+    const flowMeta = [
+      { id: 'S0', key: 's0', name: '온보딩', note: '게스트 우선 · 무대 오프닝' },
+      { id: 'S1', key: 's1', name: '무당 선택', note: '홍연 베타 단독 확인' },
+      { id: 'S2', key: 's2', name: '입력', note: '닉네임 · 생년월일 · 12시진' },
+      { id: 'S3', key: 's3', name: '주제 선택', note: '총운 · 연애 · 금전 · 일 · 관계' },
+      { id: 'S4', key: 's4', name: '캐릭터 스테이지', note: '핵심 경험 — 텍스트 먼저 + 듣기' },
+      { id: 'S5', key: 's5', name: '결과 카드 + 공유', note: '부적 카드 · 바텀 시트 공유(S6)' },
+    ];
+    const active = s.screen;
+
+    const playerLabels = {
+      idle: '탭하면 홍연의 목소리로 들려드려요',
+      greeting: '홍연 등장 중', speaking: '오늘의 운세 재생 중',
+      blessing: '축원 중', done: '재생 완료',
+    };
+    const segmentLabels = { idle: '', greeting: 'greeting · presynth', speaking: 'summary → advice', blessing: 'blessing · ending', done: '45초' };
+
+    const pick = (key) => () => this.setState({ topic: key });
+    const canS2 = s.nickname.trim().length > 0 && s.nickname.trim().length <= 10 && !!s.birthDate;
+
+    return {
+      // 화면 라우팅
+      isS0: active === 's0', isS1: active === 's1', isS2: active === 's2',
+      isS3: active === 's3', isS4: active === 's4', isS5: active === 's5',
+      goS1: () => this.go('s1'), goS2: () => this.go('s2'), goS3: () => this.go('s3'),
+      goS5: () => this.go('s5'), restart: () => this.go('s0'),
+      startFortune: () => { if (s.topic) this.go('s4'); },
+      noop: () => {},
+
+      // 입력
+      nickname: s.nickname, birthDate: s.birthDate, birthHour: s.birthHour,
+      onNickname: (e) => this.setState({ nickname: e.target.value.slice(0, 10) }),
+      onBirthDate: (e) => this.setState({ birthDate: e.target.value }),
+      onBirthHour: (e) => this.setState({ birthHour: e.target.value }),
+      s2Disabled: !canS2,
+      s2BtnBg: canS2 ? '#C9184A' : 'rgba(201,24,74,.35)',
+      s3Disabled: !s.topic,
+      s3BtnBg: s.topic ? '#C9184A' : 'rgba(201,24,74,.35)',
+
+      // 주제
+      topics: topicList.map(t => ({
+        ...t, pick: pick(t.key),
+        border: s.topic === t.key ? '#F2B705' : 'rgba(255,255,255,.12)',
+        bg: s.topic === t.key ? 'rgba(242,183,5,.12)' : 'rgba(255,255,255,.04)',
+        sub: s.topic === t.key ? '#F2B705' : 'rgba(245,238,252,.45)',
+      })),
+
+      // S4
+      isLoading: s.phase === 'loading',
+      isText: s.phase === 'text',
+      opIdle: (s.player === 'idle' || s.phase === 'loading') ? 1 : 0,
+      opGreeting: s.player === 'greeting' ? 1 : 0,
+      opSpeaking: s.player === 'speaking' ? 1 : 0,
+      opBlessing: (s.player === 'blessing' || s.player === 'done') ? 1 : 0,
+      playerLabel: playerLabels[s.player],
+      segmentLabel: segmentLabels[s.player],
+      progressPct: s.progress.toFixed(1) + '%',
+      showListen: s.player === 'idle',
+      showReplay: s.player === 'done',
+      showCardBtn: s.player === 'done' || s.player === 'blessing',
+      listen: () => this.listen(),
+
+      // 운세 mock (fortune-samples.v1.1 h_love_001)
+      summary1: '오늘은 마음이 먼저 움직이는 날이에요.',
+      summary2: '솔직한 한마디가 관계의 온도를 한 칸 올려줘요.',
+      scoresLine: '연애운이 활짝 열렸고 인간관계도 좋아요. 다만 컨디션은 조금 낮으니 무리하진 마세요.',
+      avoid: '지난 대화를 너무 곱씹으며 혼자 결론 내리는 일은 잠시 미뤄두세요.',
+      blessing: '"오늘 하루, 홍연이 손님 곁에서 기운을 더해드릴게요." — 닉네임은 화면에만 표시되고 음성 본문에는 삽입되지 않아요.',
+      scores,
+      nicknameLabel: s.nickname.trim() || '오늘의 손님',
+
+      // S5 / S6
+      saveLabel: s.saved ? '저장됨 ✓'.replace(' ✓', ' ·  완료') : '이미지 저장',
+      saveCard: () => this.setState({ saved: true }),
+      sheetOpen: s.sheetOpen,
+      openSheet: () => this.setState({ sheetOpen: true }),
+      closeSheet: () => this.setState({ sheetOpen: false }),
+      copyLabel: s.copied ? '링크가 복사되었어요' : '링크 복사',
+      copyLink: () => {
+        this.setState({ copied: true });
+        this._timers = (this._timers || []).concat([setTimeout(() => this.setState({ copied: false }), 1600)]);
+      },
+      shareTargets: [
+        { label: '카카오톡', initial: 'K', bg: '#FEE500', fg: '#1B1029', tap: () => {} },
+        { label: '인스타그램', initial: 'IG', bg: 'linear-gradient(135deg,#C9184A,#7B2CBF)', fg: '#FFF', tap: () => {} },
+        { label: 'X', initial: 'X', bg: 'rgba(255,255,255,.14)', fg: '#F5EEFC', tap: () => {} },
+        { label: '더보기', initial: '⋯', bg: 'rgba(255,255,255,.08)', fg: '#F5EEFC', tap: () => {} },
+      ],
+
+      // 설계 패널
+      flowSteps: flowMeta.map(f => ({
+        ...f, jump: () => this.go(f.key),
+        border: active === f.key ? 'rgba(242,183,5,.6)' : 'rgba(255,255,255,.1)',
+        bg: active === f.key ? 'rgba(242,183,5,.08)' : 'rgba(255,255,255,.03)',
+        idColor: active === f.key ? '#F2B705' : 'rgba(245,238,252,.4)',
+      })),
+
+      // 트윅
+      stageLighting: this.props.stageLighting ?? true,
+      showSpec: this.props.showSpecPanel ?? true,
+    };
+  }
+}
+</script>
+</body>
+</html>

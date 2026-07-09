@@ -497,6 +497,179 @@ input::placeholder { color: rgba(245, 238, 252, 0.35); }
 
 .topic-button--selected .topic-desc { color: var(--gold); }
 
+/* ── 꿈 해몽 (D1~D3, reference/design-prototype-dream 기반) ── */
+.topic-button--dream {
+  border: 1px solid rgba(201, 162, 75, 0.55);
+  background: linear-gradient(135deg, rgba(201, 162, 75, 0.14), rgba(123, 44, 191, 0.12));
+  font-weight: 700;
+}
+
+.dream-entry-label { display: flex; align-items: center; gap: 9px; }
+
+.dream-new-badge {
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(201, 162, 75, 0.18);
+  border: 1px solid rgba(201, 162, 75, 0.5);
+  color: var(--gold);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.topic-desc--dream { color: var(--gold) !important; font-weight: 500; }
+
+.dream-entry-note {
+  margin: 14px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-faint);
+  text-align: center;
+}
+
+.dream-hint { margin: -8px 0 14px; font-size: 13px; color: rgba(245, 238, 252, 0.6); }
+
+.dream-textarea {
+  width: 100%;
+  padding: 14px;
+  font-size: 15px;
+  line-height: 1.6;
+  border-radius: 12px;
+  border: 1px solid rgba(201, 162, 75, 0.4);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-family: inherit;
+  outline: none;
+  resize: none;
+}
+
+.dream-textarea:focus { border-color: var(--gold); }
+.dream-textarea::placeholder { color: rgba(245, 238, 252, 0.35); }
+
+.dream-charcount {
+  align-self: flex-end;
+  font-size: 11px;
+  color: rgba(245, 238, 252, 0.4);
+  margin: 4px 0 14px;
+}
+
+.dream-charcount--limit { color: #FF7B9C; }
+
+.dream-chip-label { margin: 0 0 8px; font-size: 12px; color: rgba(245, 238, 252, 0.6); }
+
+.dream-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+
+.dream-chip {
+  padding: 9px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(245, 238, 252, 0.75);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.dream-chip:active { transform: scale(0.95); }
+
+.dream-chip--on {
+  border-color: var(--gold);
+  background: rgba(201, 162, 75, 0.16);
+  color: var(--gold);
+  font-weight: 700;
+}
+
+.dream-privacy {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(201, 162, 75, 0.07);
+  border: 1px solid rgba(201, 162, 75, 0.22);
+  margin-bottom: 12px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: rgba(245, 238, 252, 0.6);
+}
+
+.dream-privacy-mark {
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--gold);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  color: var(--gold);
+  flex: none;
+  margin-top: 1px;
+}
+
+.stage-avatar-frame--dream {
+  background: radial-gradient(circle at 50% 20%, rgba(123, 44, 191, calc(0.4 + var(--glow-level, 0) * 0.3)), var(--surface-2) 80%);
+}
+
+.dream-section { display: flex; flex-direction: column; gap: 8px; }
+
+.dream-section-title {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  color: var(--gold);
+  font-weight: 700;
+}
+
+.dream-symbol-row {
+  display: flex;
+  gap: 10px;
+  padding: 11px 13px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.dream-symbol-chip {
+  flex: none;
+  align-self: flex-start;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(201, 162, 75, 0.14);
+  border: 1px solid rgba(201, 162, 75, 0.45);
+  color: var(--gold);
+  font-weight: 700;
+}
+
+.dream-symbol-meaning { font-size: 13px; line-height: 1.6; color: rgba(245, 238, 252, 0.8); }
+
+.dream-overall { margin: 0; font-size: 13.5px; line-height: 1.7; color: rgba(245, 238, 252, 0.85); }
+
+.dream-today {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border-top: 1px solid rgba(201, 162, 75, 0.18);
+  padding-top: 12px;
+}
+
+.dream-today-chip {
+  flex: none;
+  font-size: 11px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(201, 24, 74, 0.16);
+  border: 1px solid rgba(201, 24, 74, 0.45);
+  color: #FF7B9C;
+  font-weight: 700;
+}
+
+.dream-today-text { font-size: 12.5px; line-height: 1.6; color: rgba(245, 238, 252, 0.7); }
+
+.talisman-card--dream { background: linear-gradient(160deg, #1E1233, #3A0E3E 70%); }
+
 /* ── S4 스테이지 ── */
 .stage-avatar-wrap {
   position: relative;

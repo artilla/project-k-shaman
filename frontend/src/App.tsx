@@ -11,6 +11,8 @@ import { LoginPrompt, ShareSheet, Toast } from "./components/Overlays";
 import { S0Onboarding, S1CharIntro, S2ProfileForm, S3TopicSelect } from "./components/Screens";
 import { S4Stage } from "./components/Stage";
 import { S5ResultCard } from "./components/ResultCard";
+import { D1DreamInput, D2DreamStage, D3DreamTalisman } from "./components/DreamScreens";
+import { interpretDream, type DreamResponse } from "./lib/dream";
 
 function downloadBlob(blob: Blob, fileName: string) {
   const url = URL.createObjectURL(blob);
@@ -48,6 +50,10 @@ export default function App() {
   const [providers, setProviders] = useState({ google: false, kakao: false });
   const [authError, setAuthError] = useState(false);
   const [loginPromptOpen, setLoginPromptOpen] = useState(false);
+  const [loginPromptMessage, setLoginPromptMessage] = useState<string | undefined>(undefined);
+  const [dreamData, setDreamData] = useState<DreamResponse | null>(null);
+  const [dreamLoading, setDreamLoading] = useState(false);
+  const [dreamStatus, setDreamStatus] = useState<string | null>(null);
   const [selectedTopic, setSelectedTopic] = useState("");
   const [fortuneLoading, setFortuneLoading] = useState(false);
   const [fortuneData, setFortuneData] = useState<FortuneResponse | null>(null);
@@ -63,6 +69,7 @@ export default function App() {
 
   const s0HeroRef = useRef<HTMLDivElement | null>(null);
   const s4AvatarRef = useRef<HTMLDivElement | null>(null);
+  const d2AvatarRef = useRef<HTMLDivElement | null>(null);
   const live2dInitRequested = useRef(false);
   const [live2dActive, setLive2dActive] = useState(false);
 
@@ -70,6 +77,7 @@ export default function App() {
     onFirstPlay: () => reportEvents(fortuneData?.fortuneId ?? null, [{ event: "first_audio_play", clientTs: Date.now() }]),
     onLevel: (level) => {
       s4AvatarRef.current?.style.setProperty("--glow-level", level.toFixed(3));
+      d2AvatarRef.current?.style.setProperty("--glow-level", level.toFixed(3));
       window.HongyeonLive2D?.setMouth(level);
     },
   });
@@ -91,7 +99,7 @@ export default function App() {
     setScreen((prev) => {
       if (prev === next) return prev;
       if (push) navHistory.current.push(prev);
-      if (prev === "s4" && next !== "s4") player.stop();
+      if ((prev === "s4" || prev === "d2") && prev !== next) player.stop();
       return next;
     });
     setSheetOpen(false);
@@ -139,13 +147,15 @@ export default function App() {
     requestAnimationFrame(() => {
       if (screen === "s0" && s0HeroRef.current) l2d.moveTo(s0HeroRef.current);
       else if (screen === "s4" && s4AvatarRef.current) l2d.moveTo(s4AvatarRef.current);
+      else if (screen === "d2" && d2AvatarRef.current) l2d.moveTo(d2AvatarRef.current);
       setLive2dActive(!!l2d.isActive());
     });
   }, [screen]);
 
-  // ── 게이트 (재생·부적 로그인 필요) ──
-  const requireLogin = useCallback((): boolean => {
+  // ── 게이트 (재생·부적·꿈 해몽 로그인 필요) ──
+  const requireLogin = useCallback((message?: string): boolean => {
     if (session.loggedIn) return true;
+    setLoginPromptMessage(message);
     setLoginPromptOpen(true);
     reportEvents(null, [{ event: "login_prompt_shown", clientTs: Date.now() }]);
     return false;
@@ -214,6 +224,45 @@ export default function App() {
       .catch((err: Error) => setShareStatus("오류: " + err.message));
   }, [fortuneData, requireLogin, showToast]);
 
+  // ── 꿈 해몽 (D1~D3) ──
+  const handleDreamEntry = useCallback(() => {
+    if (!requireLogin("꿈 해몽은 손님을 기억해야 풀 수 있는 깊은 풀이라, 로그인 후에 홍연이 맞이할 수 있어요.")) return;
+    reportEvents(null, [{ event: "dream_started", clientTs: Date.now() }]);
+    setDreamData(null);
+    setDreamStatus(null);
+    go("d1");
+  }, [go, requireLogin]);
+
+  const handleDreamSubmit = useCallback((text: string, symbols: string[]) => {
+    if (dreamLoading) return;
+    markSessionStart();
+    setDreamLoading(true);
+    setDreamData(null);
+    setDreamStatus(null);
+    player.reset();
+    go("d2");
+    interpretDream(text, symbols)
+      .then((data) => {
+        setDreamData(data);
+        // 프라이버시: 이벤트에는 상징 라벨만 — 꿈 원문은 어디에도 남기지 않는다
+        reportEvents(null, [{
+          event: "dream_interpreted",
+          clientTs: Date.now(),
+          symbols: data.reading.symbols.map((s) => s.label),
+        }]);
+        player.setSource(data.audioUrl, data.script);
+      })
+      .catch((err: Error) => {
+        if (err.message === "LOGIN_REQUIRED") {
+          go("s3", false);
+          requireLogin("세션이 만료됐어요. 다시 로그인하면 홍연이 이어서 풀어드릴게요.");
+        } else {
+          setDreamStatus("오류: " + err.message);
+        }
+      })
+      .finally(() => setDreamLoading(false));
+  }, [dreamLoading, go, player, requireLogin]);
+
   const handleCopyLink = useCallback(() => {
     setSheetOpen(false);
     const url = window.location.origin + "/";
@@ -268,6 +317,35 @@ export default function App() {
           onSelect={setSelectedTopic}
           onEditProfile={() => { setEditingProfile(true); go("s2"); }}
           onStart={handleFortuneStart}
+          onDream={handleDreamEntry}
+        />
+      )}
+      {screen === "d1" && (
+        <D1DreamInput loading={dreamLoading} onSubmit={handleDreamSubmit} />
+      )}
+      {screen === "d2" && (
+        <D2DreamStage
+          ref={d2AvatarRef}
+          loading={dreamLoading}
+          reading={dreamData?.reading ?? null}
+          statusMessage={dreamStatus ?? player.error}
+          phase={player.phase}
+          avatarState={player.avatarState}
+          progressPct={player.progressPct}
+          live2dActive={live2dActive}
+          onListen={player.listen}
+          onPlayPause={player.playPause}
+          onReplay={player.replay}
+          onTalisman={() => go("d3")}
+        />
+      )}
+      {screen === "d3" && dreamData && (
+        <D3DreamTalisman
+          reading={dreamData.reading}
+          nickname={nickname}
+          onSaveImage={() => showToast("꿈 부적 이미지 저장은 곧 열려요")}
+          onOpenShare={() => setSheetOpen(true)}
+          onRestart={() => { setDreamData(null); go("d1", false); }}
         />
       )}
       {screen === "s4" && (
@@ -312,6 +390,7 @@ export default function App() {
       <LoginPrompt
         open={loginPromptOpen}
         providers={providers}
+        message={loginPromptMessage}
         onClose={() => setLoginPromptOpen(false)}
         onLogin={handleLogin}
       />

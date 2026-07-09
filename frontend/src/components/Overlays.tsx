@@ -4,6 +4,7 @@ import { loginUrl } from "../lib/api";
 export function LoginPrompt(props: {
   open: boolean;
   providers: { google: boolean; kakao: boolean };
+  message?: string;
   onClose: () => void;
   onLogin: (provider: "google" | "kakao") => void;
 }) {
@@ -14,7 +15,7 @@ export function LoginPrompt(props: {
       <div className="login-prompt-card" role="dialog" aria-modal="true" aria-labelledby="login-prompt-title">
         <h2 id="login-prompt-title" className="login-prompt-title">로그인이 필요해요</h2>
         <p className="login-prompt-text">
-          홍연의 목소리 재생과 부적 받기는 로그인 후 이용할 수 있어요. 운세 보기는 로그인 없이 계속 가능해요.
+          {props.message ?? "홍연의 목소리 재생과 부적 받기는 로그인 후 이용할 수 있어요. 운세 보기는 로그인 없이 계속 가능해요."}
         </p>
         <button
           className="glass-button glass-button--wide"

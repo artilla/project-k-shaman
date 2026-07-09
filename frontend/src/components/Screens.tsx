@@ -166,6 +166,7 @@ export function S3TopicSelect(props: {
   onSelect: (key: string) => void;
   onEditProfile: () => void;
   onStart: () => void;
+  onDream: () => void;
 }) {
   return (
     <section className="screen">
@@ -188,7 +189,15 @@ export function S3TopicSelect(props: {
             <span className="topic-desc">{topic.desc}</span>
           </button>
         ))}
+        <button type="button" className="topic-button topic-button--dream" onClick={props.onDream}>
+          <span className="dream-entry-label">
+            꿈 해몽
+            <span className="dream-new-badge">NEW</span>
+          </span>
+          <span className="topic-desc topic-desc--dream">간밤의 꿈을 풀어드려요 · 로그인</span>
+        </button>
       </div>
+      <p className="dream-entry-note">꿈 해몽은 일일 운세와 별도로, 하루 여러 번 볼 수 있어요</p>
       <div className="screen-spacer" />
       <button className="cta-button" type="button" disabled={!props.selectedTopic || props.loading} onClick={props.onStart}>
         {props.loading ? "불러오는 중…" : "운세 보기"}

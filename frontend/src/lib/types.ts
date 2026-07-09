@@ -38,7 +38,7 @@ export interface Profile {
   birthHour: number | null;
 }
 
-export type ScreenName = "s0" | "s1" | "s2" | "s3" | "s4" | "s5";
+export type ScreenName = "s0" | "s1" | "s2" | "s3" | "s4" | "s5" | "d1" | "d2" | "d3";
 export type AvatarState = "idle" | "greeting" | "speaking" | "blessing";
 export type PlayerPhase = "idle" | "playing" | "paused" | "done";
 
