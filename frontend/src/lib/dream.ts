@@ -36,6 +36,7 @@ export async function interpretDream(text: string, symbols: string[]): Promise<D
     body: JSON.stringify({ text, symbols }),
   });
   if (res.status === 401) throw new Error("LOGIN_REQUIRED");
+  if (res.status === 429) throw new Error("오늘의 꿈 풀이는 여기까지예요. 내일 다시 들려주세요.");
   if (!res.ok) throw new Error(`해몽을 불러오지 못했어요 (${res.status})`);
   return res.json();
 }

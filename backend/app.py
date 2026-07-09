@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 
 _ROOT = Path(__file__).resolve().parent.parent
 
-from backend import core, dream  # noqa: E402 — 헬퍼(레거시에서 승격)·꿈 해몽 로직
+from backend import core, dream, ratelimit  # noqa: E402 — 헬퍼(레거시에서 승격)·꿈 해몽·리미터
 
 _logger = logging.getLogger("fortune_engine.backend")
 
@@ -40,16 +40,47 @@ def create_app(*, backend: str = "mock") -> FastAPI:
     app.state.sessions = {}
     app.state.session_secret = secrets.token_hex(32)
     app.state.fortune_cache_by_id = {}
+    app.state.rate_limiter = ratelimit.MemoryRateLimiter()
 
     # ── 세션/게이트 헬퍼 ──
-    def current_session(request: Request):
+    def current_session_id(request: Request):
         raw = request.cookies.get(SESSION_COOKIE)
         if not raw:
             return None
         session_id = core.verify_session_cookie_value(raw, app.state.session_secret)
-        if session_id is None:
+        if session_id is None or session_id not in app.state.sessions:
             return None
-        return app.state.sessions.get(session_id)
+        return session_id
+
+    def current_session(request: Request):
+        session_id = current_session_id(request)
+        return app.state.sessions.get(session_id) if session_id else None
+
+    # ── rate limit (P0 비용 방어 — LLM·TTS 실과금 전 전제 조건) ──
+    def rate_gate(request: Request, scope: str):
+        limit, window = ratelimit.LIMITS[scope]
+        identity = ratelimit.client_identity(request, current_session_id(request))
+        allowed, retry_after = app.state.rate_limiter.check(scope, identity, limit, window)
+        if not allowed:
+            return JSONResponse(
+                {"error": "rate limited", "retryAfterSec": retry_after},
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+        return None
+
+    def daily_gate(request: Request, scope: str):
+        """하루 사용 상한 (UTC 자정 고정 윈도우) — Plan.md '하루 N회' 제품 정책."""
+        limit = ratelimit.DAILY_LIMITS[scope]
+        identity = ratelimit.client_identity(request, current_session_id(request))
+        allowed, retry_after = app.state.rate_limiter.check(scope, identity, limit, 86400)
+        if not allowed:
+            return JSONResponse(
+                {"error": "daily limit reached", "retryAfterSec": retry_after},
+                status_code=429,
+                headers={"Retry-After": str(retry_after)},
+            )
+        return None
 
     def login_required(request: Request):
         """재생·부적 게이트 — 운세 텍스트는 게스트 허용 유지 (US-9와 동일 정책)."""
@@ -71,6 +102,9 @@ def create_app(*, backend: str = "mock") -> FastAPI:
     # ── 운세 (게스트 허용) ──
     @app.get("/api/fortune/today")
     def fortune_today(request: Request):
+        gate = rate_gate(request, "fortune") or daily_gate(request, "fortune-daily")
+        if gate:
+            return gate
         req = {
             "date": request.query_params.get("date", core.DEFAULT_DATE),
             "topic": request.query_params.get("topic", core.DEFAULT_TOPIC),
@@ -131,7 +165,7 @@ def create_app(*, backend: str = "mock") -> FastAPI:
     # ── 꿈 해몽 (로그인 필요 — 사용자 확정 정책, LLM 도입 시 최대 비용 엔드포인트) ──
     @app.post("/api/dream/interpret")
     async def dream_interpret(request: Request):
-        gate = login_required(request)
+        gate = login_required(request) or rate_gate(request, "dream") or daily_gate(request, "dream-daily")
         if gate:
             return gate
         try:
@@ -159,6 +193,9 @@ def create_app(*, backend: str = "mock") -> FastAPI:
     def auth_login(provider: str, request: Request):
         if provider not in core.OAUTH_PROVIDERS:
             return JSONResponse({"error": "unknown provider"}, status_code=404)
+        gate = rate_gate(request, "login")
+        if gate:
+            return gate
         state = secrets.token_hex(16)
         url = core.build_oauth_authorize_url(
             provider, redirect_uri=redirect_uri_for(request, provider), state=state
@@ -228,8 +265,14 @@ def create_app(*, backend: str = "mock") -> FastAPI:
     # ── 이벤트 수집 ──
     @app.post("/api/event")
     async def event(request: Request):
+        gate = rate_gate(request, "event")
+        if gate:
+            return gate
+        body = await request.body()
+        if len(body) > ratelimit.EVENT_BODY_MAX_BYTES:
+            return JSONResponse({"error": "payload too large"}, status_code=413)
         try:
-            payload = json.loads(await request.body() or b"{}")
+            payload = json.loads(body or b"{}")
         except json.JSONDecodeError:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
         merged = [*payload.get("serverEvents", []), *payload.get("clientEvents", [])]

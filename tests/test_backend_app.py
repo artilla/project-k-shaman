@@ -267,6 +267,64 @@ class TestCallbackFlows:
         assert fastapi_app.state.sessions == {}
 
 
+# ── rate limit + 일일 제한 (P0 비용 방어) ──
+class TestRateLimits:
+    def test_fortune_daily_limit_429(self, fastapi_app, client, monkeypatch):
+        from backend import ratelimit
+        monkeypatch.setitem(ratelimit.DAILY_LIMITS, "fortune-daily", 2)
+        path = "/api/fortune/today?topic=love&date=2026-07-07"
+        assert client.get(path).status_code == 200
+        assert client.get(path).status_code == 200
+        res = client.get(path)
+        assert res.status_code == 429
+        assert res.json()["error"] == "daily limit reached"
+        assert "retry-after" in {k.lower() for k in res.headers}
+
+    def test_dream_hourly_limit_429(self, fastapi_app, client, monkeypatch):
+        from backend import ratelimit
+        monkeypatch.setitem(ratelimit.LIMITS, "dream", (1, 3600))
+        login(fastapi_app, client)
+        body = {"text": "뱀꿈", "symbols": []}
+        assert client.post("/api/dream/interpret", json=body).status_code == 200
+        assert client.post("/api/dream/interpret", json=body).status_code == 429
+
+    def test_login_rate_limit_429(self, client, monkeypatch):
+        from backend import ratelimit
+        monkeypatch.setitem(ratelimit.LIMITS, "login", (2, 600))
+        monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
+        # 키 미설정이라 400이지만 rate 카운트는 소모된다 → 3번째는 429
+        assert client.get("/api/auth/login/google").status_code == 400
+        assert client.get("/api/auth/login/google").status_code == 400
+        assert client.get("/api/auth/login/google").status_code == 429
+
+    def test_event_body_size_cap_413(self, client, monkeypatch):
+        from backend import ratelimit
+        monkeypatch.setattr(ratelimit, "EVENT_BODY_MAX_BYTES", 100)
+        big = {"fortuneId": "f1", "clientEvents": [{"event": "x" * 200, "clientTs": 1}], "serverEvents": []}
+        res = client.post("/api/event", json=big)
+        assert res.status_code == 413
+
+    def test_identities_are_isolated(self):
+        from backend.ratelimit import MemoryRateLimiter
+        limiter = MemoryRateLimiter()
+        assert limiter.check("s", "ip:a", 1, 3600) == (True, 0)
+        allowed_a, retry_a = limiter.check("s", "ip:a", 1, 3600)
+        assert allowed_a is False and retry_a >= 1
+        assert limiter.check("s", "ip:b", 1, 3600)[0] is True  # 다른 identity는 독립
+
+    def test_window_expiry_resets_count(self, monkeypatch):
+        import time as time_mod
+        from backend import ratelimit as rl
+        limiter = rl.MemoryRateLimiter()
+        base = 1_000_000.0
+        monkeypatch.setattr(rl.time, "time", lambda: base)
+        assert limiter.check("s", "ip:a", 1, 60)[0] is True
+        assert limiter.check("s", "ip:a", 1, 60)[0] is False
+        monkeypatch.setattr(rl.time, "time", lambda: base + 61)
+        assert limiter.check("s", "ip:a", 1, 60)[0] is True
+        assert time_mod is not None
+
+
 # ── dream 순수 로직 단위 테스트 ──
 class TestDreamLogic:
     def test_detect_defaults_to_water(self):
