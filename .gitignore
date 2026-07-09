@@ -68,3 +68,6 @@ __pycache__/
 target/
 state/dispatch/
 state/assets-gen/
+
+# 루트에 쌓이는 작업 스크린샷 (커밋 대상 아님)
+/*.png
