@@ -21,6 +21,9 @@
 - **backend/** — FastAPI + uvicorn. 기존 핸들러를 이식하되 **엔진 로직은 `fortune-engine/`의 기존 모듈(pipeline, share_card, seed_builder, oauth 헬퍼)을 import로 재사용** — 로직 중복 금지.
 - **배포는 same-origin 유지** — dev는 Vite proxy(`/api`, `/audio` → backend), prod는 backend가 `frontend/dist`를 정적 서빙(또는 reverse proxy 라우팅). 세션 쿠키(SameSite=Lax)·CORS 문제를 원천 회피한다.
 - 기존 `fortune-engine/web`은 신 구조가 패리티에 도달할 때까지 유지(병행), 패리티 확인 후 제거한다.
+  → **2026-07-09 제거 완료**: server.py·vanilla UI 삭제, 헬퍼는 `backend/core.py`로 승격,
+  고유 테스트 커버리지는 `tests/test_backend_app.py`로 이관. `pipeline.py`·`event_timeline.py`·
+  공용 에셋(`static/assets`, `static/live2d`)은 엔진 계층으로 잔류.
 
 ## 대안 검토
 

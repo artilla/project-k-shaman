@@ -1,28 +1,28 @@
-# 재생 프론트 스켈레톤 (T019)
+# fortune-engine/web — 엔진 웹 파이프라인 (레거시 서버 제거됨)
 
-홍연 운세 1회를 "탭 → 텍스트 먼저 → 음성 재생"으로 끝까지 체험하는 최소 모바일 웹 페이지.
+2026-07-09, ADR-0003에 따라 이 디렉터리의 stdlib HTTP 서버(`server.py`)와 vanilla UI
+(`static/index.html`·`app.js`·`styles.css`·`live2d-avatar.js`)를 제거했다.
+HTTP 계약은 `backend/`(FastAPI)가 계승하고, 헬퍼는 `backend/core.py`로 승격됐다.
+프론트엔드는 `frontend/`(Vite + React + TS)가 대체한다.
 
-## 실행
+## 남아 있는 것
+
+| 파일/디렉터리 | 역할 |
+|---|---|
+| `pipeline.py` | 운세 생성→narration 조립→TTS 캐시 파이프라인 (`build_playback_response`) |
+| `event_timeline.py` | 재생 이벤트 타임라인 검증·지연 요약 (`validate_timeline`, `summarize_latency`) |
+| `measure_playback.py` | `state/events/playback_events.jsonl` 분석 CLI |
+| `static/assets/` | 캐릭터 정지컷(webp)·share-card 에셋 — backend가 `/static/assets/*`로 서빙 |
+| `static/live2d/` | Live2D 벤더 런타임 + 모델 (라이선스: `static/live2d/README.md`) |
+
+## 실행 (신 스택)
 
 ```bash
-python3 fortune-engine/web/server.py
+# backend (API + 프로덕션 SPA 서빙)
+python -m uvicorn backend.app:app --port 8788
+# frontend dev
+cd frontend && npm run dev   # http://localhost:5173, /api·/audio·/static 프록시
 ```
 
-`http://127.0.0.1:8787`를 모바일 뷰포트(또는 브라우저 개발자 도구의 모바일 에뮬레이션)로 연다.
-`--port <N>`으로 포트를 바꿀 수 있다.
-
-## 구성
-
-- `server.py` — 표준 라이브러리 `http.server`만 사용하는 로컬 서버. 정적 페이지, `/api/fortune/today`
-  (mock 파이프라인), `/api/event`(3초 경로 실측 훅), `/audio/mock/*.wav`(재생 확인용 플레이스홀더
-  톤)를 제공한다.
-- `pipeline.py` — `fortune_api_mock.get_today_fortune`(seed_builder→narration composer→
-  tts_adapter→cache_layer, T012/T014/T016/T018 기연결)을 호출하고 서버 이벤트
-  (`tts_generate_start/complete`, `cache_hit/miss`)를 캡처해 함께 반환한다.
-- `event_timeline.py` — 서버 이벤트 + 클라이언트 이벤트(`first_text_visible`, `first_audio_play`)를
-  합친 세션 타임라인의 스키마 검증과 지연 요약 로그.
-- `static/` — 모바일 페이지(`index.html`/`app.js`/`styles.css`). 탭 시 오디오 컨텍스트를 열고
-  (자동 재생 금지 전제), 텍스트를 즉시 표시한 뒤 오디오가 준비되는 대로 재생한다.
-
-이 서버는 항상 mock TTS 백엔드만 쓴다 (`OPENAI_API_KEY` 유무와 무관 — T019는 과금 경로 없는
-`safe:true` 스켈레톤). 실 프로바이더 연결은 T018에서 별도로 구현되어 있다.
+테스트: `tests/test_backend_app.py` (HTTP 계약 + 레거시에서 이관한 고유 커버리지),
+`tests/test_web_pipeline.py`·`tests/test_web_event_timeline.py` (엔진 계층, 그대로 유지).

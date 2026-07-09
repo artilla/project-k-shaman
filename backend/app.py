@@ -1,8 +1,8 @@
 """오늘신당 backend — FastAPI 이식 (ADR-0003 FE/BE 분리).
 
-기존 fortune-engine/web/server.py의 HTTP 계약을 그대로 유지하되,
-엔진·헬퍼 로직은 legacy 모듈을 import로 재사용한다 (로직 중복 금지).
-legacy web가 패리티 확인 후 제거되면 헬퍼를 이 패키지로 승격한다.
+레거시 fortune-engine/web/server.py의 HTTP 계약을 계승한다.
+헬퍼는 backend/core.py로 승격 완료(2026-07-09).
+엔진 계층(pipeline·share_card 등)은 fortune-engine/에 유지하고 import만 한다.
 
 계약 (test_web_server.py와 동일):
 - GET  /api/fortune/today          — 게스트 허용 (텍스트 먼저 원칙)
@@ -18,7 +18,6 @@ import json
 import logging
 import os
 import secrets
-import sys
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
@@ -26,17 +25,13 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 _ROOT = Path(__file__).resolve().parent.parent
-_LEGACY_WEB = _ROOT / "fortune-engine" / "web"
-sys.path.insert(0, str(_LEGACY_WEB))
 
-import server as legacy  # noqa: E402 — fortune-engine/web/server.py (헬퍼 재사용)
-
-from backend import dream  # noqa: E402 — 꿈 해몽 순수 로직
+from backend import core, dream  # noqa: E402 — 헬퍼(레거시에서 승격)·꿈 해몽 로직
 
 _logger = logging.getLogger("fortune_engine.backend")
 
-SESSION_COOKIE = legacy._SESSION_COOKIE_NAME
-STATE_COOKIE = legacy._OAUTH_STATE_COOKIE_NAME
+SESSION_COOKIE = core.SESSION_COOKIE_NAME
+STATE_COOKIE = core.OAUTH_STATE_COOKIE_NAME
 
 
 def create_app(*, backend: str = "mock") -> FastAPI:
@@ -51,7 +46,7 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         raw = request.cookies.get(SESSION_COOKIE)
         if not raw:
             return None
-        session_id = legacy._verify_session_cookie_value(raw, app.state.session_secret)
+        session_id = core.verify_session_cookie_value(raw, app.state.session_secret)
         if session_id is None:
             return None
         return app.state.sessions.get(session_id)
@@ -77,9 +72,9 @@ def create_app(*, backend: str = "mock") -> FastAPI:
     @app.get("/api/fortune/today")
     def fortune_today(request: Request):
         req = {
-            "date": request.query_params.get("date", legacy._DEFAULT_DATE),
-            "topic": request.query_params.get("topic", legacy._DEFAULT_TOPIC),
-            "character_id": request.query_params.get("character_id", legacy._DEFAULT_CHARACTER_ID),
+            "date": request.query_params.get("date", core.DEFAULT_DATE),
+            "topic": request.query_params.get("topic", core.DEFAULT_TOPIC),
+            "character_id": request.query_params.get("character_id", core.DEFAULT_CHARACTER_ID),
         }
         for field in ("birth_year", "birth_month", "birth_day", "birth_hour"):
             value = request.query_params.get(field)
@@ -88,14 +83,14 @@ def create_app(*, backend: str = "mock") -> FastAPI:
 
         backend_mode = app.state.tts_backend_mode
         tts_backend = "openai" if backend_mode == "openai" else None
-        result = legacy.build_playback_response(req, tts_backend=tts_backend)
+        result = core.build_playback_response(req, tts_backend=tts_backend)
         cache_key = result["tts"]["cacheKey"]
         audio_url = (
-            legacy._real_audio_url_for(cache_key)
+            core.real_audio_url_for(cache_key)
             if backend_mode == "openai"
-            else legacy._mock_audio_url_for(cache_key)
+            else core.mock_audio_url_for(cache_key)
         )
-        legacy._remember_fortune(app.state.fortune_cache_by_id, result["fortuneId"], result["fortune"])
+        core.remember_fortune(app.state.fortune_cache_by_id, result["fortuneId"], result["fortune"])
         return {**result, "audioUrl": audio_url}
 
     # ── 부적 카드 (로그인 필요) ──
@@ -108,7 +103,7 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         fortune = app.state.fortune_cache_by_id.get(fortune_id) if fortune_id else None
         if fortune is None:
             return JSONResponse({"error": "fortune not found"}, status_code=404)
-        svg = legacy._share_card.render_share_card_svg(fortune, nickname=legacy._SHARE_CARD_NICKNAME)
+        svg = core.share_card.render_share_card_svg(fortune, nickname=core.SHARE_CARD_NICKNAME)
         return Response(svg, media_type="image/svg+xml; charset=utf-8")
 
     # ── 오디오 (로그인 필요) ──
@@ -117,18 +112,18 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         gate = login_required(request)
         if gate:
             return gate
-        if not legacy._KEY_RE.match(key_hash):
+        if not core.KEY_RE.match(key_hash):
             return JSONResponse({"error": "invalid audio key"}, status_code=404)
-        return Response(legacy._mock_placeholder_wav(), media_type="audio/wav")
+        return Response(core.mock_placeholder_wav(), media_type="audio/wav")
 
     @app.get("/audio/real/{key_hash}.mp3")
     def audio_real(key_hash: str, request: Request):
         gate = login_required(request)
         if gate:
             return gate
-        if not legacy._KEY_RE.match(key_hash):
+        if not core.KEY_RE.match(key_hash):
             return JSONResponse({"error": "invalid audio key"}, status_code=404)
-        path = legacy._TTS_REAL_CACHE_DIR / f"{key_hash}.mp3"
+        path = core.TTS_REAL_CACHE_DIR / f"{key_hash}.mp3"
         if not path.is_file():
             return JSONResponse({"error": "audio not found"}, status_code=404)
         return Response(path.read_bytes(), media_type="audio/mpeg")
@@ -152,20 +147,20 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         # 프라이버시 불변식: 꿈 원문은 interpret() 안에서만 소비 — 저장·로깅 금지 (v3 §12 정신)
         result = dream.interpret(text, selected)
         cache_key = "dream:" + result["dreamId"]
-        result["audioUrl"] = legacy._mock_audio_url_for(cache_key)
+        result["audioUrl"] = core.mock_audio_url_for(cache_key)
         return result
 
     # ── 인증 ──
     @app.get("/api/auth/providers")
     def auth_providers():
-        return {"providers": legacy.oauth_provider_status()}
+        return {"providers": core.oauth_provider_status()}
 
     @app.get("/api/auth/login/{provider}")
     def auth_login(provider: str, request: Request):
-        if provider not in legacy._OAUTH_PROVIDERS:
+        if provider not in core.OAUTH_PROVIDERS:
             return JSONResponse({"error": "unknown provider"}, status_code=404)
         state = secrets.token_hex(16)
-        url = legacy.build_oauth_authorize_url(
+        url = core.build_oauth_authorize_url(
             provider, redirect_uri=redirect_uri_for(request, provider), state=state
         )
         if url is None:
@@ -176,7 +171,7 @@ def create_app(*, backend: str = "mock") -> FastAPI:
 
     @app.get("/api/auth/callback/{provider}")
     def auth_callback(provider: str, request: Request):
-        if provider not in legacy._OAUTH_PROVIDERS:
+        if provider not in core.OAUTH_PROVIDERS:
             return JSONResponse({"error": "unknown provider"}, status_code=404)
         code = request.query_params.get("code")
         if not code:
@@ -187,7 +182,7 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         if not state or not expected_state or not _hmac.compare_digest(state, expected_state):
             return auth_error_redirect()
         try:
-            profile = legacy._oauth_token_and_profile(
+            profile = core.oauth_token_and_profile(
                 provider, code, redirect_uri=redirect_uri_for(request, provider)
             )
         except Exception:
@@ -195,7 +190,7 @@ def create_app(*, backend: str = "mock") -> FastAPI:
             return auth_error_redirect()
         session_id = secrets.token_hex(16)
         app.state.sessions[session_id] = {"provider": provider, "nickname": profile.get("nickname")}
-        cookie_value = legacy._make_session_cookie_value(session_id, app.state.session_secret)
+        cookie_value = core.make_session_cookie_value(session_id, app.state.session_secret)
         resp = RedirectResponse("/", status_code=302)
         resp.set_cookie(SESSION_COOKIE, cookie_value, path="/", httponly=True, samesite="lax")
         return resp
@@ -211,7 +206,7 @@ def create_app(*, backend: str = "mock") -> FastAPI:
     def auth_logout(request: Request):
         raw = request.cookies.get(SESSION_COOKIE)
         if raw:
-            session_id = legacy._verify_session_cookie_value(raw, app.state.session_secret)
+            session_id = core.verify_session_cookie_value(raw, app.state.session_secret)
             if session_id is not None:
                 app.state.sessions.pop(session_id, None)
         resp = JSONResponse({"ok": True})
@@ -225,7 +220,7 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         def dev_login():
             session_id = secrets.token_hex(16)
             app.state.sessions[session_id] = {"provider": "dev", "nickname": "하늘이"}
-            cookie_value = legacy._make_session_cookie_value(session_id, app.state.session_secret)
+            cookie_value = core.make_session_cookie_value(session_id, app.state.session_secret)
             resp = RedirectResponse("/", status_code=302)
             resp.set_cookie(SESSION_COOKIE, cookie_value, path="/", httponly=True, samesite="lax")
             return resp
@@ -238,9 +233,9 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         except json.JSONDecodeError:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
         merged = [*payload.get("serverEvents", []), *payload.get("clientEvents", [])]
-        missing = legacy.validate_timeline(merged)
-        summary = legacy.summarize_latency(merged, session_start_ms=payload.get("sessionStartMs", 0))
-        legacy._append_event_log({
+        missing = core.validate_timeline(merged)
+        summary = core.summarize_latency(merged, session_start_ms=payload.get("sessionStartMs", 0))
+        core.append_event_log({
             "fortuneId": payload.get("fortuneId"),
             "events": merged,
             "summary": summary,
@@ -248,8 +243,8 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         return {"ok": True, "missing": missing, "summary": summary}
 
     # ── 정적 서빙 ──
-    # 공용 에셋(캐릭터 webp·Live2D 벤더)은 legacy static을 그대로 마운트해 중복을 피한다.
-    app.mount("/static", StaticFiles(directory=str(legacy._STATIC_DIR)), name="legacy-static")
+    # 공용 에셋(캐릭터 webp·Live2D 벤더) — fortune-engine/web/static (엔진 자산 위치 유지)
+    app.mount("/static", StaticFiles(directory=str(core.STATIC_DIR)), name="shared-static")
     # 프로덕션: frontend 빌드 산출물이 있으면 SPA로 서빙 (dev에서는 Vite가 프록시로 대신한다).
     dist = _ROOT / "frontend" / "dist"
     if dist.is_dir():
@@ -258,7 +253,7 @@ def create_app(*, backend: str = "mock") -> FastAPI:
     return app
 
 
-# TTS_BACKEND=openai 시 실백엔드 (OPENAI_API_KEY 필요 — legacy validate와 동일 가드)
+# TTS_BACKEND=openai 시 실백엔드 (OPENAI_API_KEY 필요 — 기동 가드)
 _mode = os.getenv("TTS_BACKEND", "mock")
-legacy.validate_backend_startup(_mode, has_api_key=bool(os.getenv("OPENAI_API_KEY")))
+core.validate_backend_startup(_mode, has_api_key=bool(os.getenv("OPENAI_API_KEY")))
 app = create_app(backend=_mode)
