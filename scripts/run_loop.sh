@@ -353,30 +353,36 @@ in_isolated_worktree() {
 # 티켓 frontmatter 필드 추출 (inline `# 주석` 제거 포함)
 # 리뷰 3차 P1: `---` 토글 파싱은 본문의 `--- key: v ---` 블록도 frontmatter로 읽어
 # 실행 권한(safe 등)이 본문에서 주입될 수 있었다 — 1행에서 시작하는 최초 frontmatter
-# 블록만 읽고, 닫는 `---` 이후는 무시한다.
+# 블록만 읽는다.
+# 리뷰 4차 P1: 추가 강화 — (a) 닫는 `---`가 없으면 frontmatter 전체 무효(값 미출력,
+# 서버 parse-error 판정과 정합), (b) 키는 1열에서 시작해야 함 ($1 비교는 `metadata:`
+# 아래 들여쓴 `  safe: true` 같은 중첩 키도 읽었다).
 field_of() {
   local file="$1" key="$2"
   awk -v k="$key" '
     NR == 1 { if ($0 != "---") exit; next }
-    $0 == "---" { exit }
-    $1 == k":" {
-      sub(/^[^:]+:[ \t]*/, "")
-      sub(/[ \t]+#.*$/, "")
-      gsub(/^[ \t]+|[ \t]+$/, "")
-      print
-      exit
+    $0 == "---" { closed = 1; exit }
+    !found && substr($0, 1, length(k) + 1) == k ":" {
+      line = $0
+      sub(/^[^:]+:[ \t]*/, "", line)
+      sub(/[ \t]+#.*$/, "", line)
+      gsub(/^[ \t]+|[ \t]+$/, "", line)
+      val = line
+      found = 1
     }
+    END { if (closed && found) print val }
   ' "$file"
 }
 
-# 최초 frontmatter 블록 안에서 key가 등장하는 횟수 (0=누락, 2+=중복 — 모두 fail-closed 대상)
+# 최초 frontmatter 블록 안에서 key(1열 시작)가 등장하는 횟수.
+# 0=누락, 2+=중복, 닫는 `---` 부재 시 무조건 0 — 모두 fail-closed 대상.
 frontmatter_field_count() {
   local file="$1" key="$2"
   awk -v k="$key" '
     NR == 1 { if ($0 != "---") exit; next }
-    $0 == "---" { exit }
-    $1 == k":" { n++ }
-    END { print n + 0 }
+    $0 == "---" { closed = 1; exit }
+    substr($0, 1, length(k) + 1) == k ":" { n++ }
+    END { print (closed ? n + 0 : 0) }
   ' "$file"
 }
 
@@ -397,7 +403,7 @@ fm_set_field() {
       if (fm == 0) { fm = 1; print; next }
       if (fm == 1) { print k ": " v; fm = 2; print; next }
     }
-    fm == 1 && $1 == k":" { next }   # drop existing same key (idempotent)
+    fm == 1 && substr($0, 1, length(k) + 1) == k ":" { next }   # drop existing same key (idempotent, 1열 한정)
     { print }
   ' "$file" > "$tmp" && mv "$tmp" "$file"
 }
@@ -457,18 +463,27 @@ _op_dirty_lines() {
   '
 }
 
-# 리뷰 3차 P1: 완료 판정용 WIP 스냅샷/델타.
-# - 메인 워크트리: 사이클 전부터 있던 사용자 WIP는 보호하되, 사이클 중 새로 생긴
-#   dirty(추적 수정·미추적 신규 파일 모두)는 페르소나의 미커밋 잔여물 → 실패 처리.
-# - isolated worktree: 시작이 clean이므로 델타 == 전체 dirty (미추적 포함).
+# 리뷰 3차 P1 + 4차 P1: 완료 판정용 WIP fingerprint.
+# 디스패치 직전과 완료 시점의 fingerprint가 "동일"해야 완료 — 사이클 중 WIP의
+# 추가·삭제·내용 변경을 모두 잡는 양방향 비교다. (porcelain 행만 비교하던 델타는
+# 기존 dirty 파일의 추가 수정, `?? dir/` 내부의 새 파일, 기존 untracked 삭제를
+# 놓쳤다.) 구성: porcelain 상태 행 + dirty(staged/unstaged/미추적) 파일별 내용 해시.
 # 루프 자신이 쓰는 .ralph/(로그)·state/(예약 메타)는 gitignore 여부와 무관하게 제외.
-_wip_snapshot() {
-  git status --porcelain 2>/dev/null | grep -vE '^.{3}(\.ralph/|state/)' | LC_ALL=C sort
-}
-
-_new_wip_lines() {
-  local pre="$1"
-  printf '%s\n' "$pre" | grep -v '^$' | LC_ALL=C sort | LC_ALL=C comm -13 - <(_wip_snapshot)
+_wip_fingerprint() {
+  local f
+  {
+    git status --porcelain 2>/dev/null | grep -vE '^.{3}(\.ralph/|state/)' | LC_ALL=C sort
+    { git diff --name-only 2>/dev/null
+      git diff --cached --name-only 2>/dev/null
+      git ls-files --others --exclude-standard 2>/dev/null
+    } | grep -vE '^(\.ralph/|state/)' | LC_ALL=C sort -u | while IFS= read -r f; do
+      if [ -f "$f" ]; then
+        printf '%s %s\n' "$f" "$(git hash-object -- "$f" 2>/dev/null || echo unhashable)"
+      else
+        printf '%s absent\n' "$f"
+      fi
+    done
+  } 2>/dev/null
 }
 
 pick_next_ticket_path() {
@@ -841,9 +856,9 @@ EOF
   fi
 
   # ────────── 7. Act (delegate to headless) ──────────
-  # 리뷰 3차 P1: 완료 판정 기준점 — 디스패치 직전 WIP 스냅샷 (델타 비교용).
+  # 리뷰 3차/4차 P1: 완료 판정 기준점 — 디스패치 직전 WIP fingerprint (동일성 비교).
   local pre_wip=""
-  [ "$GIT_REPO" = "1" ] && pre_wip=$(_wip_snapshot)
+  [ "$GIT_REPO" = "1" ] && pre_wip=$(_wip_fingerprint)
 
   echo "🤖 헤드리스 세션 디스패치..."
   local headless_log=".ralph/logs/${id}.log"
@@ -916,9 +931,9 @@ EOF
   # 리뷰 2차 P1-8 + 3차 P1: 완료 계약 — "op 경로 clean + 티켓 파일 이동"만으로는 미완
   # 세션이 성공으로 집계됐다. 완료로 인정하려면 아래를 모두 만족해야 한다:
   #   (1) op 경로 clean (기존)
-  #   (2) 사이클 중 새로 생긴 WIP 없음 — pre_wip 델타 비교. 메인 워크트리의 기존 사용자
-  #       WIP는 보호하면서, 페르소나가 남긴 추적 수정·미추적 신규 파일(제품 경로 포함)을
-  #       모두 잡는다 (3차 리뷰: 메인 추적 WIP·isolated 미추적 파일 false-success 수정).
+  #   (2) WIP fingerprint 불변 — 디스패치 직전과 동일해야 한다. 사이클 중 WIP의
+  #       추가·내용 변경·삭제 전부 실패 사유(4차 리뷰: 양방향+내용 비교). 기존 사용자
+  #       WIP는 "건드리지 않는 한" 보호되고, 페르소나가 그것을 수정/삭제/커밋하면 실패.
   #   (3) 티켓 파일이 DONE/(status: done) 또는 ARCHIVE/(status: blocked|skipped)로 이동
   #   (4) HEAD가 사이클 시작 시점(pre_head)에서 전진 (커밋 0개 금지)
   local wip_stage reprompted=0 done_file archive_file final_file final_status
@@ -928,7 +943,7 @@ EOF
     wip_stage=""
     if [ -n "$(_op_dirty_lines)" ]; then
       wip_stage="no-commit"
-    elif [ "$GIT_REPO" = "1" ] && [ -n "$(_new_wip_lines "$pre_wip")" ]; then
+    elif [ "$GIT_REPO" = "1" ] && [ "$(_wip_fingerprint)" != "$pre_wip" ]; then
       wip_stage="no-commit"
     elif [ -f "$ticket" ]; then
       wip_stage="no-done-move"
@@ -1030,10 +1045,11 @@ EOF
     started_at_val=""
     [ -f "$reservation_meta" ] && started_at_val="$(awk -F= '/^started_at=/{print $2; exit}' "$reservation_meta" 2>/dev/null || true)"
     completed_at_val="$(date -Iseconds)"
+    # 리뷰 4차 P1: 무경로 `git add + commit`은 사용자가 미리 staged해 둔 무관한 변경까지
+    # telemetry 커밋에 흡수했다 — pathspec 커밋으로 DONE 파일만 커밋 (index 보존).
     if fm_set_field "$done_file" completed_at "$completed_at_val" \
        && { [ -z "$started_at_val" ] || fm_set_field "$done_file" started_at "$started_at_val"; } \
-       && git add "$done_file" 2>/dev/null \
-       && git commit -m "telemetry(${id}): completed_at" >/dev/null 2>&1; then
+       && git commit -m "telemetry(${id}): completed_at" -- "$done_file" >/dev/null 2>&1; then
       echo "🕒 telemetry: $id completed_at=$completed_at_val"
     else
       git checkout -- "$done_file" 2>/dev/null || true   # 실패 시 트리 clean 복원
@@ -1051,11 +1067,11 @@ EOF
     tok_sum="$(awk -F'\t' -v id="$id" '$2==id { ti+=$4; to+=$5; n++ } END { if (n>0) printf "%d %d", ti, to }' "$token_log" 2>/dev/null || true)"
     if [ -n "$tok_sum" ]; then
       tin="${tok_sum%% *}"; tout="${tok_sum##* }"; ttot=$((tin + tout))
+      # 리뷰 4차 P1: completed_at과 동일 — pathspec 커밋으로 index 보존.
       if fm_set_field "$done_file" tokens_total "$ttot" \
          && fm_set_field "$done_file" tokens_in "$tin" \
          && fm_set_field "$done_file" tokens_out "$tout" \
-         && git add "$done_file" 2>/dev/null \
-         && git commit -m "telemetry(${id}): tokens_total" >/dev/null 2>&1; then
+         && git commit -m "telemetry(${id}): tokens_total" -- "$done_file" >/dev/null 2>&1; then
         echo "🔢 telemetry: $id tokens_total=$ttot (in=$tin out=$tout)"
       else
         git checkout -- "$done_file" 2>/dev/null || true   # 실패 시 트리 clean 복원

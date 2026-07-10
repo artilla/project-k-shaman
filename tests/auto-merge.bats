@@ -382,3 +382,42 @@ _make_rename_repo() {
   [[ "$output" == *"condition 2: git diff failed"* ]]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
 }
+
+# ── 리뷰 4차 P1: unchanged-source copy 탐지 (--find-copies-harder) ────────────
+
+@test "auto_merge: copy src/app.js -> docs/app.md (source unchanged) -> NOT ELIGIBLE (condition 2)" {
+  local repo="$TEST_DIR/repo-copy"
+  mkdir -p "$repo"
+  _make_rename_repo "$repo"
+  cp "$repo/src/app.js" "$repo/docs/app.md"   # 소스는 그대로 — -C만으로는 A(추가)로 보였다
+  git -C "$repo" add docs/app.md
+  git -C "$repo" commit -q -m "sneaky copy"
+
+  run bash -c '
+    cd "$1" && env \
+      LINT_EXTERNAL_DOCS_CMD="$2" RUN_CHECKS_CMD="$3" CHECK_SCOPE_OMISSION_CMD="$4" \
+      "$5" "$6" --base main
+  ' _ "$repo" "$TEST_DIR/mock_lint.sh" "$TEST_DIR/mock_checks.sh" "$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/ticket.md"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"src/app.js"* ]]
+  [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
+}
+
+@test "auto_merge: copy docs/keep.md -> docs/copy.md stays ELIGIBLE (both paths inside whitelist)" {
+  local repo="$TEST_DIR/repo-copy-ok"
+  mkdir -p "$repo"
+  _make_rename_repo "$repo"
+  cp "$repo/docs/keep.md" "$repo/docs/copy.md"
+  git -C "$repo" add docs/copy.md
+  git -C "$repo" commit -q -m "docs-internal copy"
+
+  run bash -c '
+    cd "$1" && env \
+      LINT_EXTERNAL_DOCS_CMD="$2" RUN_CHECKS_CMD="$3" CHECK_SCOPE_OMISSION_CMD="$4" \
+      "$5" "$6" --base main
+  ' _ "$repo" "$TEST_DIR/mock_lint.sh" "$TEST_DIR/mock_checks.sh" "$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/ticket.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERDICT: ELIGIBLE"* ]]
+}

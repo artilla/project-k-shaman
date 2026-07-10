@@ -66,7 +66,7 @@ set_status() {
   awk -v new_status="$new_status" '
     NR == 1 && $0 == "---" { fm = 1; print; next }
     fm == 1 && $0 == "---" { fm = 2; print; next }
-    fm == 1 && $1 == "status:" { print "status: " new_status; next }
+    fm == 1 && substr($0, 1, 7) == "status:" { print "status: " new_status; next }
     { print }
   ' "$file" > "$tmp"
   mv "$tmp" "$file"
@@ -96,6 +96,8 @@ APPROVER="${APPROVER:-$(whoami)}"
 # starting point — a human still confirms (the marker is committed and audited).
 section_oneline() {
   # $1=file, $2=heading keyword → first ~3 content lines as one compact line.
+  # 리뷰 4차 P2: `| head -3`은 긴 섹션에서 head 조기 종료 → awk SIGPIPE(141)로
+  # pipefail+set -e 아래 스크립트 전체가 죽었다 — 3줄 제한을 awk 내부에서 처리.
   awk -v kw="$2" '
     /^##[[:space:]]/ { if (inSec) exit; inSec = (index($0, kw) > 0); next }
     inSec {
@@ -105,9 +107,9 @@ section_oneline() {
       gsub(/[`*#]/, "", line)
       gsub(/^[[:space:]]+/, "", line); gsub(/[[:space:]]+$/, "", line)
       if (line ~ /^```/) next
-      if (line ~ /[^[:space:]]/) print line
+      if (line ~ /[^[:space:]]/) { print line; if (++n >= 3) exit }
     }
-  ' "$1" | head -3 | tr '\n' ' ' | sed 's/  */ /g; s/[[:space:]]*$//'
+  ' "$1" | tr '\n' ' ' | sed 's/  */ /g; s/[[:space:]]*$//'
 }
 yaml_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | cut -c1-400; }
 

@@ -161,10 +161,12 @@ fi
 # 리뷰 2차 P1-11: --name-only는 rename 감지 시 목적지 경로만 출력해, 소스가 docs/tests
 # 밖인 rename(예: src/app.js → docs/app.md)이 조건 2를 우회했다. --name-status로 바꿔
 # R(rename)/C(copy)는 소스·목적지 양쪽 경로를 모두 검사 대상에 넣는다.
-# -M(rename) + -C(copy) 탐지. pipefail(스크립트 상단 set -euo pipefail)이 git 실패를
-# 함수 종료 코드로 전파한다.
+# -M(rename) + -C --find-copies-harder(copy) 탐지. 리뷰 4차 P1: -C만으로는 "변경되지
+# 않은" 파일을 copy 소스 후보로 검사하지 않아 src/app.js → docs/app.md 복사가 A(추가)로만
+# 보여 조건 2를 우회했다 — --find-copies-harder로 모든 파일을 소스 후보에 포함한다.
+# pipefail(스크립트 상단 set -euo pipefail)이 git 실패를 함수 종료 코드로 전파한다.
 _diff_paths() {
-  git diff --name-status -M -C "$1" | awk -F'\t' '
+  git diff --name-status -M -C --find-copies-harder "$1" | awk -F'\t' '
     $1 ~ /^[RC]/ { if ($2 != "") print $2; if ($3 != "") print $3; next }
     { if ($2 != "") print $2 }
   '

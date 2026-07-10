@@ -16,6 +16,7 @@ setup() {
   cp "$REPO_ROOT/scripts/pick_next_ticket.sh" "$TEST_HOME/scripts/pick_next_ticket.sh"
   cp "$REPO_ROOT/scripts/run_loop.sh" "$TEST_HOME/scripts/run_loop.sh"
   cp "$REPO_ROOT/scripts/orchestrator.sh" "$TEST_HOME/scripts/orchestrator.sh"
+  cp "$REPO_ROOT/scripts/approve.sh" "$TEST_HOME/scripts/approve.sh"
   # 리뷰 2차 P1-7: run_loop의 safe:false 승인 판정은 mission-control/approval.mjs 단일 소스.
   cp "$REPO_ROOT/mission-control/approval.mjs" "$TEST_HOME/mission-control/approval.mjs"
   cp "$REPO_ROOT/.gitignore" "$TEST_HOME/.gitignore"
@@ -385,4 +386,83 @@ EOF
   run bash -c 'cd "$1" && ./scripts/run_loop.sh T014' _ "$TEST_HOME"
   [ "$status" -eq 14 ]
   [[ "$output" == *"unverifiable"* ]]
+}
+
+# ── 리뷰 4차 P1/P2 회귀 ──────────────────────────────────────────────────────
+
+@test "T15: unclosed frontmatter (no closing ---) -> rejected fail-closed" {
+  cat > "$TEST_HOME/docs/tickets/T015-test.md" <<'EOF'
+---
+id: T015
+title: Unclosed frontmatter test
+status: open
+priority: P2
+safe: true
+persona: implementer
+EOF
+  _commit_all "add T015"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T015' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+  [ ! -f "$TEST_HOME/docs/tickets/DONE/T015-test.md" ]
+
+  # picker: status도 무효(빈 값)라 후보에서 제외
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"docs/tickets/T015-test.md"* ]]
+}
+
+@test "T16: indented safe under a nested key -> rejected fail-closed rc=14" {
+  cat > "$TEST_HOME/docs/tickets/T016-test.md" <<'EOF'
+---
+id: T016
+title: Nested safe test
+status: open
+priority: P2
+metadata:
+  safe: true
+persona: implementer
+---
+
+# T016
+EOF
+  _commit_all "add T016"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T016' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+  [ ! -f "$TEST_HOME/docs/tickets/DONE/T016-test.md" ]
+
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"docs/tickets/T016-test.md"* ]]
+}
+
+@test "T17: approve.sh with long scope section does not die on SIGPIPE and yields valid marker" {
+  cat > "$TEST_HOME/docs/tickets/T017-test.md" <<'EOF'
+---
+id: T017
+title: Long scope test
+status: awaiting-approval
+priority: P2
+safe: false
+persona: implementer
+---
+
+# T017
+
+## 변경 범위
+
+EOF
+  # 긴 섹션 — 과거 `awk | head -3` 조합은 head 조기 종료로 awk가 SIGPIPE(141)로 죽었다
+  for i in $(seq 1 400); do
+    echo "- scope line number $i with enough padding text to fill the pipe buffer quickly" >> "$TEST_HOME/docs/tickets/T017-test.md"
+  done
+  _commit_all "add T017"
+
+  run bash -c 'cd "$1" && EDITOR= RALPH_APPROVED_BY=Tester ./scripts/approve.sh T017' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_HOME/docs/approvals/T017.md" ]
+  grep -q '^scope_confirmation: "scope line number 1' "$TEST_HOME/docs/approvals/T017.md"
+  # 생성 직후 검증기 판정이 ok여야 run_loop도 통과한다
+  [[ "$output" == *"validator: ok"* ]]
 }

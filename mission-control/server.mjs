@@ -173,10 +173,17 @@ function parseFrontmatter(content) {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!match) return null;
   const fm = {};
+  // 리뷰 4차 P2: 중복 키는 last-write-wins로 조용히 덮여 `safe: false` 뒤의
+  // `safe: true`가 이겼다 — 중복 키 목록을 함께 노출해 소비자(safe_malformed)가
+  // fail-closed 판정에 쓸 수 있게 한다.
+  const seenKeys = new Set();
+  const duplicateKeys = new Set();
   for (const line of match[1].split('\n')) {
     const m = line.match(/^(\w+):\s*(.*)/);
     if (!m) continue;
     const [, key, rawFull] = m;
+    if (seenKeys.has(key)) duplicateKeys.add(key);
+    seenKeys.add(key);
     // Strip inline YAML comments (space(s) followed by #)
     const commentIdx = rawFull.search(/\s+#/);
     const raw = (commentIdx !== -1 ? rawFull.slice(0, commentIdx) : rawFull).trim();
@@ -191,7 +198,9 @@ function parseFrontmatter(content) {
       fm[key] = raw.replace(/^["'](.*)["']$/, '$1');
     }
   }
-  return Object.keys(fm).length > 0 ? fm : null;
+  if (Object.keys(fm).length === 0) return null;
+  if (duplicateKeys.size > 0) fm._duplicateKeys = Array.from(duplicateKeys);
+  return fm;
 }
 
 // ── Read model ────────────────────────────────────────────
@@ -295,8 +304,9 @@ function buildModel() {
             status,
             priority: String(fm.priority || ''),
             // 리뷰 2차 P1-6: strict — 정확히 true일 때만 safe (누락/오타는 fail-closed로 unsafe 표시).
-            safe: fm.safe === true,
-            safe_malformed: fm.safe !== true && fm.safe !== false,
+            // 리뷰 4차 P2: 중복 safe 선언도 malformed — 실행기(frontmatter_field_count ≠ 1 거부)와 정합.
+            safe: fm.safe === true && !(fm._duplicateKeys || []).includes('safe'),
+            safe_malformed: (fm.safe !== true && fm.safe !== false) || (fm._duplicateKeys || []).includes('safe'),
             persona: String(fm.persona || ''),
             estimate: String(fm.estimate || ''),
             depends_on: Array.isArray(fm.depends_on) ? fm.depends_on : [],

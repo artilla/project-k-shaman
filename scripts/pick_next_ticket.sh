@@ -25,30 +25,35 @@ SAFE_ONLY=0
 # inline `# 주석`도 제거한다 (TEMPLATE이 가진 주석이 실제 값에 섞이지 않도록).
 # 리뷰 3차 P1: `---` 토글 파싱은 본문의 `--- key: v ---` 블록도 frontmatter로 읽어
 # 실행 권한(safe 등)이 본문에서 주입될 수 있었다 — 1행에서 시작하는 최초 frontmatter
-# 블록만 읽고, 닫는 `---` 이후는 무시한다.
+# 블록만 읽는다.
+# 리뷰 4차 P1: (a) 닫는 `---` 부재 시 frontmatter 전체 무효, (b) 키는 1열 시작 강제
+# (들여쓴 중첩 키 `  safe: true` 차단).
 field_of() {
   local file="$1" key="$2"
   awk -v k="$key" '
     NR == 1 { if ($0 != "---") exit; next }
-    $0 == "---" { exit }
-    $1 == k":" {
-      sub(/^[^:]+:[ \t]*/, "")
-      sub(/[ \t]+#.*$/, "")
-      gsub(/^[ \t]+|[ \t]+$/, "")
-      print
-      exit
+    $0 == "---" { closed = 1; exit }
+    !found && substr($0, 1, length(k) + 1) == k ":" {
+      line = $0
+      sub(/^[^:]+:[ \t]*/, "", line)
+      sub(/[ \t]+#.*$/, "", line)
+      gsub(/^[ \t]+|[ \t]+$/, "", line)
+      val = line
+      found = 1
     }
+    END { if (closed && found) print val }
   ' "$file"
 }
 
-# 최초 frontmatter 블록 안에서 key가 등장하는 횟수 (0=누락, 2+=중복 — 모두 fail-closed 대상)
+# 최초 frontmatter 블록 안에서 key(1열 시작)가 등장하는 횟수.
+# 0=누락, 2+=중복, 닫는 `---` 부재 시 무조건 0 — 모두 fail-closed 대상.
 frontmatter_field_count() {
   local file="$1" key="$2"
   awk -v k="$key" '
     NR == 1 { if ($0 != "---") exit; next }
-    $0 == "---" { exit }
-    $1 == k":" { n++ }
-    END { print n + 0 }
+    $0 == "---" { closed = 1; exit }
+    substr($0, 1, length(k) + 1) == k ":" { n++ }
+    END { print (closed ? n + 0 : 0) }
   ' "$file"
 }
 
@@ -71,7 +76,7 @@ set_status() {
   awk -v new_status="$new_status" '
     NR == 1 && $0 == "---" { fm = 1; print; next }
     fm == 1 && $0 == "---" { fm = 2; print; next }
-    fm == 1 && $1 == "status:" {
+    fm == 1 && substr($0, 1, 7) == "status:" {
       print "status: " new_status
       next
     }

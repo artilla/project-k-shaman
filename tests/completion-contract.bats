@@ -239,3 +239,105 @@ EOF
   [ "$status" -eq 7 ]
   [[ "$output" == *"no-commit"* ]]
 }
+
+# ── 리뷰 4차 P1: fingerprint 양방향·내용 비교 + telemetry index 보존 회귀 ──────
+
+@test "C9: pre-existing tracked WIP file modified further by persona -> no-commit rc=7" {
+  local main_home="$TEST_BASE/main-home"
+  _make_home "$main_home"
+  echo "// user WIP before cycle" >> "$main_home/src/app.js"
+
+  cat > "$main_home/scripts/run_headless.sh" <<EOF
+${_fake_headless_prologue}
+echo "// persona touched the SAME dirty file" >> src/app.js
+tmp=\$(mktemp)
+awk '/^---\$/ { fm = !fm; print; next } fm && \$1 == "status:" { print "status: done"; next } { print }' "\$ticket" > "\$tmp"
+mv "\$tmp" "\$ticket"
+git add "\$ticket"
+git mv "\$ticket" "docs/tickets/DONE/\$(basename "\$ticket")"
+git commit -q -m "\${id}: done, same porcelain line but content changed" -- docs
+EOF
+  chmod +x "$main_home/scripts/run_headless.sh"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T100' _ "$main_home"
+  [ "$status" -eq 7 ]
+  [[ "$output" == *"no-commit"* ]]
+}
+
+@test "C10: new file inside pre-existing untracked dir -> no-commit rc=7" {
+  local main_home="$TEST_BASE/main-home"
+  _make_home "$main_home"
+  mkdir -p "$main_home/scratch"
+  echo "user note" > "$main_home/scratch/a.txt"   # porcelain은 '?? scratch/' 한 줄
+
+  cat > "$main_home/scripts/run_headless.sh" <<EOF
+${_fake_headless_prologue}
+echo "persona leftover" > scratch/b.txt
+tmp=\$(mktemp)
+awk '/^---\$/ { fm = !fm; print; next } fm && \$1 == "status:" { print "status: done"; next } { print }' "\$ticket" > "\$tmp"
+mv "\$tmp" "\$ticket"
+git add "\$ticket"
+git mv "\$ticket" "docs/tickets/DONE/\$(basename "\$ticket")"
+git commit -q -m "\${id}: done, new file hidden in untracked dir" -- docs
+EOF
+  chmod +x "$main_home/scripts/run_headless.sh"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T100' _ "$main_home"
+  [ "$status" -eq 7 ]
+  [[ "$output" == *"no-commit"* ]]
+}
+
+@test "C11: pre-existing untracked user file deleted by persona -> no-commit rc=7" {
+  local main_home="$TEST_BASE/main-home"
+  _make_home "$main_home"
+  echo "precious" > "$main_home/usernote.txt"
+
+  cat > "$main_home/scripts/run_headless.sh" <<EOF
+${_fake_headless_prologue}
+rm -f usernote.txt
+tmp=\$(mktemp)
+awk '/^---\$/ { fm = !fm; print; next } fm && \$1 == "status:" { print "status: done"; next } { print }' "\$ticket" > "\$tmp"
+mv "\$tmp" "\$ticket"
+git add "\$ticket"
+git mv "\$ticket" "docs/tickets/DONE/\$(basename "\$ticket")"
+git commit -q -m "\${id}: done, user untracked file deleted" -- docs
+EOF
+  chmod +x "$main_home/scripts/run_headless.sh"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T100' _ "$main_home"
+  [ "$status" -eq 7 ]
+  [[ "$output" == *"no-commit"* ]]
+}
+
+@test "C12: telemetry commits do not absorb pre-staged user WIP (index preserved)" {
+  local main_home="$TEST_BASE/main-home"
+  _make_home "$main_home"
+  # 사용자가 미리 staged해 둔 무관한 변경
+  echo "// user staged change" >> "$main_home/src/app.js"
+  git -C "$main_home" add src/app.js
+
+  cat > "$main_home/scripts/run_headless.sh" <<EOF
+${_fake_headless_prologue}
+tmp=\$(mktemp)
+awk '/^---\$/ { fm = !fm; print; next } fm && \$1 == "status:" { print "status: done"; next } { print }' "\$ticket" > "\$tmp"
+mv "\$tmp" "\$ticket"
+git mv "\$ticket" "docs/tickets/DONE/\$(basename "\$ticket")" 2>/dev/null || mv "\$ticket" "docs/tickets/DONE/\$(basename "\$ticket")"
+git commit -q -m "\${id}: proper completion" -- docs
+EOF
+  chmod +x "$main_home/scripts/run_headless.sh"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T100' _ "$main_home"
+  [ "$status" -eq 0 ]
+
+  # telemetry(completed_at) 커밋이 존재하고 DONE 파일만 포함해야 한다
+  local tsha
+  tsha=$(git -C "$main_home" log --format='%H %s' | awk '/telemetry\(T100\)/ {print $1; exit}')
+  [ -n "$tsha" ]
+  run git -C "$main_home" show --name-only --format= "$tsha"
+  [[ "$output" == *"docs/tickets/DONE/T100-contract.md"* ]]
+  [[ "$output" != *"src/app.js"* ]]
+
+  # 사용자 staged WIP는 여전히 index에 남아 있어야 한다
+  git -C "$main_home" diff --cached --name-only | grep -qx "src/app.js"
+  grep -q "user staged change" "$main_home/src/app.js"
+}
