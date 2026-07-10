@@ -74,6 +74,12 @@ export default function App() {
   const d2AvatarRef = useRef<HTMLDivElement | null>(null);
   // 리뷰 P1-4: 요청 세대 토큰 — 늦게 도착한 응답이 다른 화면의 플레이어를 덮지 않도록
   const requestGen = useRef(0);
+  // 리뷰 2차 P1-4: setSession 직후 같은 렌더의 requireLogin이 이전 세션을 보던 stale 클로저 —
+  // 로그인 여부는 ref로 동기 추적한다
+  const sessionRef = useRef(session);
+  useEffect(() => { sessionRef.current = session; }, [session]);
+  // 리뷰 2차 P1-3: 게이트를 연 작업(듣기/공유/꿈)을 기억해 OAuth 복귀 시 복원
+  const pendingLoginRef = useRef<{ action?: "listen" | "share" | "dream"; topic?: string } | null>(null);
   const live2dInitRequested = useRef(false);
   const [live2dActive, setLive2dActive] = useState(false);
 
@@ -159,25 +165,65 @@ export default function App() {
     });
   }, [screen]);
 
+  // 세션 소멸을 동기 반영 — 직후 requireLogin이 곧바로 모달을 열 수 있게 (2차 P1-4)
+  const markLoggedOut = useCallback(() => {
+    sessionRef.current = { loggedIn: false };
+    setSession({ loggedIn: false });
+  }, []);
+
   // ── 게이트 (재생·부적·꿈 해몽 로그인 필요) ──
-  const requireLogin = useCallback((message?: string): boolean => {
-    if (session.loggedIn) return true;
-    setLoginPromptMessage(message);
-    setLoginPromptOpen(true);
-    reportEvents(null, [{ event: "login_prompt_shown", clientTs: Date.now() }]);
-    return false;
-  }, [session.loggedIn]);
+  const requireLogin = useCallback(
+    (message?: string, pending?: { action: "listen" | "share" | "dream"; topic?: string }): boolean => {
+      if (sessionRef.current.loggedIn) return true;
+      pendingLoginRef.current = pending ?? null;
+      setLoginPromptMessage(message);
+      setLoginPromptOpen(true);
+      reportEvents(null, [{ event: "login_prompt_shown", clientTs: Date.now() }]);
+      return false;
+    },
+    [],
+  );
 
   const handleLogin = useCallback((provider: "google" | "kakao") => {
     reportEvents(null, [{ event: "login_" + provider, clientTs: Date.now() }]);
-    // 리뷰 P1-5: OAuth 복귀 시 보던 화면·주제를 복원하기 위해 저장 (꿈 원문은 프라이버시상 미보존)
+    // 리뷰 P1-5 + 2차 P1-3: 화면·주제에 더해 게이트를 연 작업(action)까지 저장해 복귀 시 복원
+    // (꿈 원문은 프라이버시상 미보존 — D1로 복귀)
     try {
-      sessionStorage.setItem("shindang.pendingReturn", JSON.stringify({ screen, topic: selectedTopic }));
+      sessionStorage.setItem("shindang.pendingReturn", JSON.stringify({
+        screen,
+        topic: pendingLoginRef.current?.topic ?? selectedTopic,
+        action: pendingLoginRef.current?.action,
+      }));
     } catch { /* 저장 불가 환경 — 복원 없이 진행 */ }
     window.location.href = loginUrl(provider);
   }, [screen, selectedTopic]);
 
-  // OAuth 성공 복귀 — 저장해 둔 화면·주제 복원 (P1-5)
+  // OAuth 복귀용 운세 복원 — 결정적 재요청으로 fortuneData까지 되살린다 (2차 P1-3)
+  const restoreFortune = useCallback((topic: string, action?: string) => {
+    setSelectedTopic(topic);
+    markSessionStart();
+    setFortuneLoading(true);
+    setFortuneData(null);
+    setStatusMessage(null);
+    player.reset();
+    go("s4", false);
+    const gen = ++requestGen.current;
+    fetchFortune(loadStoredProfile(), topic)
+      .then((data) => {
+        if (requestGen.current !== gen) return;
+        setFortuneData(data);
+        reportEvents(data.fortuneId, [{ event: "first_text_visible", clientTs: Date.now() }], data.events ?? []);
+        player.setSource(data.audioUrl, data.script);
+        if (action === "share") go("s5", false); // 부적 저장/공유하러 가던 사용자는 카드까지 복원
+      })
+      .catch((err: Error) => {
+        if (requestGen.current !== gen) return;
+        setStatusMessage("오류: " + err.message);
+      })
+      .finally(() => setFortuneLoading(false));
+  }, [go, player]);
+
+  // OAuth 성공 복귀 — 저장해 둔 작업·화면·주제 복원 (P1-5 / 2차 P1-3)
   useEffect(() => {
     if (!session.loggedIn) return;
     let raw: string | null = null;
@@ -187,17 +233,24 @@ export default function App() {
     } catch { return; }
     if (!raw) return;
     try {
-      const pending = JSON.parse(raw) as { screen?: string; topic?: string };
-      if (pending.topic) setSelectedTopic(pending.topic);
-      if (pending.screen && pending.screen.startsWith("d")) {
+      const pending = JSON.parse(raw) as { screen?: string; topic?: string; action?: string };
+      if (pending.action === "dream" || (pending.screen && pending.screen.startsWith("d"))) {
         go("d1", false);
         showToast("로그인되었어요 — 꿈을 들려주세요");
+      } else if (pending.action === "listen" || pending.action === "share") {
+        restoreFortune(pending.topic || "total", pending.action);
+        showToast(
+          pending.action === "share"
+            ? "로그인되었어요 — 부적을 이어서 받아보세요"
+            : "로그인되었어요 — 듣기를 탭하면 들려드려요", // autoplay 금지: 자동 재생은 하지 않는다
+        );
       } else if (pending.screen && pending.screen !== "s0") {
-        go("s3", false); // 운세는 결정적이라 주제 선택에서 재요청해도 동일 결과
+        if (pending.topic) setSelectedTopic(pending.topic);
+        go("s3", false);
         showToast("로그인되었어요 — 이어서 운세를 보세요");
       }
     } catch { /* 손상된 값은 무시 */ }
-  }, [session.loggedIn, go, showToast]);
+  }, [session.loggedIn, go, restoreFortune, showToast]);
 
   // 리뷰 P2: 서버 세션 소멸(재시작 등) 후에도 최초 boolean을 신뢰하던 문제 — 포커스 시 재검증
   useEffect(() => {
@@ -251,7 +304,7 @@ export default function App() {
 
   // 듣기 — 실 TTS 합성·과금은 이 시점에만 (리뷰 P1-3 text-first 분리)
   const handleListen = useCallback(() => {
-    if (!requireLogin() || !fortuneData) return;
+    if (!requireLogin(undefined, { action: "listen", topic: selectedTopic }) || !fortuneData) return;
     const gen = requestGen.current;
     prepareTts(profile, selectedTopic || "total")
       .then(({ audioUrl }) => {
@@ -263,16 +316,19 @@ export default function App() {
       })
       .catch((err: Error) => {
         if (err.message === "LOGIN_REQUIRED") {
-          setSession({ loggedIn: false }); // 세션 소멸 감지 → 재로그인 유도 (P2)
-          requireLogin("세션이 만료됐어요. 다시 로그인하면 이어서 들려드릴게요.");
+          markLoggedOut(); // 동기 반영 → 아래 requireLogin이 첫 실패에서 즉시 모달을 연다 (2차 P1-4)
+          requireLogin("세션이 만료됐어요. 다시 로그인하면 이어서 들려드릴게요.", {
+            action: "listen",
+            topic: selectedTopic,
+          });
         } else {
           showToast(err.message);
         }
       });
-  }, [fortuneData, player, profile, requireLogin, selectedTopic, showToast]);
+  }, [fortuneData, markLoggedOut, player, profile, requireLogin, selectedTopic, showToast]);
 
   const handleSaveImage = useCallback(() => {
-    if (!requireLogin() || !fortuneData) return;
+    if (!requireLogin(undefined, { action: "share", topic: selectedTopic }) || !fortuneData) return;
     setShareStatus("부적을 준비하는 중…");
     reportEvents(fortuneData.fortuneId, [{ event: "share_initiated", clientTs: Date.now() }]);
     fetch(shareCardUrl(fortuneData.fortuneId))
@@ -288,11 +344,11 @@ export default function App() {
         reportEvents(fortuneData.fortuneId, [{ event: "share_completed", clientTs: Date.now() }]);
       })
       .catch((err: Error) => setShareStatus("오류: " + err.message));
-  }, [fortuneData, requireLogin, showToast]);
+  }, [fortuneData, requireLogin, selectedTopic, showToast]);
 
   // ── 꿈 해몽 (D1~D3) ──
   const handleDreamEntry = useCallback(() => {
-    if (!requireLogin("꿈 해몽은 손님을 기억해야 풀 수 있는 깊은 풀이라, 로그인 후에 홍연이 맞이할 수 있어요.")) return;
+    if (!requireLogin("꿈 해몽은 손님을 기억해야 풀 수 있는 깊은 풀이라, 로그인 후에 홍연이 맞이할 수 있어요.", { action: "dream" })) return;
     reportEvents(null, [{ event: "dream_started", clientTs: Date.now() }]);
     setDreamData(null);
     setDreamStatus(null);
@@ -323,18 +379,18 @@ export default function App() {
       .catch((err: Error) => {
         if (requestGen.current !== gen) return;
         if (err.message === "LOGIN_REQUIRED") {
-          setSession({ loggedIn: false });
-          go("s3", false);
-          requireLogin("세션이 만료됐어요. 다시 로그인하면 홍연이 이어서 풀어드릴게요.");
+          markLoggedOut(); // 2차 P1-4
+          go("d1", false); // 꿈 맥락 유지 — 재로그인 후 D1로 복귀 (2차 P1-3)
+          requireLogin("세션이 만료됐어요. 다시 로그인하면 홍연이 이어서 풀어드릴게요.", { action: "dream" });
         } else {
           setDreamStatus("오류: " + err.message);
         }
       })
       .finally(() => setDreamLoading(false));
-  }, [dreamLoading, go, player, requireLogin]);
+  }, [dreamLoading, go, markLoggedOut, player, requireLogin]);
 
   const handleDreamSaveImage = useCallback(() => {
-    if (!requireLogin() || !dreamData) return;
+    if (!requireLogin(undefined, { action: "dream" }) || !dreamData) return;
     const labels = dreamData.reading.symbols.map((s) => s.label);
     fetch(dreamShareCardUrl(labels))
       .then((res) => {
@@ -445,8 +501,8 @@ export default function App() {
           progressPct={player.progressPct}
           live2dActive={live2dActive}
           onListen={handleListen}
-          onPlayPause={() => { if (requireLogin()) player.playPause(); }}
-          onReplay={() => { if (requireLogin()) player.replay(); }}
+          onPlayPause={() => { if (requireLogin(undefined, { action: "listen", topic: selectedTopic })) player.playPause(); }}
+          onReplay={() => { if (requireLogin(undefined, { action: "listen", topic: selectedTopic })) player.replay(); }}
           onViewCard={() => go("s5")}
         />
       )}
@@ -459,7 +515,7 @@ export default function App() {
           pushOn={pushOn}
           shareStatus={shareStatus}
           onSaveImage={handleSaveImage}
-          onOpenShare={() => { if (requireLogin()) setSheetOpen(true); }}
+          onOpenShare={() => { if (requireLogin(undefined, { action: "share", topic: selectedTopic })) setSheetOpen(true); }}
           onPush={() => { setPushOn(true); showToast("내일 아침, 홍연이 먼저 인사할게요"); }}
           onRestart={goHome}
         />

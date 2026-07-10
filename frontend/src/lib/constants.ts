@@ -21,13 +21,13 @@ export const SCORE_LABELS: Record<(typeof SCORE_ORDER)[number], string> = {
   condition: "컨디션",
 };
 
-// v2 S3 주제 — 서버 /api/fortune/today?topic= 값과 1:1 (fortune-samples.v1.1)
+// v2 S3 주제 — canonical key는 fortune-schema.v1.1 enum과 동일 (리뷰 P1: 'rel' 별칭 제거)
 export const TOPICS = [
   { key: "total", label: "총운", desc: "오늘 하루의 큰 흐름" },
   { key: "love", label: "연애", desc: "홍연의 강점 운세" },
   { key: "money", label: "금전", desc: "재물의 기운" },
   { key: "work", label: "일 / 학업", desc: "집중과 성취" },
-  { key: "rel", label: "인간관계", desc: "사람 사이의 온도" },
+  { key: "relationship", label: "인간관계", desc: "사람 사이의 온도" },
 ] as const;
 
 export const TOPIC_NAMES: Record<string, string> = {
@@ -35,7 +35,7 @@ export const TOPIC_NAMES: Record<string, string> = {
   love: "연애운",
   money: "금전운",
   work: "일 · 학업운",
-  rel: "인간관계운",
+  relationship: "인간관계운",
 };
 
 export const BLESSING_TEXT = "오늘 하루, 홍연이 손님 곁에서 기운을 더해드릴게요.";

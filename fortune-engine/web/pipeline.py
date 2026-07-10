@@ -58,6 +58,9 @@ def build_playback_response(request: dict, *, store=None, tts_backend=None) -> d
                공유) 사용 — 서버 프로세스에서 재방문 cache_hit를 재현하려면 None(기본값)으로 둔다.
         tts_backend: TTS 합성 백엔드 선택 (T020).
                      None(기본값) — mock 고정, 과금 0.
+                     "skip" — TTS 단계 자체를 건너뛴다(합성·캐시 기록 없음). 텍스트 전용
+                     응답(text-first) 경로용 — mock 결과가 공용 TTS 캐시를 선점해
+                     이후 실합성이 skip되던 회귀 방지 (코드리뷰 P1).
                      "openai" — T018 실백엔드(tts_adapter.openai_backend) 주입. 실행 시
                      OPENAI_API_KEY 필요, 실제 과금 발생.
                      callable(script, cache_key, metadata) — 테스트 전용 직접 주입
@@ -68,6 +71,7 @@ def build_playback_response(request: dict, *, store=None, tts_backend=None) -> d
         + "events": [{"event": "tts_generate_start"|"tts_generate_complete"
                       |"cache_hit"|"cache_miss", ...}, ...]
     """
+    include_tts = tts_backend != "skip"
     tts_synthesize_fn = None
     if tts_backend == "openai":
         backend_fn = _tts_adapter.openai_backend
@@ -81,7 +85,9 @@ def build_playback_response(request: dict, *, store=None, tts_backend=None) -> d
     logger.addHandler(collector)
     logger.setLevel(logging.INFO)
     try:
-        result = get_today_fortune(request, store=store, tts_synthesize_fn=tts_synthesize_fn)
+        result = get_today_fortune(
+            request, store=store, tts_synthesize_fn=tts_synthesize_fn, include_tts=include_tts
+        )
     finally:
         logger.removeHandler(collector)
         logger.setLevel(prev_level)

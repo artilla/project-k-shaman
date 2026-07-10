@@ -179,6 +179,7 @@ def get_today_fortune(
     store=None,
     fortune_build_fn=None,
     tts_synthesize_fn=None,
+    include_tts: bool = True,
 ) -> dict:
     """결정적 fortune 응답을 반환한다 (2단 캐시 포함).
 
@@ -192,6 +193,10 @@ def get_today_fortune(
         fortune_build_fn: (request, seed_result) → fortune_data. None이면 _build_fortune_data.
         tts_synthesize_fn: (script) → tts_result. None이면 _tts_synthesize.
                            §3 hold: inject real OpenAI TTS backend here for production synthesis.
+        include_tts: False면 TTS 단계를 완전히 건너뛴다 — 합성도, 캐시 기록도 하지 않는다.
+                     텍스트 전용 응답(text-first) 경로용: mock 합성 결과가 공용 TTS 캐시 키를
+                     선점해 이후 실백엔드 합성이 hit로 skip되던 회귀 방지 (코드리뷰 P1).
+                     이때 audioUrl·durationSec은 None, tts.cacheKey는 결정적으로 계산된 값.
     """
     if store is None:
         store = _default_store
@@ -214,6 +219,18 @@ def get_today_fortune(
     # Key verbatim matches tts_adapter.synthesize(script)["cacheKey"].
     script = fortune_data["script"]
     tts_key = _compute_tts_cache_key(script)
+
+    if not include_tts:
+        # 텍스트 전용 — 합성·캐시 기록 없이 결정적 cacheKey만 제공한다 (text-first 경로)
+        return {
+            "fortuneId": fortune_data["fortune_id"],
+            "audioUrl": None,
+            "durationSec": None,
+            "script": script,
+            "fortune": fortune_data["fortune"],
+            "tts": {"cacheKey": tts_key},
+        }
+
     tts_result = get_or_compute(store, tts_key, lambda: tts_synthesize_fn(script), layer="tts")
 
     return {

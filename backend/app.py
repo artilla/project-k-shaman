@@ -99,27 +99,48 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         resp.set_cookie(STATE_COOKIE, "", path="/", httponly=True, samesite="lax", max_age=0)
         return resp
 
-    # ── 운세 요청 파싱·검증 (리뷰 P2: 잘못된 birth 500 / 잘못된 topic 200 방지) ──
-    _VALID_TOPICS = {"total", "love", "money", "work", "rel"}
+    # ── 운세 요청 파싱·검증 (리뷰 P2: 잘못된 입력이 500/schema-invalid 200이 되지 않게) ──
+    # canonical topic은 fortune-schema.v1.1의 enum과 동일 — 'rel' 별칭은 쓰지 않는다 (리뷰 P1-2)
+    _VALID_TOPICS = {"total", "love", "money", "work", "relationship"}
+    _VALID_CHARACTERS = {"hongyeon"}
+    _DATE_RE = __import__("re").compile(r"^\d{4}-\d{2}-\d{2}$")
+    _BIRTH_RANGES = {
+        "birth_year": (1900, 2100),
+        "birth_month": (1, 12),
+        "birth_day": (1, 31),
+        "birth_hour": (0, 23),
+    }
 
-    def _parse_fortune_request(params: dict):
+    def _parse_fortune_request(params):
         """query/body 공용 파서. (request dict, error response) 튜플을 반환한다."""
+        if not isinstance(params, dict):
+            return None, JSONResponse({"error": "invalid body"}, status_code=400)
         topic = str(params.get("topic", core.DEFAULT_TOPIC))
         if topic not in _VALID_TOPICS:
             return None, JSONResponse({"error": "invalid topic"}, status_code=400)
-        req = {
-            "date": str(params.get("date", core.DEFAULT_DATE)),
-            "topic": topic,
-            "character_id": str(params.get("character_id", core.DEFAULT_CHARACTER_ID)),
-        }
-        for field in ("birth_year", "birth_month", "birth_day", "birth_hour"):
+        date = str(params.get("date", core.DEFAULT_DATE))
+        if not _DATE_RE.match(date):
+            return None, JSONResponse({"error": "invalid date"}, status_code=400)
+        import datetime as _dt
+        try:
+            _dt.date.fromisoformat(date)
+        except ValueError:
+            return None, JSONResponse({"error": "invalid date"}, status_code=400)
+        character_id = str(params.get("character_id", core.DEFAULT_CHARACTER_ID))
+        if character_id not in _VALID_CHARACTERS:
+            return None, JSONResponse({"error": "invalid character_id"}, status_code=400)
+        req = {"date": date, "topic": topic, "character_id": character_id}
+        for field, (lo, hi) in _BIRTH_RANGES.items():
             value = params.get(field)
             if value is None or value == "":
                 continue
             try:
-                req[field] = int(value)
+                number = int(value)
             except (TypeError, ValueError):
                 return None, JSONResponse({"error": f"invalid {field}"}, status_code=400)
+            if not lo <= number <= hi:
+                return None, JSONResponse({"error": f"invalid {field}"}, status_code=400)
+            req[field] = number
         return req, None
 
     def _audio_url_for(cache_key: str) -> str:
@@ -130,9 +151,10 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         )
 
     def _fortune_response(req: dict) -> dict:
-        # 리뷰 P1-3(text-first): 텍스트 API는 실 TTS를 절대 실행하지 않는다(tts_backend=None,
-        # mock 합성은 즉시·무과금). 실 합성은 로그인 게이트 뒤 /api/tts/prepare에서만 일어난다.
-        result = core.build_playback_response(req, tts_backend=None)
+        # 리뷰 P1-3(text-first) + 2차 P1-1: 텍스트 API는 TTS 단계를 완전히 건너뛴다("skip").
+        # 합성뿐 아니라 캐시 기록도 하지 않는다 — mock 결과가 공용 캐시 키를 선점해
+        # 이후 /api/tts/prepare의 실합성이 hit로 skip되던 회귀 방지.
+        result = core.build_playback_response(req, tts_backend="skip")
         cache_key = result["tts"]["cacheKey"]
         core.remember_fortune(app.state.fortune_cache_by_id, result["fortuneId"], result["fortune"])
         return {**result, "audioUrl": _audio_url_for(cache_key)}
@@ -177,13 +199,14 @@ def create_app(*, backend: str = "mock") -> FastAPI:
             payload = json.loads(await request.body() or b"{}")
         except json.JSONDecodeError:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-        req, err = _parse_fortune_request(payload if isinstance(payload, dict) else {})
+        req, err = _parse_fortune_request(payload)
         if err:
             return err
-        # 클라이언트가 준 cacheKey를 신뢰하지 않는다 — 동일 파라미터로 서버가 재계산·합성
-        # (캐시 hit면 무과금, miss면 여기서 합성·과금. mock 모드는 항상 무과금)
+        # 클라이언트가 준 cacheKey를 신뢰하지 않는다 — 동일 파라미터로 서버가 재계산·합성.
+        # mock 모드는 "skip": mock 톤은 /audio/mock/*가 즉석 생성하므로 합성이 불필요하고,
+        # mock 결과가 공용 캐시 키(provider=openai 고정)를 선점하는 것도 방지한다 (2차 P1-1).
         backend_mode = app.state.tts_backend_mode
-        tts_backend = "openai" if backend_mode == "openai" else None
+        tts_backend = "openai" if backend_mode == "openai" else "skip"
         result = core.build_playback_response(req, tts_backend=tts_backend)
         cache_key = result["tts"]["cacheKey"]
         return {"audioUrl": _audio_url_for(cache_key), "durationSec": result.get("durationSec")}

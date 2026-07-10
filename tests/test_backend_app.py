@@ -3,6 +3,7 @@
 레거시 test_web_server.py의 HTTP 계약을 계승해 잠근다 (레거시 서버는 2026-07-09 제거):
 게이트 401 · 운세 게스트 허용 · 콜백 실패 리다이렉트 · 꿈 해몽(신규).
 """
+import json
 import secrets
 import sys
 from pathlib import Path
@@ -70,6 +71,24 @@ class TestFortune:
     def test_invalid_topic_400(self, client):
         assert client.get("/api/fortune/today?topic=hack").status_code == 400
 
+    def test_rel_alias_rejected_canonical_topic_accepted(self, client):
+        """2차 P1-2: canonical은 schema enum의 'relationship' — 'rel' 별칭은 거부한다."""
+        assert client.get("/api/fortune/today?topic=rel").status_code == 400
+        assert client.get("/api/fortune/today?topic=relationship").status_code == 200
+
+    def test_all_topics_match_schema_and_share_card(self, fastapi_app, client):
+        """2차 회귀 매트릭스: 5개 주제 전부 schema enum 일치 + 부적 카드 200."""
+        schema = json.loads(
+            (Path(__file__).parent.parent / "fortune-engine" / "fortune-schema.v1.1.json").read_text()
+        )
+        allowed = set(schema["properties"]["meta"]["properties"]["topic"]["enum"])
+        login(fastapi_app, client)
+        for topic in ("total", "love", "money", "work", "relationship"):
+            data = client.post("/api/fortune/today", json={"topic": topic, "date": "2026-07-07"}).json()
+            assert data["fortune"]["meta"]["topic"] in allowed, topic
+            share = client.get(f"/api/share-card?fortuneId={data['fortuneId']}")
+            assert share.status_code == 200, topic
+
     def test_invalid_birth_400(self, client):
         res = client.post("/api/fortune/today", json={"topic": "love", "birth_year": "abc"})
         assert res.status_code == 400
@@ -81,13 +100,13 @@ class TestFortune:
 
         def spy(req, **kwargs):
             calls.append(kwargs.get("tts_backend"))
-            return original(req, tts_backend=None)
+            return original(req, tts_backend="skip")
 
         monkeypatch.setattr(core, "build_playback_response", spy)
         fastapi_app.state.tts_backend_mode = "openai"
         res = client.get("/api/fortune/today?topic=love&date=2026-07-07")
         assert res.status_code == 200
-        assert calls == [None]
+        assert calls == ["skip"]  # 합성·캐시 기록 모두 없는 텍스트 전용 모드
         assert res.json()["audioUrl"].startswith("/audio/real/")
 
 
@@ -113,6 +132,50 @@ class TestTtsPrepare:
     def test_invalid_topic_400(self, fastapi_app, client):
         login(fastapi_app, client)
         assert client.post("/api/tts/prepare", json={"topic": "hack"}).status_code == 400
+
+    def test_prepare_rejects_bad_inputs(self, fastapi_app, client):
+        """2차 P2: 배열 body·잘못된 날짜·character·범위 밖 birth는 400."""
+        login(fastapi_app, client)
+        assert client.post("/api/tts/prepare", json=["not", "a", "dict"]).status_code == 400
+        assert client.post("/api/tts/prepare", json={"topic": "love", "date": "2026-13-99"}).status_code == 400
+        assert client.post("/api/tts/prepare", json={"topic": "love", "date": "not-a-date"}).status_code == 400
+        assert client.post("/api/tts/prepare", json={"topic": "love", "character_id": "unknown"}).status_code == 400
+        assert client.post("/api/tts/prepare", json={"topic": "love", "birth_month": 13}).status_code == 400
+        assert client.post("/api/tts/prepare", json={"topic": "love", "birth_hour": 24}).status_code == 400
+        assert client.post("/api/fortune/today", json={"topic": "love", "birth_year": 1800}).status_code == 400
+
+    def test_text_endpoint_does_not_poison_tts_cache(self, fastapi_app, client, monkeypatch):
+        """2차 P1-1 회귀: 텍스트 응답이 TTS 캐시 키를 선점하지 않는다 —
+        같은 파라미터의 prepare에서 합성 백엔드가 실제로 호출돼야 한다.
+
+        주의: 엔진 기본 캐시 store는 프로세스 전역이라 다른 테스트와 겹치지 않는
+        고유 날짜를 사용한다 (격리)."""
+        body = {"topic": "love", "date": "2031-01-01"}
+        # 1) 텍스트 요청 (skip 모드 — 캐시 기록 없음)
+        assert client.post("/api/fortune/today", json=body).status_code == 200
+
+        # 2) prepare가 합성 함수를 실제로 호출하는지 spy로 확인
+        synth_calls = []
+        original = core.build_playback_response
+
+        def spy(req, **kwargs):
+            tts_backend = kwargs.get("tts_backend")
+
+            def counting_backend(script, cache_key, metadata):
+                synth_calls.append(cache_key)
+                return {"audioUrl": "spy://synthesized"}
+
+            # openai 모드를 흉내내되 실 네트워크 대신 counting_backend 주입
+            if tts_backend == "openai":
+                return original(req, tts_backend=counting_backend)
+            return original(req, **kwargs)
+
+        monkeypatch.setattr(core, "build_playback_response", spy)
+        fastapi_app.state.tts_backend_mode = "openai"
+        login(fastapi_app, client)
+        res = client.post("/api/tts/prepare", json=body)
+        assert res.status_code == 200
+        assert len(synth_calls) == 1, "텍스트 요청이 캐시를 선점해 실합성이 skip되면 회귀"
 
 
 # ── 게이트: 재생·부적·꿈 해몽 로그인 필요 (US-9) ──
