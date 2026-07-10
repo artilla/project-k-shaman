@@ -8,6 +8,8 @@ state/lock
 state/current_ticket
 state/failures.log
 state/auto_merge.log
+state/auto_merge.lock.d/
+state/auto_merge.lock.d.reclaim.*/
 state/cron.log
 state/reservations/
 state/devices/
