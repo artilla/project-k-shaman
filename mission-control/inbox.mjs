@@ -14,6 +14,8 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 // 리뷰 M5: 세션 상태 도출은 공용 원시 단일 소스(server.mjs 미러 복제 제거).
 import { sessionStateFromEvents } from './read-primitives.mjs';
+// 리뷰 2차 P1-7: 승인 마커 판정 단일 소스 — 실행기(run_loop.sh)와 공유.
+import { validateApproval } from './approval.mjs';
 
 // v1 허용 결정 집합. edit는 후속 ADR(P2-Inbox-edit)에서 추가.
 export const ALLOWED_DECISIONS_V1 = ['approve', 'reject'];
@@ -101,84 +103,24 @@ export function respondableDecisions(sessionState) {
   return RESPONDABLE_SESSION_STATES.has(String(sessionState)) ? ['respond'] : [];
 }
 
-// ADR-0174 T267: approve.sh의 section_oneline 정확 미러 — 헤딩 키워드 섹션의 첫 3줄을
-// 한 줄로 압축. `## ` 헤딩만 경계(### 등은 무시), 리스트/인용/체크박스 마커·`*#` 제거.
-function extractSection(text, kw) {
-  const lines = String(text).split('\n');
-  let inSec = false;
-  const out = [];
-  for (const raw of lines) {
-    if (/^##\s/.test(raw)) {           // `## ` 헤딩만 섹션 경계
-      if (inSec) break;
-      inSec = raw.includes(kw);
-      continue;
-    }
-    if (!inSec) continue;
-    let line = raw
-      .replace(/^[ \t]*[-*>][ \t]*/, '')      // 리스트/인용 마커
-      .replace(/^[ \t]*\[[ xX]\][ \t]*/, '')  // 체크박스
-      .replace(/[`*#]/g, '')                  // 코드/강조/헤딩 문자
-      .replace(/^[ \t]+/, '').replace(/[ \t]+$/, '');
-    if (!/\S/.test(line)) continue;
-    out.push(line);
-  }
-  return out.slice(0, 3).join(' ').replace(/ {2,}/g, ' ').replace(/\s+$/, '');
-}
-
-// approve.sh의 yaml_escape + cut -c1-400 미러(마커 저장 형태와 동일 변환).
-function yamlEscapeCut(s) {
-  return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').slice(0, 400);
-}
-
-// 승인 마커의 scope_confirmation 값(저장된 escaped 형태) 읽기. 선두 `- ` 허용. 없으면 null.
-function markerScopeConfirmation(root, id) {
-  try {
-    const f = join(root, 'docs', 'approvals', `${id}.md`);
-    if (!existsSync(f)) return null;
-    const m = readFileSync(f, 'utf8').match(/^\s*-?\s*scope_confirmation:\s*"((?:[^"\\]|\\.)*)"/m);
-    return m ? m[1] : null;
-  } catch { return null; }
-}
-
-// 티켓 본문 텍스트 읽기(id-*.md, tickets/ 또는 DONE/). 없으면 null.
-function readTicketText(root, id) {
-  for (const dir of [join(root, 'docs', 'tickets'), join(root, 'docs', 'tickets', 'DONE')]) {
-    let files = [];
-    try { files = readdirSync(dir); } catch { continue; }
-    for (const f of files) {
-      if (f.startsWith(`${id}-`) && f.endsWith('.md')) {
-        try { return readFileSync(join(dir, f), 'utf8'); } catch { return null; }
-      }
-    }
-  }
-  return null;
-}
-
-// ADR-0174 §3: 승인 마커가 현재 티켓 scope와 불일치하면 stale(내용 기반·정직).
-// 측정 불가(구형 마커·TODO 폴백·섹션 없음)는 보수적으로 false(거짓 stale 금지).
-function isStaleApproval(root, id) {
-  const markerScope = markerScopeConfirmation(root, id);
-  if (markerScope == null) return false;                                  // 구형 마커(필드 없음)
-  if (/^TODO: confirm exact approved scope/.test(markerScope)) return false; // 추출 불가로 승인됨
-  const text = readTicketText(root, id);
-  if (text == null) return false;
-  const cur = extractSection(text, '변경 범위') || extractSection(text, 'Scope');
-  if (!cur) return false;                                                 // 현재 추출 불가 → 보수적 decided
-  return yamlEscapeCut(cur) !== markerScope;                              // 불일치 → stale
-}
-
 /**
  * 단일 티켓의 결정 상태(읽기 도출). pending|decided|stale|superseded.
  * ADR-0174 T267: awaiting-approval + 마커 있음 + scope 불일치 → stale(이전 사이클 잔여 마커 등).
+ *
+ * 리뷰 2차 P1-7: 판정은 approval.mjs validateApproval 단일 소스 — 실행기
+ * (run_loop.sh validate_safe_false_approval)와 동일한 검증기다. malformed 마커는
+ * 실행기가 거부하므로 UI도 'decided'가 아니라 'pending'으로 정직하게 표시한다.
  */
 export function decisionState(root, ticket) {
   const status = (ticket && ticket.status) || 'open';
-  const decided = hasApprovalMarker(root, ticket.id);
   if (status === 'awaiting-approval') {
-    if (!decided) return 'pending';
-    return isStaleApproval(root, ticket.id) ? 'stale' : 'decided';
+    const v = validateApproval(root, ticket.id);
+    if (v.state === 'ok') return 'decided';
+    if (v.state === 'stale') return 'stale';
+    return 'pending'; // missing·malformed — 실행기 기준 아직 유효한 결정이 없다
   }
-  return decided ? 'decided' : 'superseded'; // awaiting 이탈: 마커 있으면 승인·이동, 없으면 철회
+  // awaiting 이탈: 마커 있으면 승인·이동, 없으면 철회. 여기서는 이력 존재만 본다.
+  return hasApprovalMarker(root, ticket.id) ? 'decided' : 'superseded';
 }
 
 /**

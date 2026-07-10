@@ -305,3 +305,59 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: ELIGIBLE"* ]]
 }
+
+# ── 리뷰 2차 P1-11: rename 소스 경로 검사 (--name-status) ─────────────────────
+# --name-only는 rename 감지 시 목적지만 출력해, src/ → docs/ rename이 조건 2를
+# 우회했다. 소스·목적지 양쪽 모두 검사되는지 실제 git repo로 검증한다.
+
+_make_rename_repo() {
+  # $1 = 대상 디렉터리. main에 src/app.js와 docs/keep.md를 두고,
+  # ralph/T999 브랜치에서 rename을 수행한다 (동일 내용 → git rename 감지 확실).
+  local d="$1"
+  git -C "$d" init -q -b main
+  git -C "$d" config user.email "test@test.com"
+  git -C "$d" config user.name "Test"
+  git -C "$d" config commit.gpgsign false
+
+  mkdir -p "$d/src" "$d/docs"
+  printf 'line1\nline2\nline3\nline4\nline5\n' > "$d/src/app.js"
+  echo "keep" > "$d/docs/keep.md"
+  git -C "$d" add .
+  git -C "$d" commit -q -m "initial"
+  git -C "$d" checkout -q -b "ralph/T999"
+}
+
+@test "auto_merge: rename src/app.js -> docs/app.md exposes source path -> NOT ELIGIBLE (condition 2)" {
+  local repo="$TEST_DIR/repo-rename"
+  mkdir -p "$repo"
+  _make_rename_repo "$repo"
+  git -C "$repo" mv src/app.js docs/app.md
+  git -C "$repo" commit -q -m "sneaky rename"
+
+  run bash -c '
+    cd "$1" && env \
+      LINT_EXTERNAL_DOCS_CMD="$2" RUN_CHECKS_CMD="$3" CHECK_SCOPE_OMISSION_CMD="$4" \
+      "$5" "$6" --base main
+  ' _ "$repo" "$TEST_DIR/mock_lint.sh" "$TEST_DIR/mock_checks.sh" "$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/ticket.md"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"src/app.js"* ]]
+  [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
+}
+
+@test "auto_merge: rename docs/ -> docs/ stays ELIGIBLE (both paths inside whitelist)" {
+  local repo="$TEST_DIR/repo-rename-ok"
+  mkdir -p "$repo"
+  _make_rename_repo "$repo"
+  git -C "$repo" mv docs/keep.md docs/kept.md
+  git -C "$repo" commit -q -m "docs-internal rename"
+
+  run bash -c '
+    cd "$1" && env \
+      LINT_EXTERNAL_DOCS_CMD="$2" RUN_CHECKS_CMD="$3" CHECK_SCOPE_OMISSION_CMD="$4" \
+      "$5" "$6" --base main
+  ' _ "$repo" "$TEST_DIR/mock_lint.sh" "$TEST_DIR/mock_checks.sh" "$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/ticket.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERDICT: ELIGIBLE"* ]]
+}

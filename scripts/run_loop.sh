@@ -459,54 +459,44 @@ pick_next_ticket_path() {
   echo "$ticket_line"
 }
 
-approval_field() {
-  local file="$1" key="$2"
-  awk -v k="$key" '
-    /^[A-Za-z_][A-Za-z0-9_]*:/ {
-      if ($1 == k":") {
-        sub(/^[^:]+:[ \t]*/, "")
-        sub(/[ \t]+#.*$/, "")
-        gsub(/^[ \t]+|[ \t]+$/, "")
-        if ($0 ~ /^".*"$/) { sub(/^"/, ""); sub(/"$/, "") }
-        print
-        exit
-      }
-    }
-  ' "$file"
-}
-
+# 리뷰 2차 P1-7: 승인 마커 판정 단일 소스 — mission-control/approval.mjs.
+# Inbox(UI)와 동일 검증기를 공유해, UI가 stale로 표시한 승인을 실행기가 통과시키는
+# 불일치를 제거한다. 판정: missing(3)/malformed(4)/stale(5)/ok(0).
+# 검증기를 사용할 수 없으면 fail-closed — safe:false는 실행하지 않는다.
 validate_safe_false_approval() {
   local id="$1" marker="docs/approvals/${id}.md"
-  local missing="" approved_by approved_at scope_confirmation rollback_plan
+  local validator="$ROOT/mission-control/approval.mjs"
 
-  if [ ! -f "$marker" ]; then
-    echo "❌ ${id}는 safe:false. 승인이 필요합니다. ${marker}를 작성하세요."
+  if ! command -v node >/dev/null 2>&1 || [ ! -f "$validator" ]; then
+    echo "❌ ${id}는 safe:false인데 승인 검증기(node + mission-control/approval.mjs)를 사용할 수 없습니다."
+    echo "   fail-closed: 검증 없이 safe:false를 실행하지 않습니다. node 설치 여부와 ${validator} 존재를 확인하세요."
     return 14
   fi
 
-  approved_by=$(approval_field "$marker" approved_by || true)
-  approved_at=$(approval_field "$marker" approved_at || true)
-  scope_confirmation=$(approval_field "$marker" scope_confirmation || true)
-  rollback_plan=$(approval_field "$marker" rollback_plan || true)
+  local out rc
+  set +e
+  out=$(node "$validator" "$ROOT" "$id" 2>&1)
+  rc=$?
+  set -e
 
-  [ -n "$approved_by" ] || missing="${missing} approved_by"
-  [ -n "$approved_at" ] || missing="${missing} approved_at"
-  [ -n "$scope_confirmation" ] || missing="${missing} scope_confirmation"
-  [ -n "$rollback_plan" ] || missing="${missing} rollback_plan"
-
-  if [ -n "$approved_at" ]; then
-    case "$approved_at" in
-      ????-??-??T??:??:??Z|????-??-??T??:??:??+??:??|????-??-??T??:??:??-??:??) ;;
-      *) missing="${missing} approved_at(ISO8601)" ;;
-    esac
-  fi
-
-  if [ -n "$missing" ]; then
-    echo "❌ ${id} 승인 마커 형식 오류:${missing}. ${marker}를 보완하세요."
-    return 14
-  fi
-
-  return 0
+  case "$rc" in
+    0)
+      # fail-closed 이중 방어: 검증기가 판정 없이 exit 0 하는 회귀(예: main-module 판정
+      # 실패로 CLI 블록 미실행)를 승인으로 오인하지 않는다 — 'ok' 출력까지 요구.
+      case "$out" in
+        ok*) return 0 ;;
+        *)
+          echo "❌ ${id} 승인 검증기가 판정 없이 종료(rc=0, 출력='${out}') — fail-closed로 거부."
+          return 14
+          ;;
+      esac
+      ;;
+    3) echo "❌ ${id}는 safe:false. 승인이 필요합니다. ${marker}를 작성하세요." ;;
+    4) echo "❌ ${id} 승인 마커 형식 오류: ${out#malformed}. ${marker}를 보완하세요." ;;
+    5) echo "❌ ${id} 승인 마커가 stale — 티켓 §변경 범위가 승인 시점과 달라졌습니다. ${marker}를 재승인(삭제 후 approve.sh 재실행)하세요." ;;
+    *) echo "❌ ${id} 승인 검증기 실행 오류(rc=${rc}): ${out}" ;;
+  esac
+  return 14
 }
 
 ticket_label_contains() {
@@ -637,6 +627,19 @@ cycle_one() {
   local id; id=$(ticket_id_from_path "$ticket")
   local cur_status; cur_status=$(field_of "$ticket" status)
   local safe; safe=$(field_of "$ticket" safe || true)
+
+  # 리뷰 2차 P1-6: safe는 정확히 'true'|'false'만 허용. 누락·오타('True', 'yes', 따옴표 등)는
+  # 과거 "false가 아니면 safe" 판정으로 승인 게이트를 우회했다 — fail-closed로 실행 거부.
+  case "$safe" in
+    true|false) ;;
+    *)
+      echo "❌ ${id} — safe 필드가 비정상('${safe:-누락}'). 'true' 또는 'false'만 허용합니다 (fail-closed)."
+      echo "   티켓 frontmatter의 safe: 값을 고친 뒤 다시 실행하세요."
+      add_failure "$id" "safe-malformed" "${i:-0}" "$ticket"
+      return 14
+      ;;
+  esac
+
   if [ "$cur_status" != "open" ]; then
     if [ "$safe" = "false" ] && [ "$cur_status" = "awaiting-approval" ]; then
       :
@@ -661,9 +664,12 @@ EOF
 )
   fi
 
+  local pre_head=""
   if [ "$DRY_RUN" = "0" ] && [ "$GIT_REPO" = "1" ]; then
     git tag -f "cycle/${id}-pre" HEAD >/dev/null
     echo "🏷️  pre-cycle tag: cycle/${id}-pre"
+    # 리뷰 2차 P1-8: 완료 계약의 "HEAD 전진" 검증 기준점.
+    pre_head=$(git rev-parse HEAD 2>/dev/null || true)
   fi
 
   # ────────── 3. Reservation (lock 디렉터리) ──────────
@@ -865,13 +871,37 @@ EOF
   # 커밋 의무(§2 절차 7–8) 전에 끝나는 패턴(runbook §3.7 분기 1 operator 회수)을
   # 줄이기 위함. idle-exit(125)·timeout(124)은 이미 그 이전(§7)에서 반환되므로
   # 이 블록에 도달하지 않는다 — 재프롬프트는 "정상 종료 후 마무리 누락"에만 적용.
-  local wip_stage reprompted=0
+  # 리뷰 2차 P1-8: 완료 계약 강화 — "op 경로 clean + 티켓 파일 이동"만으로는 미완 세션이
+  # 성공으로 집계됐다. 완료로 인정하려면 아래를 모두 만족해야 한다:
+  #   (1) op 경로 clean (기존)
+  #   (2) isolated worktree에서는 추적 파일 전체(제품 경로 포함) clean
+  #       — 메인 워크트리는 사용자 자신의 WIP와 구분할 수 없어 op 경로 정책 유지
+  #   (3) 티켓 파일이 DONE/(status: done) 또는 ARCHIVE/(status: blocked|skipped)로 이동
+  #   (4) HEAD가 사이클 시작 시점(pre_head)에서 전진 (커밋 0개 금지)
+  local wip_stage reprompted=0 done_file archive_file final_file final_status
+  done_file="docs/tickets/DONE/$(basename "$ticket")"
+  archive_file="docs/tickets/ARCHIVE/$(basename "$ticket")"
   while :; do
     wip_stage=""
     if [ -n "$(_op_dirty_lines)" ]; then
       wip_stage="no-commit"
+    elif in_isolated_worktree && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+      wip_stage="no-commit"
     elif [ -f "$ticket" ]; then
       wip_stage="no-done-move"
+    elif [ ! -f "$done_file" ] && [ ! -f "$archive_file" ]; then
+      wip_stage="done-file-missing"
+    else
+      final_file="$done_file"
+      [ -f "$done_file" ] || final_file="$archive_file"
+      final_status=$(field_of "$final_file" status || true)
+      if [ -f "$done_file" ] && [ "$final_status" != "done" ]; then
+        wip_stage="status-not-done"
+      elif [ ! -f "$done_file" ] && [ "$final_status" != "blocked" ] && [ "$final_status" != "skipped" ]; then
+        wip_stage="status-not-done"
+      elif [ "$GIT_REPO" = "1" ] && [ -n "$pre_head" ] && [ "$(git rev-parse HEAD 2>/dev/null)" = "$pre_head" ]; then
+        wip_stage="no-head-change"
+      fi
     fi
 
     [ -z "$wip_stage" ] && break

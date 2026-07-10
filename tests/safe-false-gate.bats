@@ -10,11 +10,14 @@ setup() {
            "$TEST_HOME/docs/tickets/DONE" \
            "$TEST_HOME/docs/tickets/ARCHIVE" \
            "$TEST_HOME/docs/approvals" \
+           "$TEST_HOME/mission-control" \
            "$TEST_HOME/state"
 
   cp "$REPO_ROOT/scripts/pick_next_ticket.sh" "$TEST_HOME/scripts/pick_next_ticket.sh"
   cp "$REPO_ROOT/scripts/run_loop.sh" "$TEST_HOME/scripts/run_loop.sh"
   cp "$REPO_ROOT/scripts/orchestrator.sh" "$TEST_HOME/scripts/orchestrator.sh"
+  # 리뷰 2차 P1-7: run_loop의 safe:false 승인 판정은 mission-control/approval.mjs 단일 소스.
+  cp "$REPO_ROOT/mission-control/approval.mjs" "$TEST_HOME/mission-control/approval.mjs"
   cp "$REPO_ROOT/.gitignore" "$TEST_HOME/.gitignore"
   chmod +x "$TEST_HOME/scripts/"*.sh
 
@@ -203,4 +206,78 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"HUMAN APPROVAL REQUIRED FOR MERGE"* ]]
   [[ "$output" == *"safe:false"* ]]
+}
+
+# ── 리뷰 2차 P1-6/P1-7 회귀 ──────────────────────────────────────────────────
+
+@test "T7: malformed safe field (safe: yes) -> run_loop rejects fail-closed rc=14" {
+  _make_ticket T007 yes
+  _commit_all "add T007"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T007' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+  [[ "$output" == *"safe 필드가 비정상"* ]]
+  # 승인 마커가 있어도 malformed safe는 실행 불가여야 한다 (fail-closed)
+  [ ! -f "$TEST_HOME/docs/tickets/DONE/T007-test.md" ]
+}
+
+@test "T8: missing/malformed safe field -> picker excludes fail-closed (no awaiting mark)" {
+  _make_ticket T008 '"true"'
+  _commit_all "add T008"
+
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[SKIP] T008"* ]]
+  [[ "$output" == *"비정상"* ]]
+  [[ "$output" != *"docs/tickets/T008-test.md"* ]]
+  # safe:false와 달리 awaiting-approval로 바꾸지 않는다 — 승인으로 우회 불가
+  grep -q '^status: open$' "$TEST_HOME/docs/tickets/T008-test.md"
+}
+
+@test "T9: stale approval (ticket scope changed after approval) -> rc=14 with stale message" {
+  cat > "$TEST_HOME/docs/tickets/T009-test.md" <<'EOF'
+---
+id: T009
+title: Stale approval test
+status: open
+priority: P2
+safe: false
+persona: implementer
+estimate: S
+depends_on: []
+blocks: []
+labels: []
+created: 2026-07-10
+---
+
+# T009
+
+## 변경 범위
+
+- 승인 이후 넓어진 새 범위
+EOF
+  cat > "$TEST_HOME/docs/approvals/T009.md" <<'EOF'
+approved_by: "Test User"
+approved_at: "2026-07-10T10:00:00+09:00"
+scope_confirmation: "원래 승인했던 좁은 범위"
+rollback_plan: "git revert HEAD"
+EOF
+  _commit_all "add T009 with stale approval"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T009' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+  [[ "$output" == *"stale"* ]]
+  [ ! -f "$TEST_HOME/docs/tickets/DONE/T009-test.md" ]
+}
+
+@test "T10: validator unavailable -> safe:false refused fail-closed rc=14" {
+  _make_ticket T010 false
+  _make_approval T010 valid
+  _commit_all "add T010"
+  rm -f "$TEST_HOME/mission-control/approval.mjs"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T010' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+  [[ "$output" == *"fail-closed"* ]]
+  [ ! -f "$TEST_HOME/docs/tickets/DONE/T010-test.md" ]
 }

@@ -131,3 +131,15 @@ if [ -n "${EDITOR:-}" ]; then
 else
   echo "EDITOR is not set; edit $MARKER before running run_loop."
 fi
+
+# 리뷰 2차 P1-7: 실행기(run_loop)와 동일한 단일 검증기로 마커를 즉시 판정해 안내한다.
+# 여기서 ok가 아니면 run_loop도 같은 이유로 거부한다 — 승인 직후 바로 고칠 수 있게 표시.
+if command -v node >/dev/null 2>&1 && [ -f "$ROOT/mission-control/approval.mjs" ]; then
+  VALIDATION="$(node "$ROOT/mission-control/approval.mjs" "$ROOT" "$ID" 2>&1 || true)"
+  echo "validator: $VALIDATION"
+  case "$VALIDATION" in
+    ok) ;;
+    stale*) echo "⚠️  티켓 §변경 범위가 마커와 불일치(stale) — run_loop가 거부합니다. 마커를 삭제 후 재실행하세요." ;;
+    malformed*) echo "⚠️  필수 필드 누락(malformed) — run_loop가 거부합니다. $MARKER를 보완하세요." ;;
+  esac
+fi

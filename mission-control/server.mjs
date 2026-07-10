@@ -294,7 +294,9 @@ function buildModel() {
             title: String(fm.title || ''),
             status,
             priority: String(fm.priority || ''),
-            safe: fm.safe !== false,
+            // 리뷰 2차 P1-6: strict — 정확히 true일 때만 safe (누락/오타는 fail-closed로 unsafe 표시).
+            safe: fm.safe === true,
+            safe_malformed: fm.safe !== true && fm.safe !== false,
             persona: String(fm.persona || ''),
             estimate: String(fm.estimate || ''),
             depends_on: Array.isArray(fm.depends_on) ? fm.depends_on : [],
@@ -3543,6 +3545,9 @@ function recoveryCommand(downside) {
 // test path. Anything ambiguous is excluded (handled as an individual card).
 const BULK_RISK_LABELS = ['security', 'auth', 'code', 'concurrency', 'ui', 'test', 'server', 'infra'];
 function lowRiskDocsOnly(ticket) {
+  // 리뷰 2차 P1-6: safe가 malformed인 티켓은 "명시적 safe:false"가 아니다 —
+  // bulk 승인 후보에서 제외(fail-closed). 개별 카드로만 다룬다.
+  if (ticket.safe_malformed) return false;
   if (ticket.safe !== false) return false;
   const labels = (ticket.labels || []).map(s => String(s).toLowerCase());
   if (!labels.includes('docs')) return false;

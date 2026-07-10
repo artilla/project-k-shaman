@@ -158,14 +158,24 @@ if [ "$EXECUTE" -eq 1 ]; then
 fi
 
 # ── changed-files 결정 ────────────────────────────────────────────────────────
+# 리뷰 2차 P1-11: --name-only는 rename 감지 시 목적지 경로만 출력해, 소스가 docs/tests
+# 밖인 rename(예: src/app.js → docs/app.md)이 조건 2를 우회했다. --name-status로 바꿔
+# R(rename)/C(copy)는 소스·목적지 양쪽 경로를 모두 검사 대상에 넣는다.
+_diff_paths() {
+  git diff --name-status -M "$1" 2>/dev/null | awk -F'\t' '
+    $1 ~ /^[RC]/ { if ($2 != "") print $2; if ($3 != "") print $3; next }
+    { if ($2 != "") print $2 }
+  '
+}
+
 TMPCHANGED="$(mktemp)"
 if [ -n "$CHANGED_FILES_ARG" ]; then
   cp "$CHANGED_FILES_ARG" "$TMPCHANGED"
 elif [ "$EXECUTE" -eq 1 ]; then
   # --execute: synthetic changed-files 불가, 실제 브랜치 diff 사용
-  git diff --name-only "${BASE_BRANCH}...${BRANCH_ARG}" > "$TMPCHANGED" 2>/dev/null || true
+  _diff_paths "${BASE_BRANCH}...${BRANCH_ARG}" > "$TMPCHANGED" || true
 else
-  git diff --name-only "${BASE_BRANCH}...HEAD" > "$TMPCHANGED" 2>/dev/null || true
+  _diff_paths "${BASE_BRANCH}...HEAD" > "$TMPCHANGED" || true
 fi
 
 # ── 5조건 평가 ────────────────────────────────────────────────────────────────

@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
 # rollback.sh — restore a ticket pre-cycle tag or point to the revert command.
+#
+# 리뷰 2차 P1-10: reset --hard + clean -fd는 무관한 작업까지 파괴할 수 있어 가드를 추가한다.
+#   1. clean-tree 가드 — 추적 파일에 미커밋 변경이 있으면 거부 (reset --hard가 파괴,
+#      --yes로도 우회 불가).
+#   2. isolated-worktree 가드 — .ralph/wt-* 격리 워크트리에서는 기존처럼 즉시 실행.
+#   3. 확인 가드 — 메인 워크트리는 --yes 플래그 또는 대화형 y 응답이 있어야 실행.
+#      비대화형 + --yes 없음 → fail-closed 거부. clean -fd로 지워질 미추적 파일 목록을
+#      실행 전에 보여준다.
+#
+# usage: scripts/rollback.sh <TXXX> [--yes]
 
 set -euo pipefail
 
@@ -7,23 +17,65 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 usage() {
-  echo "usage: scripts/rollback.sh <TXXX>" >&2
+  echo "usage: scripts/rollback.sh <TXXX> [--yes]" >&2
 }
 
-[ "$#" -eq 1 ] || { usage; exit 2; }
-ID="$1"
-case "$ID" in
-  T[0-9]*) ;;
-  *) echo "invalid ticket id: $ID" >&2; exit 2 ;;
-esac
+YES=0
+ID=""
+for arg in "$@"; do
+  case "$arg" in
+    --yes) YES=1 ;;
+    -h|--help) usage; exit 0 ;;
+    T[0-9]*) ID="$arg" ;;
+    *) echo "unknown argument: $arg" >&2; usage; exit 2 ;;
+  esac
+done
+[ -n "$ID" ] || { usage; exit 2; }
 
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
   echo "not a git repository" >&2
   exit 2
 }
 
+in_isolated_worktree() {
+  case "$ROOT" in
+    */.ralph/wt-*) return 0 ;;
+    *)             return 1 ;;
+  esac
+}
+
 TAG="cycle/${ID}-pre"
 if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+  # 가드 1: 추적 파일 미커밋 변경 → 거부.
+  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+    echo "❌ 추적 파일에 미커밋 변경이 있습니다 — reset --hard가 이를 파괴합니다." >&2
+    echo "   commit 또는 stash 후 다시 실행하세요." >&2
+    git status --short --untracked-files=no >&2
+    exit 3
+  fi
+
+  # 가드 2·3: 메인 워크트리는 명시적 확인 필요 (격리 워크트리는 즉시 실행).
+  if ! in_isolated_worktree; then
+    UNTRACKED="$(git clean -nd 2>/dev/null || true)"
+    if [ -n "$UNTRACKED" ]; then
+      echo "⚠️  clean -fd로 삭제될 미추적 파일/디렉터리:" >&2
+      printf '%s\n' "$UNTRACKED" >&2
+    fi
+    if [ "$YES" != "1" ]; then
+      if [ -t 0 ]; then
+        printf '⚠️  메인 워크트리를 %s로 reset --hard + clean -fd 합니다. 계속할까요? [y/N] ' "$TAG" >&2
+        read -r answer
+        case "$answer" in
+          y|Y|yes) ;;
+          *) echo "취소됨." >&2; exit 3 ;;
+        esac
+      else
+        echo "❌ 메인 워크트리 비대화형 실행 — --yes 플래그가 필요합니다 (fail-closed)." >&2
+        exit 3
+      fi
+    fi
+  fi
+
   git reset --hard "$TAG" >/dev/null
   git clean -fd >/dev/null
   echo "restored $ID to $TAG"

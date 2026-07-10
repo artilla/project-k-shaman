@@ -94,16 +94,24 @@ for f in docs/tickets/T*.md; do
   if [ -d "state/reservations/${id}.d" ]; then continue; fi
 
   safe=$(field_of "$f" safe || true)
-  if [ "$safe" = "false" ]; then
-    if [ "$SAFE_ONLY" = "1" ]; then
-      mark_awaiting_approval "$f" "$id"
-      echo "[SKIP] $id — safe:false, 승인 필요. awaiting-approval 상태로 변경됨."
-    else
-      echo "[SKIP] $id — safe:false, 승인 필요. 명시적 run_loop 호출과 docs/approvals/${id}.md가 필요합니다."
-    fi
-    continue
-  fi
-  if [ "$SAFE_ONLY" = "1" ] && [ "$safe" != "true" ]; then continue; fi
+  # 리뷰 2차 P1-6: safe는 정확히 'true'|'false'만 허용. 과거에는 "false가 아니면 후보"라서
+  # 누락·오타('True', 'yes' 등) 티켓이 승인 게이트 없이 실행됐다 — fail-closed로 제외.
+  case "$safe" in
+    true) ;;
+    false)
+      if [ "$SAFE_ONLY" = "1" ]; then
+        mark_awaiting_approval "$f" "$id"
+        echo "[SKIP] $id — safe:false, 승인 필요. awaiting-approval 상태로 변경됨."
+      else
+        echo "[SKIP] $id — safe:false, 승인 필요. 명시적 run_loop 호출과 docs/approvals/${id}.md가 필요합니다."
+      fi
+      continue
+      ;;
+    *)
+      echo "[SKIP] $id — safe 필드 비정상('${safe:-누락}'): 'true'|'false'만 허용. fail-closed로 제외 — 티켓 frontmatter를 고치세요."
+      continue
+      ;;
+  esac
   candidates+=("$f")
 done
 
