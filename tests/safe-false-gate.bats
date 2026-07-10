@@ -31,7 +31,9 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 prompt="$1"
-ticket=$(printf '%s\n' "$prompt" | awk -F': ' '/^파일 경로:/ {print $2; exit}')
+# 주의: awk에서 `exit`로 조기 종료하면 printf가 나머지 프롬프트를 쓰다 SIGPIPE(141)로
+# 죽는다 (pipefail+set -e 조합, macOS에서 간헐 재현) — stdin을 끝까지 읽는다.
+ticket=$(printf '%s\n' "$prompt" | awk -F': ' '!found && /^파일 경로:/ {print $2; found=1}')
 [ -n "$ticket" ] || { echo "missing ticket path" >&2; exit 2; }
 id=$(basename "$ticket" .md | cut -d- -f1)
 mkdir -p docs/tickets/DONE
@@ -73,6 +75,8 @@ teardown() {
 
 _make_ticket() {
   local id="$1" safe="$2" status="${3:-open}" priority="${4:-P2}"
+  # 리뷰 3차: scope 섹션은 _make_approval(valid)의 scope_confirmation과 일치해야 한다
+  # (섹션 부재는 이제 unverifiable로 실행 거부 — T13이 그 경로를 검증).
   cat > "$TEST_HOME/docs/tickets/${id}-test.md" <<EOF
 ---
 id: $id
@@ -90,6 +94,10 @@ spec_ref: docs/decisions/0007-safe-false-ticket-ux.md
 ---
 
 # $id
+
+## 변경 범위
+
+- Test scope is approved
 EOF
 }
 
@@ -280,4 +288,101 @@ EOF
   [ "$status" -eq 14 ]
   [[ "$output" == *"fail-closed"* ]]
   [ ! -f "$TEST_HOME/docs/tickets/DONE/T010-test.md" ]
+}
+
+# ── 리뷰 3차 P1 회귀 ──────────────────────────────────────────────────────────
+
+@test "T11: safe only in a body --- block (frontmatter lacks safe) -> rejected fail-closed" {
+  cat > "$TEST_HOME/docs/tickets/T011-test.md" <<'EOF'
+---
+id: T011
+title: Body-injection test
+status: open
+priority: P2
+persona: implementer
+---
+
+# T011
+
+본문 예시 블록 (frontmatter 아님):
+
+---
+safe: true
+---
+EOF
+  _commit_all "add T011"
+
+  # picker: 후보 제외 + awaiting 마크 없음
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[SKIP] T011"* ]]
+  [[ "$output" != *"docs/tickets/T011-test.md"* ]]
+  grep -q '^status: open$' "$TEST_HOME/docs/tickets/T011-test.md"
+
+  # run_loop: 실행 거부
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T011' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+  [ ! -f "$TEST_HOME/docs/tickets/DONE/T011-test.md" ]
+}
+
+@test "T12: duplicate safe declarations in frontmatter -> rejected fail-closed rc=14" {
+  cat > "$TEST_HOME/docs/tickets/T012-test.md" <<'EOF'
+---
+id: T012
+title: Duplicate safe test
+status: open
+priority: P2
+safe: false
+safe: true
+persona: implementer
+---
+
+# T012
+EOF
+  _commit_all "add T012"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T012' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+  [[ "$output" == *"2"*"1"* ]]
+
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"[SKIP] T012"* ]]
+}
+
+@test "T13: valid marker but ticket has no scope section -> unverifiable rc=14" {
+  cat > "$TEST_HOME/docs/tickets/T013-test.md" <<'EOF'
+---
+id: T013
+title: Unverifiable scope test
+status: open
+priority: P2
+safe: false
+persona: implementer
+---
+
+# T013
+EOF
+  _make_approval T013 valid
+  _commit_all "add T013"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T013' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+  [[ "$output" == *"unverifiable"* ]]
+  [ ! -f "$TEST_HOME/docs/tickets/DONE/T013-test.md" ]
+}
+
+@test "T14: TODO-draft scope_confirmation marker -> unverifiable rc=14" {
+  _make_ticket T014 false
+  cat > "$TEST_HOME/docs/approvals/T014.md" <<'EOF'
+approved_by: "Test User"
+approved_at: "2026-07-10T10:00:00+09:00"
+scope_confirmation: "TODO: confirm exact approved scope for T014"
+rollback_plan: "git revert HEAD"
+EOF
+  _commit_all "add T014"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T014' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+  [[ "$output" == *"unverifiable"* ]]
 }

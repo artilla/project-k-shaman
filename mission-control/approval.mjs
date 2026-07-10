@@ -110,20 +110,28 @@ export function validateApproval(root, id) {
   if (fields.approved_at && !ISO8601_RE.test(fields.approved_at)) missing.push('approved_at(ISO8601)');
   if (missing.length) return { state: 'malformed', missing };
 
-  // stale: 마커 scope_confirmation vs 현재 티켓 §변경 범위/Scope (측정 불가 → 보수적 ok)
+  // stale/unverifiable: 마커 scope_confirmation vs 현재 티켓 §변경 범위/Scope.
+  // 리뷰 3차 P1: 측정 불가를 ok로 돌려보내면 Scope 섹션 삭제·헤딩 변경·TODO 마커로
+  // stale 검사를 우회할 수 있었다 — 검증 불가는 'unverifiable'로 분리하고 실행기는
+  // 거부한다(fail-closed). 사유는 reason에 담는다.
   const markerScope = fields.scope_confirmation;
-  if (!/^TODO: confirm exact approved scope/.test(markerScope)) {
-    const ticketText = readTicketText(root, id);
-    if (ticketText != null) {
-      const cur = extractSection(ticketText, '변경 범위') || extractSection(ticketText, 'Scope');
-      if (cur && yamlEscapeCut(cur) !== markerScope) return { state: 'stale', missing: [] };
-    }
+  if (/^TODO: confirm exact approved scope/.test(markerScope)) {
+    return { state: 'unverifiable', missing: [], reason: 'scope_confirmation이 TODO 초안 그대로 — 실제 승인 범위로 채워야 합니다' };
   }
+  const ticketText = readTicketText(root, id);
+  if (ticketText == null) {
+    return { state: 'unverifiable', missing: [], reason: '티켓 본문을 찾거나 읽을 수 없음 — scope 대조 불가' };
+  }
+  const cur = extractSection(ticketText, '변경 범위') || extractSection(ticketText, 'Scope');
+  if (!cur) {
+    return { state: 'unverifiable', missing: [], reason: '티켓에 `## 변경 범위`/`## Scope` 섹션이 없음 — scope 대조 불가' };
+  }
+  if (yamlEscapeCut(cur) !== markerScope) return { state: 'stale', missing: [] };
   return { state: 'ok', missing: [] };
 }
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
-const CLI_EXIT = { ok: 0, missing: 3, malformed: 4, stale: 5 };
+const CLI_EXIT = { ok: 0, missing: 3, malformed: 4, stale: 5, unverifiable: 6 };
 
 // main-module 판정은 symlink에 안전해야 한다 — macOS의 /var/folders는 /private/var의
 // symlink라 pathToFileURL(argv[1])와 import.meta.url이 어긋나고, 그러면 CLI 블록이
@@ -146,6 +154,8 @@ if (isMainModule()) {
     process.exit(2);
   }
   const v = validateApproval(root, id);
-  console.log(v.missing.length ? `${v.state} ${v.missing.join(' ')}` : v.state);
+  if (v.missing.length) console.log(`${v.state} ${v.missing.join(' ')}`);
+  else if (v.reason) console.log(`${v.state} ${v.reason}`);
+  else console.log(v.state);
   process.exit(CLI_EXIT[v.state] ?? 2);
 }

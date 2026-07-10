@@ -351,17 +351,32 @@ in_isolated_worktree() {
 }
 
 # 티켓 frontmatter 필드 추출 (inline `# 주석` 제거 포함)
+# 리뷰 3차 P1: `---` 토글 파싱은 본문의 `--- key: v ---` 블록도 frontmatter로 읽어
+# 실행 권한(safe 등)이 본문에서 주입될 수 있었다 — 1행에서 시작하는 최초 frontmatter
+# 블록만 읽고, 닫는 `---` 이후는 무시한다.
 field_of() {
   local file="$1" key="$2"
   awk -v k="$key" '
-    /^---$/ { fm = !fm; next }
-    fm && $1 == k":" {
+    NR == 1 { if ($0 != "---") exit; next }
+    $0 == "---" { exit }
+    $1 == k":" {
       sub(/^[^:]+:[ \t]*/, "")
       sub(/[ \t]+#.*$/, "")
       gsub(/^[ \t]+|[ \t]+$/, "")
       print
       exit
     }
+  ' "$file"
+}
+
+# 최초 frontmatter 블록 안에서 key가 등장하는 횟수 (0=누락, 2+=중복 — 모두 fail-closed 대상)
+frontmatter_field_count() {
+  local file="$1" key="$2"
+  awk -v k="$key" '
+    NR == 1 { if ($0 != "---") exit; next }
+    $0 == "---" { exit }
+    $1 == k":" { n++ }
+    END { print n + 0 }
   ' "$file"
 }
 
@@ -442,6 +457,20 @@ _op_dirty_lines() {
   '
 }
 
+# 리뷰 3차 P1: 완료 판정용 WIP 스냅샷/델타.
+# - 메인 워크트리: 사이클 전부터 있던 사용자 WIP는 보호하되, 사이클 중 새로 생긴
+#   dirty(추적 수정·미추적 신규 파일 모두)는 페르소나의 미커밋 잔여물 → 실패 처리.
+# - isolated worktree: 시작이 clean이므로 델타 == 전체 dirty (미추적 포함).
+# 루프 자신이 쓰는 .ralph/(로그)·state/(예약 메타)는 gitignore 여부와 무관하게 제외.
+_wip_snapshot() {
+  git status --porcelain 2>/dev/null | grep -vE '^.{3}(\.ralph/|state/)' | LC_ALL=C sort
+}
+
+_new_wip_lines() {
+  local pre="$1"
+  printf '%s\n' "$pre" | grep -v '^$' | LC_ALL=C sort | LC_ALL=C comm -13 - <(_wip_snapshot)
+}
+
 pick_next_ticket_path() {
   local out line ticket_line=""
   if [ "$SAFE_ONLY" = "1" ]; then
@@ -494,6 +523,7 @@ validate_safe_false_approval() {
     3) echo "❌ ${id}는 safe:false. 승인이 필요합니다. ${marker}를 작성하세요." ;;
     4) echo "❌ ${id} 승인 마커 형식 오류: ${out#malformed}. ${marker}를 보완하세요." ;;
     5) echo "❌ ${id} 승인 마커가 stale — 티켓 §변경 범위가 승인 시점과 달라졌습니다. ${marker}를 재승인(삭제 후 approve.sh 재실행)하세요." ;;
+    6) echo "❌ ${id} 승인을 검증할 수 없습니다(unverifiable): ${out#unverifiable }. 티켓 §변경 범위와 마커 scope_confirmation을 맞춘 뒤 재승인하세요 (fail-closed)." ;;
     *) echo "❌ ${id} 승인 검증기 실행 오류(rc=${rc}): ${out}" ;;
   esac
   return 14
@@ -630,6 +660,14 @@ cycle_one() {
 
   # 리뷰 2차 P1-6: safe는 정확히 'true'|'false'만 허용. 누락·오타('True', 'yes', 따옴표 등)는
   # 과거 "false가 아니면 safe" 판정으로 승인 게이트를 우회했다 — fail-closed로 실행 거부.
+  # 리뷰 3차 P1: 최초 frontmatter 블록에서 정확히 한 번 선언돼야 한다 — 누락(0)과
+  # 중복(2+, 마지막 선언이 이기는 파서 차이를 노린 주입) 모두 거부.
+  local safe_count; safe_count=$(frontmatter_field_count "$ticket" safe)
+  if [ "$safe_count" != "1" ]; then
+    echo "❌ ${id} — frontmatter의 safe 선언이 ${safe_count}회입니다. 정확히 1회 필요 (fail-closed)."
+    add_failure "$id" "safe-malformed" "${i:-0}" "$ticket"
+    return 14
+  fi
   case "$safe" in
     true|false) ;;
     *)
@@ -803,6 +841,10 @@ EOF
   fi
 
   # ────────── 7. Act (delegate to headless) ──────────
+  # 리뷰 3차 P1: 완료 판정 기준점 — 디스패치 직전 WIP 스냅샷 (델타 비교용).
+  local pre_wip=""
+  [ "$GIT_REPO" = "1" ] && pre_wip=$(_wip_snapshot)
+
   echo "🤖 헤드리스 세션 디스패치..."
   local headless_log=".ralph/logs/${id}.log"
   {
@@ -871,11 +913,12 @@ EOF
   # 커밋 의무(§2 절차 7–8) 전에 끝나는 패턴(runbook §3.7 분기 1 operator 회수)을
   # 줄이기 위함. idle-exit(125)·timeout(124)은 이미 그 이전(§7)에서 반환되므로
   # 이 블록에 도달하지 않는다 — 재프롬프트는 "정상 종료 후 마무리 누락"에만 적용.
-  # 리뷰 2차 P1-8: 완료 계약 강화 — "op 경로 clean + 티켓 파일 이동"만으로는 미완 세션이
-  # 성공으로 집계됐다. 완료로 인정하려면 아래를 모두 만족해야 한다:
+  # 리뷰 2차 P1-8 + 3차 P1: 완료 계약 — "op 경로 clean + 티켓 파일 이동"만으로는 미완
+  # 세션이 성공으로 집계됐다. 완료로 인정하려면 아래를 모두 만족해야 한다:
   #   (1) op 경로 clean (기존)
-  #   (2) isolated worktree에서는 추적 파일 전체(제품 경로 포함) clean
-  #       — 메인 워크트리는 사용자 자신의 WIP와 구분할 수 없어 op 경로 정책 유지
+  #   (2) 사이클 중 새로 생긴 WIP 없음 — pre_wip 델타 비교. 메인 워크트리의 기존 사용자
+  #       WIP는 보호하면서, 페르소나가 남긴 추적 수정·미추적 신규 파일(제품 경로 포함)을
+  #       모두 잡는다 (3차 리뷰: 메인 추적 WIP·isolated 미추적 파일 false-success 수정).
   #   (3) 티켓 파일이 DONE/(status: done) 또는 ARCHIVE/(status: blocked|skipped)로 이동
   #   (4) HEAD가 사이클 시작 시점(pre_head)에서 전진 (커밋 0개 금지)
   local wip_stage reprompted=0 done_file archive_file final_file final_status
@@ -885,7 +928,7 @@ EOF
     wip_stage=""
     if [ -n "$(_op_dirty_lines)" ]; then
       wip_stage="no-commit"
-    elif in_isolated_worktree && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+    elif [ "$GIT_REPO" = "1" ] && [ -n "$(_new_wip_lines "$pre_wip")" ]; then
       wip_stage="no-commit"
     elif [ -f "$ticket" ]; then
       wip_stage="no-done-move"

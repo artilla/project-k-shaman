@@ -934,7 +934,9 @@ function renderTicketCard(ticket, doneIds, nowMs, isLocalhost = true, failCount 
   // run_loop is denied server-side (T099); hide the control to match. UI hiding
   // is convenience only; the server remains authoritative. Run shows ONLY on a
   // ready open card (deps met) — Backlog (blocked open) carries no dispatch.
-  const runButton = isLocalhost && status === 'open' && !blocked
+  // 리뷰 3차 P1: safe가 malformed(누락·오타)면 Run 노출 금지 — 실행기(run_loop)도
+  // rc=14로 거부하지만(서버가 권위), UI도 fail-closed로 일치시킨다.
+  const runButton = isLocalhost && status === 'open' && !blocked && !ticket.safe_malformed
     ? renderWriteButton({
         label: 'Run',
         cliCommand: `./scripts/run_loop.sh ${ticket.id}`,
@@ -952,7 +954,7 @@ function renderTicketCard(ticket, doneIds, nowMs, isLocalhost = true, failCount 
   <div class="mc-card__meta">
     <span>${escapeHtml(ticket.persona || 'n/a')}</span>
     <span>${escapeHtml(ticket.estimate || 'n/a')}</span>
-    <span class="${ticket.safe ? 'mc-safe' : 'mc-unsafe'}">${ticket.safe ? 'safe' : 'safe:false'}</span>
+    <span class="${ticket.safe ? 'mc-safe' : 'mc-unsafe'}">${ticket.safe_malformed ? 'safe:?' : (ticket.safe ? 'safe' : 'safe:false')}</span>
     ${age}
     ${agingChip}
     ${leadChip}

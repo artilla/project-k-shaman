@@ -116,7 +116,9 @@ export function decisionState(root, ticket) {
   if (status === 'awaiting-approval') {
     const v = validateApproval(root, ticket.id);
     if (v.state === 'ok') return 'decided';
-    if (v.state === 'stale') return 'stale';
+    // 리뷰 3차 P1: unverifiable(TODO scope·섹션 부재·티켓 읽기 실패)도 실행기가 거부하는
+    // 재승인 대상 — UI에서는 stale과 동일하게 조치 필요로 표시한다.
+    if (v.state === 'stale' || v.state === 'unverifiable') return 'stale';
     return 'pending'; // missing·malformed — 실행기 기준 아직 유효한 결정이 없다
   }
   // awaiting 이탈: 마커 있으면 승인·이동, 없으면 철회. 여기서는 이력 존재만 본다.

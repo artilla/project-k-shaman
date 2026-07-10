@@ -62,9 +62,11 @@ TICKET="${matches[0]}"
 set_status() {
   local file="$1" new_status="$2" tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/approve-status.XXXXXX")
+  # 리뷰 3차 P1: 최초 frontmatter 블록만 수정 (본문 `---` 블록의 status: 라인 보호)
   awk -v new_status="$new_status" '
-    /^---$/ { fm = !fm; print; next }
-    fm && $1 == "status:" { print "status: " new_status; next }
+    NR == 1 && $0 == "---" { fm = 1; print; next }
+    fm == 1 && $0 == "---" { fm = 2; print; next }
+    fm == 1 && $1 == "status:" { print "status: " new_status; next }
     { print }
   ' "$file" > "$tmp"
   mv "$tmp" "$file"
@@ -141,5 +143,6 @@ if command -v node >/dev/null 2>&1 && [ -f "$ROOT/mission-control/approval.mjs" 
     ok) ;;
     stale*) echo "⚠️  티켓 §변경 범위가 마커와 불일치(stale) — run_loop가 거부합니다. 마커를 삭제 후 재실행하세요." ;;
     malformed*) echo "⚠️  필수 필드 누락(malformed) — run_loop가 거부합니다. $MARKER를 보완하세요." ;;
+    unverifiable*) echo "⚠️  scope 검증 불가(unverifiable) — run_loop가 거부합니다. 티켓에 '## 변경 범위' 섹션을 추가하고 마커 scope_confirmation을 맞추세요." ;;
   esac
 fi

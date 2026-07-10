@@ -86,16 +86,26 @@ test('티켓 §변경 범위가 승인 후 변경 → stale', () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test('보수적 판정: TODO 폴백 scope / 티켓 섹션 없음 → stale 아님(ok)', () => {
+test('검증 불가 → unverifiable (리뷰 3차: TODO scope·섹션 부재·티켓 부재는 ok가 아니다)', () => {
+  // 이전에는 측정 불가를 보수적으로 ok로 돌려보냈지만, 그러면 Scope 섹션 삭제·헤딩
+  // 변경·TODO 초안 마커로 stale 검사를 우회할 수 있었다 — 실행기는 unverifiable을 거부한다.
   const root = makeRoot();
   try {
     writeTicket(root, 'T904', '아무 범위');
     writeMarker(root, 'T904', { scope: 'TODO: confirm exact approved scope for T904' });
-    assert.equal(validateApproval(root, 'T904').state, 'ok');
+    const todo = validateApproval(root, 'T904');
+    assert.equal(todo.state, 'unverifiable');
+    assert.match(todo.reason, /TODO/);
 
     writeTicket(root, 'T905', null); // §변경 범위 섹션 없음
     writeMarker(root, 'T905', { scope: '어떤 범위든' });
-    assert.equal(validateApproval(root, 'T905').state, 'ok');
+    const noSection = validateApproval(root, 'T905');
+    assert.equal(noSection.state, 'unverifiable');
+    assert.match(noSection.reason, /변경 범위/);
+
+    writeMarker(root, 'T906', { scope: '티켓 없음' }); // 티켓 본문 자체가 없음
+    const noTicket = validateApproval(root, 'T906');
+    assert.equal(noTicket.state, 'unverifiable');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -158,5 +168,12 @@ test('CLI 종료 코드 계약: ok=0 / missing=3 / malformed=4 / stale=5', () =>
     const stale = cli(root, 'T912');
     assert.equal(stale.code, 5);
     assert.equal(stale.stdout, 'stale');
+
+    // 리뷰 3차: unverifiable=6
+    writeTicket(root, 'T913', null);
+    writeMarker(root, 'T913', { scope: '어떤 범위든' });
+    const unv = cli(root, 'T913');
+    assert.equal(unv.code, 6);
+    assert.ok(unv.stdout.startsWith('unverifiable'));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

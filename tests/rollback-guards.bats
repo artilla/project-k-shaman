@@ -35,7 +35,7 @@ _make_repo() {
   git -C "$d" commit -q -m "T200: cycle change"
 }
 
-@test "R1: 추적 파일 dirty -> 거부 exit 3 (reset --hard 파괴 방지)" {
+@test "R1: dirty tracked files -> refused exit 3 (protects work from reset --hard)" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
   echo "uncommitted" >> "$repo/file.txt"
@@ -47,7 +47,7 @@ _make_repo() {
   grep -q "uncommitted" "$repo/file.txt"
 }
 
-@test "R2: 메인 워크트리 비대화형 + --yes 없음 -> 거부 exit 3 (fail-closed)" {
+@test "R2: main worktree non-interactive without --yes -> refused exit 3 (fail-closed)" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
 
@@ -58,7 +58,7 @@ _make_repo() {
   grep -q "v2" "$repo/file.txt"
 }
 
-@test "R3: 메인 워크트리 + --yes -> 태그로 복원" {
+@test "R3: main worktree with --yes -> restored to pre-cycle tag" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
 
@@ -68,7 +68,7 @@ _make_repo() {
   grep -q "v1" "$repo/file.txt"
 }
 
-@test "R4: isolated worktree(.ralph/wt-*)는 --yes 없이 비대화형에서도 즉시 실행" {
+@test "R4: isolated worktree (.ralph/wt-*) runs immediately without --yes even non-interactive" {
   local repo="$TEST_BASE/.ralph/wt-x"
   _make_repo "$repo"
 
@@ -78,7 +78,7 @@ _make_repo() {
   grep -q "v1" "$repo/file.txt"
 }
 
-@test "R5: 태그 없음 -> 기존 동작 유지 (revert 안내, exit 1)" {
+@test "R5: no pre-cycle tag -> legacy behavior kept (revert guidance, exit 1)" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
   git -C "$repo" tag -d "cycle/T200-pre" >/dev/null

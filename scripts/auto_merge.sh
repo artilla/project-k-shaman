@@ -161,21 +161,26 @@ fi
 # 리뷰 2차 P1-11: --name-only는 rename 감지 시 목적지 경로만 출력해, 소스가 docs/tests
 # 밖인 rename(예: src/app.js → docs/app.md)이 조건 2를 우회했다. --name-status로 바꿔
 # R(rename)/C(copy)는 소스·목적지 양쪽 경로를 모두 검사 대상에 넣는다.
+# -M(rename) + -C(copy) 탐지. pipefail(스크립트 상단 set -euo pipefail)이 git 실패를
+# 함수 종료 코드로 전파한다.
 _diff_paths() {
-  git diff --name-status -M "$1" 2>/dev/null | awk -F'\t' '
+  git diff --name-status -M -C "$1" | awk -F'\t' '
     $1 ~ /^[RC]/ { if ($2 != "") print $2; if ($3 != "") print $3; next }
     { if ($2 != "") print $2 }
   '
 }
 
+# 리뷰 3차 P1: diff 실패(잘못된 base/branch 등)를 `|| true`로 삼키면 빈 변경 목록이
+# 되어 조건 2가 공허하게 PASS했다 — diff 실패는 조건 2 실패로 처리한다(fail-closed).
 TMPCHANGED="$(mktemp)"
+DIFF_FAILED=0
 if [ -n "$CHANGED_FILES_ARG" ]; then
   cp "$CHANGED_FILES_ARG" "$TMPCHANGED"
 elif [ "$EXECUTE" -eq 1 ]; then
   # --execute: synthetic changed-files 불가, 실제 브랜치 diff 사용
-  _diff_paths "${BASE_BRANCH}...${BRANCH_ARG}" > "$TMPCHANGED" || true
+  _diff_paths "${BASE_BRANCH}...${BRANCH_ARG}" > "$TMPCHANGED" || DIFF_FAILED=1
 else
-  _diff_paths "${BASE_BRANCH}...HEAD" > "$TMPCHANGED" || true
+  _diff_paths "${BASE_BRANCH}...HEAD" > "$TMPCHANGED" || DIFF_FAILED=1
 fi
 
 # ── 5조건 평가 ────────────────────────────────────────────────────────────────
@@ -197,7 +202,12 @@ fi
 
 # 조건 2: diff가 docs/ 또는 tests/ 한정 (Fix 2: traversal·절대경로 선거부)
 COND2_FAIL=0
-while IFS= read -r _f; do
+if [ "$DIFF_FAILED" -eq 1 ]; then
+  echo "[FAIL] condition 2: git diff failed (base='${BASE_BRANCH:-?}') — 변경 목록을 신뢰할 수 없음"
+  COND2_FAIL=1
+  ELIGIBLE=1
+fi
+[ "$DIFF_FAILED" -eq 1 ] || while IFS= read -r _f; do
   [ -z "$_f" ] && continue
   # Fix 2: 절대경로 거부 (prefix 검사 전)
   case "$_f" in

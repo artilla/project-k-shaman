@@ -361,3 +361,24 @@ _make_rename_repo() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: ELIGIBLE"* ]]
 }
+
+# ── 리뷰 3차 P1: diff 실패 fail-closed ────────────────────────────────────────
+
+@test "auto_merge: git diff failure (nonexistent base) -> NOT ELIGIBLE (condition 2 fail-closed)" {
+  local repo="$TEST_DIR/repo-badbase"
+  mkdir -p "$repo"
+  _make_rename_repo "$repo"
+  echo "extra" > "$repo/docs/extra.md"
+  git -C "$repo" add docs/extra.md
+  git -C "$repo" commit -q -m "docs change"
+
+  run bash -c '
+    cd "$1" && env \
+      LINT_EXTERNAL_DOCS_CMD="$2" RUN_CHECKS_CMD="$3" CHECK_SCOPE_OMISSION_CMD="$4" \
+      "$5" "$6" --base no-such-branch
+  ' _ "$repo" "$TEST_DIR/mock_lint.sh" "$TEST_DIR/mock_checks.sh" "$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/ticket.md"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"condition 2: git diff failed"* ]]
+  [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
+}

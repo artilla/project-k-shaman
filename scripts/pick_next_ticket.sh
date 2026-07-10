@@ -23,17 +23,32 @@ SAFE_ONLY=0
 
 # 프론트매터 필드 추출 (yq가 없는 환경 가정 — awk로 처리)
 # inline `# 주석`도 제거한다 (TEMPLATE이 가진 주석이 실제 값에 섞이지 않도록).
+# 리뷰 3차 P1: `---` 토글 파싱은 본문의 `--- key: v ---` 블록도 frontmatter로 읽어
+# 실행 권한(safe 등)이 본문에서 주입될 수 있었다 — 1행에서 시작하는 최초 frontmatter
+# 블록만 읽고, 닫는 `---` 이후는 무시한다.
 field_of() {
   local file="$1" key="$2"
   awk -v k="$key" '
-    /^---$/ { fm = !fm; next }
-    fm && $1 == k":" {
+    NR == 1 { if ($0 != "---") exit; next }
+    $0 == "---" { exit }
+    $1 == k":" {
       sub(/^[^:]+:[ \t]*/, "")
       sub(/[ \t]+#.*$/, "")
       gsub(/^[ \t]+|[ \t]+$/, "")
       print
       exit
     }
+  ' "$file"
+}
+
+# 최초 frontmatter 블록 안에서 key가 등장하는 횟수 (0=누락, 2+=중복 — 모두 fail-closed 대상)
+frontmatter_field_count() {
+  local file="$1" key="$2"
+  awk -v k="$key" '
+    NR == 1 { if ($0 != "---") exit; next }
+    $0 == "---" { exit }
+    $1 == k":" { n++ }
+    END { print n + 0 }
   ' "$file"
 }
 
@@ -52,9 +67,11 @@ ticket_id_from_path() {
 set_status() {
   local file="$1" new_status="$2" tmp
   tmp=$(mktemp "${TMPDIR:-/tmp}/ralph-status.XXXXXX")
+  # 리뷰 3차 P1: 최초 frontmatter 블록만 수정 (본문 `---` 블록의 status: 라인 보호)
   awk -v new_status="$new_status" '
-    /^---$/ { fm = !fm; print; next }
-    fm && $1 == "status:" {
+    NR == 1 && $0 == "---" { fm = 1; print; next }
+    fm == 1 && $0 == "---" { fm = 2; print; next }
+    fm == 1 && $1 == "status:" {
       print "status: " new_status
       next
     }
@@ -96,6 +113,12 @@ for f in docs/tickets/T*.md; do
   safe=$(field_of "$f" safe || true)
   # 리뷰 2차 P1-6: safe는 정확히 'true'|'false'만 허용. 과거에는 "false가 아니면 후보"라서
   # 누락·오타('True', 'yes' 등) 티켓이 승인 게이트 없이 실행됐다 — fail-closed로 제외.
+  # 리뷰 3차 P1: 최초 frontmatter에서 정확히 1회 선언 필수 (누락·중복 모두 제외).
+  safe_count=$(frontmatter_field_count "$f" safe)
+  if [ "$safe_count" != "1" ]; then
+    echo "[SKIP] $id — frontmatter의 safe 선언이 ${safe_count}회: 정확히 1회 필요. fail-closed로 제외 — 티켓 frontmatter를 고치세요."
+    continue
+  fi
   case "$safe" in
     true) ;;
     false)
