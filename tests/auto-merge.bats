@@ -554,3 +554,74 @@ EOF
   [ "$status" -eq 2 ]
   [[ "$output" == *"id contract"* ]]
 }
+
+# ── 리뷰 8차 P1: scalar 파서·symlink 경계 ─────────────────────────────────────
+
+@test "auto_merge: safe true#suffix (comment without leading space) -> NOT ELIGIBLE" {
+  cat > "$TEST_DIR/T999-suffix.md" <<'EOF'
+---
+id: T999
+safe: true#suffix
+---
+EOF
+  printf 'docs/guide.md\n' > "$TEST_DIR/changed.txt"
+  run env \
+    LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
+    RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
+    CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/T999-suffix.md" --changed-files "$TEST_DIR/changed.txt"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
+}
+
+@test "auto_merge: unclosed quote id (\"T999) -> refused exit 2 (pair-only unquote)" {
+  cat > "$TEST_DIR/T999-uq.md" <<'EOF'
+---
+id: "T999
+safe: true
+---
+EOF
+  printf 'docs/guide.md\n' > "$TEST_DIR/changed.txt"
+  run env \
+    LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
+    RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
+    CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/T999-uq.md" --changed-files "$TEST_DIR/changed.txt"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"id contract"* ]]
+}
+
+@test "auto_merge: single-quoted id ('T999') accepted (parser unification)" {
+  cat > "$TEST_DIR/T999-sq.md" <<'EOF'
+---
+id: 'T999'
+safe: true
+---
+EOF
+  printf 'docs/guide.md\n' > "$TEST_DIR/changed.txt"
+  run env \
+    LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
+    RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
+    CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/T999-sq.md" --changed-files "$TEST_DIR/changed.txt"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"VERDICT: ELIGIBLE"* ]]
+}
+
+@test "auto_merge: symlinked ticket file -> refused exit 2" {
+  cat > "$TEST_DIR/outside-real.md" <<'EOF'
+---
+id: T999
+safe: true
+---
+EOF
+  ln -s "$TEST_DIR/outside-real.md" "$TEST_DIR/T999-link.md"
+  printf 'docs/guide.md\n' > "$TEST_DIR/changed.txt"
+  run env \
+    LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
+    RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
+    CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/T999-link.md" --changed-files "$TEST_DIR/changed.txt"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"symlink"* ]]
+}

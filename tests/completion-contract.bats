@@ -475,3 +475,31 @@ EOF
   # 디스패치 자체가 중단됐어야 한다 — DONE 이동 없음
   [ ! -f "$main_home/docs/tickets/DONE/T100-contract.md" ]
 }
+
+@test "C18: git status command failure -> fingerprint fails closed rc=13 (not dispatched)" {
+  local main_home="$TEST_BASE/main-home"
+  _make_home "$main_home"
+
+  # git shim: status만 rc=42로 실패시키고 나머지는 실제 git으로 위임
+  local real_git
+  real_git="$(command -v git)"
+  mkdir -p "$main_home/bin"
+  cat > "$main_home/bin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "status" ]; then exit 42; fi
+exec "$real_git" "\$@"
+EOF
+  chmod +x "$main_home/bin/git"
+
+  cat > "$main_home/scripts/run_headless.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "should not be dispatched" >&2
+exit 99
+EOF
+  chmod +x "$main_home/scripts/run_headless.sh"
+
+  run bash -c 'cd "$1" && PATH="$1/bin:$PATH" ./scripts/run_loop.sh T100' _ "$main_home"
+  [ "$status" -eq 13 ]
+  [[ "$output" == *"fingerprint 수집 실패"* ]]
+  [[ "$output" != *"should not be dispatched"* ]]
+}

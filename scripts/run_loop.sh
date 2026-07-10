@@ -367,8 +367,13 @@ field_of() {
       sub(/^[^:]+:[ \t]*/, "", line)
       sub(/[ \t]+#.*$/, "", line)
       gsub(/^[ \t]+|[ \t]+$/, "", line)
-      # 리뷰 6차/7차 P2: quoted scalar("open", \047implementer\047) 허용 — 서버 파서와 동일 계약.
-      if (line ~ /^".*"$/ || line ~ /^\047.*\047$/) line = substr(line, 2, length(line) - 2)
+      # 리뷰 6~8차 P2: quoted scalar 허용 — 같은 종류의 따옴표 "쌍"일 때만 벗긴다
+      # (혼합 쌍/미폐 따옴표 보존, BSD awk 호환을 위해 regex 대신 문자 비교).
+      if (length(line) >= 2) {
+        fc = substr(line, 1, 1); lc = substr(line, length(line), 1)
+        if ((fc == "\"" && lc == "\"") || (fc == "\047" && lc == "\047"))
+          line = substr(line, 2, length(line) - 2)
+      }
       val = line
       found = 1
     }
@@ -512,9 +517,11 @@ _wip_files_stream() {
 }
 
 _wip_fingerprint() {
-  local part
-  # grep은 매치 0건이면 rc=1 — pipefail이 이를 실패로 오인하지 않게 || true로 감싼다.
-  part="$({ git status --porcelain | grep -vE '^.{3}(\.ralph/|state/)' || true; } | LC_ALL=C sort | git hash-object --stdin)" || return 1
+  local part st_out
+  # 리뷰 8차 P1: git status 실패와 grep "매치 없음"(rc=1)을 분리 — 과거 `grep || true`가
+  # git 실패까지 흡수해 status producer가 fail-open이었다.
+  st_out="$(git status --porcelain)" || return 1
+  part="$({ printf '%s' "$st_out" | grep -vE '^.{3}(\.ralph/|state/)' || true; } | LC_ALL=C sort | git hash-object --stdin)" || return 1
   printf 'status:%s\n' "$part"
   part="$({ git diff --raw -z && git diff --cached --raw -z; } | git hash-object --stdin)" || return 1
   printf 'raw:%s\n' "$part"
@@ -718,6 +725,20 @@ cycle_one() {
     return 10
   fi
 
+  # 리뷰 8차 P1: canonical 경계 — 티켓은 symlink가 아닌 regular file이어야 하고,
+  # 물리 디렉터리가 ROOT/docs/tickets여야 한다 (docs/·docs/tickets/ 자체가 symlink인
+  # 우회 포함 차단).
+  if [ -h "$ticket" ] || [ ! -f "$ticket" ]; then
+    echo "❌ ${ticket} 은 symlink이거나 regular file이 아닙니다 (fail-closed)."
+    return 11
+  fi
+  local tdir_real
+  tdir_real="$(cd "$(dirname "$ticket")" && pwd -P)" || return 11
+  if [ "$tdir_real" != "$(pwd -P)/docs/tickets" ]; then
+    echo "❌ 티켓 물리 경로('${tdir_real}')가 canonical docs/tickets가 아닙니다 — docs/ 또는 docs/tickets/의 symlink 여부를 확인하세요 (fail-closed)."
+    return 11
+  fi
+
   echo "🎫 티켓: $ticket"
 
   local id; id=$(ticket_id_from_path "$ticket")
@@ -838,6 +859,14 @@ EOF
   if [ -h "$skill_file" ]; then
     echo "❌ $skill_file 은 symlink입니다 — skills/ 경계 밖 파일을 페르소나로 로드할 수 없습니다 (fail-closed)."
     add_failure "${id:-unknown}" "unknown-persona" "${i:-0}" "persona='$persona' (symlink)"
+    return 12
+  fi
+  # 리뷰 8차 P1: skills/ 디렉터리 자체가 symlink인 우회도 물리 경로 대조로 차단.
+  local sdir_real
+  sdir_real="$(cd "$(dirname "$skill_file")" && pwd -P)" || sdir_real=""
+  if [ "$sdir_real" != "$(pwd -P)/skills" ]; then
+    echo "❌ skills 물리 경로('${sdir_real}')가 canonical ROOT/skills가 아닙니다 — symlink 여부를 확인하세요 (fail-closed)."
+    add_failure "${id:-unknown}" "unknown-persona" "${i:-0}" "persona='$persona' (skills dir)"
     return 12
   fi
 
@@ -1033,11 +1062,21 @@ EOF
   done_file="docs/tickets/DONE/$(basename "$ticket")"
   archive_file="docs/tickets/ARCHIVE/$(basename "$ticket")"
   while :; do
+    # 리뷰 8차 P2: 완료 판정용 fingerprint 수집 실패는 인프라 문제 — 페르소나
+    # 재프롬프트(no-commit) 대신 즉시 fingerprint-failed로 종료한다 (fail-closed).
+    post_wip=""
+    if [ "$GIT_REPO" = "1" ]; then
+      if ! post_wip=$(_wip_fingerprint); then
+        echo "❌ 완료 판정용 WIP fingerprint 수집 실패 — 재프롬프트 없이 종료합니다 (fail-closed)."
+        add_failure "$id" "fingerprint-failed" "${i:-0}" "$ticket"
+        return 13
+      fi
+    fi
+
     wip_stage=""
     if [ -n "$(_op_dirty_lines)" ]; then
       wip_stage="no-commit"
-    elif [ "$GIT_REPO" = "1" ] && { ! post_wip=$(_wip_fingerprint) || [ "$post_wip" != "$pre_wip" ]; }; then
-      # 수집 실패(fail-closed)도 불일치도 no-commit — 완료를 보증할 수 없다.
+    elif [ "$GIT_REPO" = "1" ] && [ "$post_wip" != "$pre_wip" ]; then
       wip_stage="no-commit"
     elif [ -f "$ticket" ]; then
       wip_stage="no-done-move"

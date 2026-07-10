@@ -197,7 +197,8 @@ function parseFrontmatter(content) {
     }
     // 리뷰 7차 P2: unquote를 boolean 판정보다 먼저 — `safe: "true"`가 문자열로 남아
     // 셸(실행 허용)과 어긋나던 split-brain 해소. 셸 field_of도 쌍·홑따옴표를 벗긴다.
-    const unquoted = raw.replace(/^["'](.*)["']$/, '$1');
+    // 리뷰 8차 P2: 같은 종류의 쌍일 때만 unquote — `"open'` 혼합 쌍을 벗기지 않는다.
+    const unquoted = raw.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
     if (unquoted === 'true') {
       fm[key] = true;
     } else if (unquoted === 'false') {
@@ -968,9 +969,10 @@ function renderTicketCard(ticket, doneIds, nowMs, isLocalhost = true, failCount 
   // 리뷰 3차 P1: safe가 malformed(누락·오타)면 Run 노출 금지 — 실행기(run_loop)도
   // rc=14로 거부하지만(실행기가 권위), UI도 fail-closed로 일치시킨다.
   // 리뷰 5차 P2: status 누락·권위 필드 중복도 실행기가 거부하므로 동일하게 미노출.
-  const runButton = isLocalhost && status === 'open' && !blocked
-      && !ticket.safe_malformed && !ticket.status_missing && !ticket.authority_malformed
-      && !ticket.id_malformed
+  // 리뷰 8차 P1: Run뿐 아니라 메타·본문·lifecycle writer 전부 동일 게이트(cardWritable).
+  const cardWritable = !ticket.safe_malformed && !ticket.status_missing
+      && !ticket.authority_malformed && !ticket.id_malformed;
+  const runButton = isLocalhost && status === 'open' && !blocked && cardWritable
     ? renderWriteButton({
         label: 'Run',
         cliCommand: `./scripts/run_loop.sh ${ticket.id}`,
@@ -998,9 +1000,9 @@ function renderTicketCard(ticket, doneIds, nowMs, isLocalhost = true, failCount 
   ${blocksChip}
   ${staleChip}
   ${runButton ? `<div class="mc-card-actions">${runButton}</div>` : ''}
-  ${renderTicketEditRow(ticket, isLocalhost, status)}
-  ${renderTicketLifecycleControls(ticket, isLocalhost, status)}
-  ${renderTicketBodyEditor(ticket, isLocalhost, status)}
+  ${cardWritable ? renderTicketEditRow(ticket, isLocalhost, status) : ''}
+  ${cardWritable ? renderTicketLifecycleControls(ticket, isLocalhost, status) : ''}
+  ${cardWritable ? renderTicketBodyEditor(ticket, isLocalhost, status) : ''}
 </article>`;
 }
 
@@ -4716,6 +4718,23 @@ function execPlan(payload) {
   const ticketId = String(payload?.ticketId || '');
   if (!/^T[0-9]{3,}$/.test(ticketId)) {
     throw new Error('invalid ticketId');
+  }
+
+  // 리뷰 8차 P1: dispatch 재검증 — ticketId는 canonical(파일명·frontmatter id 일치,
+  // 권위 필드 정상) 티켓 "정확히 1개"에 대응해야 한다. UI 숨김은 편의일 뿐이며,
+  // 불일치 카드(T301 파일 + id:T999)의 쓰기 요청이 정상 T999를 조작하던 우회를
+  // 서버에서 차단한다. 같은 id가 2개 파일에 존재하면 양쪽 모두 거부(충돌 표면화).
+  {
+    const model = getModel();
+    const allTickets = Object.values(model.byStatus || {}).flat();
+    const canonicalMatches = allTickets.filter(t => String(t.id) === ticketId);
+    if (canonicalMatches.length !== 1) {
+      throw new Error(`ticketId ${ticketId} resolves to ${canonicalMatches.length} tickets — refusing (need exactly 1 canonical)`);
+    }
+    const t = canonicalMatches[0];
+    if (t.id_malformed || t.authority_malformed) {
+      throw new Error(`ticket ${ticketId} has malformed identity/authority frontmatter — refusing dispatch`);
+    }
   }
 
   // ADR-0058: structured, NON-LLM edit of a ticket's ORGANIZATIONAL metadata

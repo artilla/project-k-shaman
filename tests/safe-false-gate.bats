@@ -704,3 +704,44 @@ console.log('server-shell-parser-consistent');
   [ "$status" -eq 0 ]
   [[ "$output" == *"server-shell-parser-consistent"* ]]
 }
+
+# ── 리뷰 8차 P1 회귀 ──────────────────────────────────────────────────────────
+
+@test "T30: symlinked ticket file -> run_loop rc=11 and picker excludes" {
+  echo "external target" > "$TEST_HOME/outside-T030.md"
+  ln -s ../../outside-T030.md "$TEST_HOME/docs/tickets/T030-link.md"
+  _commit_all "add symlinked ticket"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T030 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 11 ]
+  [[ "$output" == *"symlink"* ]]
+
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"docs/tickets/T030-link.md"* ]]
+}
+
+@test "T31: docs/tickets directory replaced by symlink -> fail-closed everywhere" {
+  _make_ticket T031 true
+  _commit_all "add T031"
+  mv "$TEST_HOME/docs/tickets" "$TEST_HOME/docs/real-tickets"
+  ln -s real-tickets "$TEST_HOME/docs/tickets"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T031 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 11 ]
+
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"T031"* ]]
+}
+
+@test "T32: skills directory replaced by symlink -> persona routing refused rc=12" {
+  _make_ticket T032 true
+  _commit_all "add T032"
+  mv "$TEST_HOME/skills" "$TEST_HOME/real-skills"
+  ln -s real-skills "$TEST_HOME/skills"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T032 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 12 ]
+  [[ "$output" == *"skills"* ]]
+}

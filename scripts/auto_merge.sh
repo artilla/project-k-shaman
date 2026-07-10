@@ -82,6 +82,17 @@ fi
 # 외부 경로(/tmp/T999-*.md)의 위조 티켓으로 병합 자격을 얻는 우회 차단.
 # TICKETS_DIR은 테스트 격리용 오버라이드(기존 REVIEWS_DIR/STATE_DIR과 동일 패턴).
 TICKETS_DIR="${TICKETS_DIR:-$ROOT/docs/tickets}"
+# 리뷰 8차 P1: 파일 자체 symlink 거부 + regular file 강제 — 디렉터리 containment만으로는
+# tickets/ 안의 symlink가 외부 파일을 끌어오는 우회를 막지 못했다. tickets 디렉터리
+# 자체의 symlink 여부도 검사한다 (pwd -P containment는 링크된 실경로끼리 비교돼 통과했다).
+if [ -h "$TICKET_PATH" ] || [ ! -f "$TICKET_PATH" ]; then
+  echo "[FAIL] ticket '${TICKET_PATH}' is a symlink or not a regular file — refusing" >&2
+  exit 2
+fi
+if [ -h "$TICKETS_DIR" ] || { [ -d "$TICKETS_DIR/DONE" ] && [ -h "$TICKETS_DIR/DONE" ]; }; then
+  echo "[FAIL] tickets directory '${TICKETS_DIR}' (or DONE/) is a symlink — refusing" >&2
+  exit 2
+fi
 _ticket_dir_real="$(cd "$(dirname "$TICKET_PATH")" 2>/dev/null && pwd -P || true)"
 _tickets_real="$(cd "$TICKETS_DIR" 2>/dev/null && pwd -P || true)"
 if [ -z "$_tickets_real" ] || { [ "$_ticket_dir_real" != "$_tickets_real" ] && [ "$_ticket_dir_real" != "$_tickets_real/DONE" ]; }; then
@@ -134,10 +145,14 @@ while IFS= read -r _fmline; do
       case "$_fmline" in
         id:*)
           _fm_id_count=$((_fm_id_count + 1))
-          # 리뷰 7차 P2: inline 주석 제거 + quoted scalar 허용 — field_of와 동일 계약.
-          # 앞뒤 공백만 제거(내부 공백은 보존) — 'T 9 9 9'가 압축돼 T999로 통과하는 위조 차단.
+          # 리뷰 7차 P2: inline 주석 제거(선행 공백 필수) + quoted scalar 허용.
+          # 리뷰 8차 P1: 따옴표는 "같은 종류의 쌍"일 때만 제거 — 독립 strip은
+          # 닫히지 않은 `id: "T908`을 T908로 승격시켰다.
           _fm_id="$(printf '%s' "$_fmline" | sed 's/^id:[[:space:]]*//; s/[[:space:]][[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
-          _fm_id="${_fm_id%\"}"; _fm_id="${_fm_id#\"}"
+          case "$_fm_id" in
+            \"*\") _fm_id="${_fm_id#\"}"; _fm_id="${_fm_id%\"}" ;;
+            \'*\') _fm_id="${_fm_id#\'}"; _fm_id="${_fm_id%\'}" ;;
+          esac
           ;;
       esac
       # 리뷰 5차 P1: safe 선언 횟수 집계 — 중복(false→true, true→false 어느 순서든)은
@@ -146,7 +161,8 @@ while IFS= read -r _fmline; do
         safe:*) _fm_safe_count=$((_fm_safe_count + 1)) ;;
       esac
       # 리뷰 6차 P2: quoted scalar("true"/'true') 허용 — 셸 field_of·서버 파서와 동일 계약.
-      if printf '%s\n' "$_fmline" | grep -qE "^safe:[[:space:]]*(\"true\"|'true'|true)[[:space:]]*(#.*)?$"; then
+      # 리뷰 8차 P1: 주석은 선행 공백 필수 — `true#suffix`는 malformed지 safe:true가 아니다.
+      if printf '%s\n' "$_fmline" | grep -qE "^safe:[[:space:]]*(\"true\"|'true'|true)([[:space:]]+#.*)?[[:space:]]*$"; then
         _fm_safe=1
       fi
       ;;
@@ -400,24 +416,50 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   fi
 
   mkdir -p "$STATE_DIR"
+
+  # 리뷰 8차 P1: 저장소 단위 lock — 동시 auto-merge/외부 조작과의 경합 창을 좁힌다.
+  # 원자적 mkdir 기반, 종료 시 trap으로 해제.
+  AM_LOCK="$STATE_DIR/auto_merge.lock.d"
+  if ! mkdir "$AM_LOCK" 2>/dev/null; then
+    echo "[FAIL] another auto-merge is in progress (lock: ${AM_LOCK})"
+    exit 1
+  fi
+  trap 'rmdir "$AM_LOCK" 2>/dev/null || true' EXIT
+
   # 리뷰 7차 P1: 병합 직전 base 재검증 — 검사(조건 3·4) 중 현재 브랜치 HEAD가
   # 움직였거나(dirty 포함) 브랜치가 바뀌었으면 병합을 거부한다 (base 측 TOCTOU).
-  PRE_MERGE_HEAD="$(git rev-parse HEAD)"
+  # 리뷰 8차 P1: git status 실패도 fail-closed (빈 출력으로 오인 금지).
+  PRE_MERGE_HEAD="$(git rev-parse HEAD)" || exit 1
+  if ! _wt_status2="$(git status --porcelain)"; then
+    echo "[FAIL] git status failed before merge — refusing"
+    exit 1
+  fi
   if [ "$PRE_MERGE_HEAD" != "$BASE_OID" ] \
      || [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != "$BASE_BRANCH" ] \
-     || [ -n "$(git status --porcelain)" ]; then
+     || [ -n "$_wt_status2" ]; then
     echo "[FAIL] base '${BASE_BRANCH}' moved or dirtied since checks (HEAD=${PRE_MERGE_HEAD} expected=${BASE_OID}) — merge refused (TOCTOU)"
     exit 1
   fi
   if ! git merge --no-ff "$BRANCH_OID" -m "auto-merge: ${TICKET_ID} (ELIGIBLE)"; then
-    git merge --abort >/dev/null 2>&1 || git reset --hard "$PRE_MERGE_HEAD" >/dev/null 2>&1 || true
+    git merge --abort >/dev/null 2>&1 || git reset --hard "$BASE_OID" >/dev/null 2>&1 || true
     printf '%s\t%s\t%s\t%s\tROLLED_BACK\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TICKET_ID" "$BRANCH_ARG" "$PRE_MERGE_HEAD" \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TICKET_ID" "$BRANCH_ARG" "$BASE_OID" \
       >> "$STATE_DIR/auto_merge.log"
     echo "[FAIL] git merge failed — rollback"
     exit 1
   fi
   MERGE_COMMIT="$(git rev-parse HEAD)"
+
+  # 리뷰 8차 P1: merge parent 검증(CAS) — 재검증과 merge 사이의 잔여 경합 창에서
+  # HEAD가 바뀌었으면 첫 부모가 BASE_OID가 아니게 된다 → 즉시 고정 OID로 롤백.
+  if [ "$(git rev-parse "${MERGE_COMMIT}^1" 2>/dev/null)" != "$BASE_OID" ]; then
+    git reset --hard "$BASE_OID" >/dev/null 2>&1 || true
+    printf '%s\t%s\t%s\t%s\tROLLED_BACK\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TICKET_ID" "$BRANCH_ARG" "$MERGE_COMMIT" \
+      >> "$STATE_DIR/auto_merge.log"
+    echo "[FAIL] merge first-parent != pinned BASE_OID (raced) — rolled back"
+    exit 1
+  fi
 
   if "$RUN_CHECKS_CMD" >/dev/null 2>&1; then
     printf '%s\t%s\t%s\t%s\tEXECUTED\n' \
@@ -426,7 +468,9 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     echo "[PASS] auto-merge executed: ${MERGE_COMMIT}"
     exit 0
   else
-    git reset --hard ORIG_HEAD
+    # 리뷰 8차 P1: 가변 ORIG_HEAD가 아니라 고정 BASE_OID로 복구 — post-check가
+    # ORIG_HEAD를 오염시켜도(예: 내부 reset) 원래 base로 정확히 돌아간다.
+    git reset --hard "$BASE_OID"
     printf '%s\t%s\t%s\t%s\tROLLED_BACK\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TICKET_ID" "$BRANCH_ARG" "$MERGE_COMMIT" \
       >> "$STATE_DIR/auto_merge.log"

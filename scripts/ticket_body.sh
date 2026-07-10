@@ -40,6 +40,18 @@ fi
 file="${matches[0]}"
 case "$(basename "$file")" in TEMPLATE.md) echo "❌ TEMPLATE은 편집 대상이 아닙니다." >&2; exit 2 ;; esac
 
+# 리뷰 8차 P1: canonical 경계 — symlink 티켓(외부 파일로 연결)은 편집 대상이 아니다.
+# git status에 안 잡히는 저장소 밖 대상 변경을 차단한다.
+if [ -h "$file" ] || [ ! -f "$file" ]; then
+  echo "❌ ${id} 티켓이 symlink이거나 regular file이 아닙니다 — 편집 거부 (fail-closed)." >&2
+  exit 2
+fi
+_tdir_real="$(cd "$(dirname "$file")" && pwd -P)"
+if [ "$_tdir_real" != "$(pwd -P)/docs/tickets" ]; then
+  echo "❌ 티켓 물리 경로가 canonical docs/tickets가 아닙니다 (symlink 디렉터리?) — 편집 거부." >&2
+  exit 2
+fi
+
 # 하드 가드: open 상태만.
 status="$(awk '/^---$/{fm++;next} fm==1 && $1=="status:"{sub(/^[^:]+:[ \t]*/,"");sub(/[ \t]+#.*$/,"");gsub(/^[ \t]+|[ \t]+$/,"");print;exit}' "$file")"
 if [ "$status" != "open" ]; then

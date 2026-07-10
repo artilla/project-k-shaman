@@ -540,3 +540,60 @@ EOF
   parent_count="$(git -C "$d" log --format='%P' -1 | wc -w | tr -d ' ')"
   [ "$parent_count" -le 1 ]
 }
+
+# ── 리뷰 8차 P1: 원자성 (고정 복구·lock) ──────────────────────────────────────
+
+@test "execute: post-check failure rolls back to pinned BASE_OID even if ORIG_HEAD is polluted" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+
+  local base_sha
+  base_sha="$(git -C "$d" rev-parse HEAD)"
+
+  # 1회차(조건 4)는 통과, 2회차(post-merge)에서 내부 reset으로 ORIG_HEAD를
+  # 병합 커밋으로 오염시키고 실패한다 — 과거 'git reset --hard ORIG_HEAD' 복구는
+  # base로 돌아가지 못했다.
+  cat > "$TEST_HOME/mock_checks_pollute.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/pollute.flag" ]; then
+  touch "$TEST_HOME/pollute.flag"
+  exit 0
+fi
+cd '$d'
+git reset --hard HEAD >/dev/null 2>&1   # ORIG_HEAD := 현재(병합) 커밋
+exit 1
+EOF
+  chmod +x "$TEST_HOME/mock_checks_pollute.sh"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_pollute.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"post-merge run_checks 실패"* ]]
+  # ORIG_HEAD가 오염됐어도 고정 BASE_OID로 정확히 복구돼야 한다
+  [ "$(git -C "$d" rev-parse HEAD)" = "$base_sha" ]
+}
+
+@test "execute: concurrent lock present -> refused, no merge" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  mkdir -p "$TEST_HOME/state/auto_merge.lock.d"
+
+  local base_sha
+  base_sha="$(git -C "$d" rev-parse HEAD)"
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"another auto-merge is in progress"* ]]
+  [ "$(git -C "$d" rev-parse HEAD)" = "$base_sha" ]
+}

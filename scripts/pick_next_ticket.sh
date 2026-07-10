@@ -38,8 +38,13 @@ field_of() {
       sub(/^[^:]+:[ \t]*/, "", line)
       sub(/[ \t]+#.*$/, "", line)
       gsub(/^[ \t]+|[ \t]+$/, "", line)
-      # 리뷰 6차/7차 P2: quoted scalar(쌍·홑따옴표) 허용 — 서버 파서와 동일 계약.
-      if (line ~ /^".*"$/ || line ~ /^\047.*\047$/) line = substr(line, 2, length(line) - 2)
+      # 리뷰 6~8차 P2: quoted scalar 허용 — 같은 종류의 따옴표 "쌍"일 때만 벗긴다
+      # (혼합 쌍/미폐 따옴표 보존, BSD awk 호환을 위해 regex 대신 문자 비교).
+      if (length(line) >= 2) {
+        fc = substr(line, 1, 1); lc = substr(line, length(line), 1)
+        if ((fc == "\"" && lc == "\"") || (fc == "\047" && lc == "\047"))
+          line = substr(line, 2, length(line) - 2)
+      }
       val = line
       found = 1
     }
@@ -116,9 +121,22 @@ mark_awaiting_approval() {
 }
 
 shopt -s nullglob
+
+# 리뷰 8차 P1: docs/·docs/tickets/ 자체가 symlink면 canonical 경계가 깨진다 — fail-closed.
+if [ -h "docs" ] || [ -h "docs/tickets" ]; then
+  echo "docs/tickets 경로가 symlink입니다 — fail-closed로 후보를 선정하지 않습니다." >&2
+  exit 0
+fi
+
 candidates=()
 for f in docs/tickets/T*.md; do
   [ "$(basename "$f")" = "TEMPLATE.md" ] && continue
+
+  # 리뷰 8차 P1: symlink 티켓(외부 파일 연결)은 후보에서 제외 (fail-closed).
+  if [ -h "$f" ] || [ ! -f "$f" ]; then
+    echo "[SKIP] $(basename "$f") — symlink이거나 regular file이 아님. fail-closed로 제외."
+    continue
+  fi
 
   base=$(basename "$f" .md)
   id="${base%%-*}"
