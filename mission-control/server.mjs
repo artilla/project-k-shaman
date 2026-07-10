@@ -170,7 +170,10 @@ function uiCssHref() {
 // CRLF·JSON 배열·null 반환을 지원하는 더 엄격한 계약이라 의도적으로 통일하지 않았다.
 // 어느 한쪽의 파싱 규칙을 바꿀 때는 반대쪽 영향(티켓 분류 vs Inbox 목록)을 함께 검토할 것.
 function parseFrontmatter(content) {
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  // 리뷰 5차 P2: 셸(field_of)과 동일 계약 — opener는 1행의 정확한 `---`(CRLF 거부),
+  // closer는 정확한 `---` 단독 행(`---trailing` 오인 금지). 셸이 거부하는 티켓을
+  // UI가 Run 가능으로 표시하는 split-brain 방지.
+  const match = content.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
   if (!match) return null;
   const fm = {};
   // 리뷰 4차 P2: 중복 키는 last-write-wins로 조용히 덮여 `safe: false` 뒤의
@@ -307,6 +310,10 @@ function buildModel() {
             // 리뷰 4차 P2: 중복 safe 선언도 malformed — 실행기(frontmatter_field_count ≠ 1 거부)와 정합.
             safe: fm.safe === true && !(fm._duplicateKeys || []).includes('safe'),
             safe_malformed: (fm.safe !== true && fm.safe !== false) || (fm._duplicateKeys || []).includes('safe'),
+            // 리뷰 5차 P2: 실행기는 status 정확히 1회 + id/persona 중복 금지를 요구한다 —
+            // status 누락(기본화된 'open')이나 권위 필드 중복 티켓에 Run을 노출하지 않는다.
+            status_missing: !entry.doneDir && !fm.status,
+            authority_malformed: (fm._duplicateKeys || []).some(k => ['id', 'status', 'persona', 'safe'].includes(k)),
             persona: String(fm.persona || ''),
             estimate: String(fm.estimate || ''),
             depends_on: Array.isArray(fm.depends_on) ? fm.depends_on : [],
@@ -945,8 +952,10 @@ function renderTicketCard(ticket, doneIds, nowMs, isLocalhost = true, failCount 
   // is convenience only; the server remains authoritative. Run shows ONLY on a
   // ready open card (deps met) — Backlog (blocked open) carries no dispatch.
   // 리뷰 3차 P1: safe가 malformed(누락·오타)면 Run 노출 금지 — 실행기(run_loop)도
-  // rc=14로 거부하지만(서버가 권위), UI도 fail-closed로 일치시킨다.
-  const runButton = isLocalhost && status === 'open' && !blocked && !ticket.safe_malformed
+  // rc=14로 거부하지만(실행기가 권위), UI도 fail-closed로 일치시킨다.
+  // 리뷰 5차 P2: status 누락·권위 필드 중복도 실행기가 거부하므로 동일하게 미노출.
+  const runButton = isLocalhost && status === 'open' && !blocked
+      && !ticket.safe_malformed && !ticket.status_missing && !ticket.authority_malformed
     ? renderWriteButton({
         label: 'Run',
         cliCommand: `./scripts/run_loop.sh ${ticket.id}`,

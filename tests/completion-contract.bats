@@ -341,3 +341,58 @@ EOF
   git -C "$main_home" diff --cached --name-only | grep -qx "src/app.js"
   grep -q "user staged change" "$main_home/src/app.js"
 }
+
+# ── 리뷰 5차 P1: NUL-safe 경로 해시 + index blob fingerprint 회귀 ─────────────
+
+@test "C13: non-ASCII path pre-existing dirty file modified further -> no-commit rc=7" {
+  local main_home="$TEST_BASE/main-home"
+  _make_home "$main_home"
+  # 비ASCII 경로 추적 파일 (--name-only 텍스트 출력에서 C-quote되는 경로)
+  echo "v1" > "$main_home/src/한글 파일.txt"
+  git -C "$main_home" add "src/한글 파일.txt"
+  git -C "$main_home" commit -q -m "add non-ascii tracked file"
+  echo "user wip" >> "$main_home/src/한글 파일.txt"   # 사이클 전 dirty
+
+  cat > "$main_home/scripts/run_headless.sh" <<EOF
+${_fake_headless_prologue}
+echo "persona touched non-ascii dirty file" >> "src/한글 파일.txt"
+tmp=\$(mktemp)
+awk '/^---\$/ { fm = !fm; print; next } fm && \$1 == "status:" { print "status: done"; next } { print }' "\$ticket" > "\$tmp"
+mv "\$tmp" "\$ticket"
+git add "\$ticket"
+git mv "\$ticket" "docs/tickets/DONE/\$(basename "\$ticket")"
+git commit -q -m "\${id}: done, non-ascii dirty file touched" -- docs
+EOF
+  chmod +x "$main_home/scripts/run_headless.sh"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T100' _ "$main_home"
+  [ "$status" -eq 7 ]
+  [[ "$output" == *"no-commit"* ]]
+}
+
+@test "C14: index blob swapped (worktree unchanged, MM preserved) -> no-commit rc=7" {
+  local main_home="$TEST_BASE/main-home"
+  _make_home "$main_home"
+  # 사용자: index-v1 staged + worktree 추가 수정 → porcelain MM
+  echo "user-index-v1" >> "$main_home/src/app.js"
+  git -C "$main_home" add src/app.js
+  echo "user-worktree" >> "$main_home/src/app.js"
+
+  cat > "$main_home/scripts/run_headless.sh" <<EOF
+${_fake_headless_prologue}
+# worktree는 그대로 두고 index blob만 교체 — porcelain 행(MM src/app.js) 불변
+sha=\$(printf 'persona-index-v2\n' | git hash-object -w --stdin)
+git update-index --cacheinfo "100644,\$sha,src/app.js"
+tmp=\$(mktemp)
+awk '/^---\$/ { fm = !fm; print; next } fm && \$1 == "status:" { print "status: done"; next } { print }' "\$ticket" > "\$tmp"
+mv "\$tmp" "\$ticket"
+git add "\$ticket"
+git mv "\$ticket" "docs/tickets/DONE/\$(basename "\$ticket")"
+git commit -q -m "\${id}: done, index blob swapped" -- docs
+EOF
+  chmod +x "$main_home/scripts/run_headless.sh"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T100' _ "$main_home"
+  [ "$status" -eq 7 ]
+  [[ "$output" == *"no-commit"* ]]
+}

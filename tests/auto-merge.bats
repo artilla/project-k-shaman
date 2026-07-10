@@ -421,3 +421,69 @@ _make_rename_repo() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: ELIGIBLE"* ]]
 }
+
+# ── 리뷰 5차 P1/P2: 중복 safe·renameLimit fail-open ───────────────────────────
+
+@test "auto_merge: duplicate safe (false then true) -> NOT ELIGIBLE (condition 1)" {
+  cat > "$TEST_DIR/dup1.md" <<'EOF'
+---
+id: T999
+title: dup
+safe: false
+safe: true
+---
+## AC
+- [ ] x
+EOF
+  printf 'docs/guide.md\n' > "$TEST_DIR/changed.txt"
+  run env \
+    LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
+    RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
+    CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/dup1.md" --changed-files "$TEST_DIR/changed.txt"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"duplicate safe"* ]]
+  [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
+}
+
+@test "auto_merge: duplicate safe (true then false) -> NOT ELIGIBLE (condition 1)" {
+  cat > "$TEST_DIR/dup2.md" <<'EOF'
+---
+id: T999
+title: dup
+safe: true
+safe: false
+---
+## AC
+- [ ] x
+EOF
+  printf 'docs/guide.md\n' > "$TEST_DIR/changed.txt"
+  run env \
+    LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
+    RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
+    CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/dup2.md" --changed-files "$TEST_DIR/changed.txt"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"duplicate safe"* ]]
+  [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
+}
+
+@test "auto_merge: low diff.renameLimit does not silence copy detection (-l0)" {
+  local repo="$TEST_DIR/repo-renamelimit"
+  mkdir -p "$repo"
+  _make_rename_repo "$repo"
+  git -C "$repo" config diff.renameLimit 1
+  cp "$repo/src/app.js" "$repo/docs/app.md"
+  git -C "$repo" add docs/app.md
+  git -C "$repo" commit -q -m "sneaky copy under tiny renameLimit"
+
+  run bash -c '
+    cd "$1" && env \
+      LINT_EXTERNAL_DOCS_CMD="$2" RUN_CHECKS_CMD="$3" CHECK_SCOPE_OMISSION_CMD="$4" \
+      "$5" "$6" --base main
+  ' _ "$repo" "$TEST_DIR/mock_lint.sh" "$TEST_DIR/mock_checks.sh" "$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/ticket.md"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"src/app.js"* ]]
+  [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
+}

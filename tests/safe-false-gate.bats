@@ -466,3 +466,95 @@ EOF
   # 생성 직후 검증기 판정이 ok여야 run_loop도 통과한다
   [[ "$output" == *"validator: ok"* ]]
 }
+
+# ── 리뷰 5차 P1 회귀 ──────────────────────────────────────────────────────────
+
+@test "T18: duplicate status declarations -> run_loop rejects rc=14 (both orders)" {
+  cat > "$TEST_HOME/docs/tickets/T018-test.md" <<'EOF'
+---
+id: T018
+title: Dup status open-done
+status: open
+status: done
+priority: P2
+safe: true
+persona: implementer
+---
+# T018
+EOF
+  cat > "$TEST_HOME/docs/tickets/T019-test.md" <<'EOF'
+---
+id: T019
+title: Dup status done-open
+status: done
+status: open
+priority: P2
+safe: true
+persona: implementer
+---
+# T019
+EOF
+  _commit_all "add T018 T019"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T018' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+  [[ "$output" == *"status"* ]]
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T019' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+  # picker도 양쪽 모두 후보 제외
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"docs/tickets/T018-test.md"* ]]
+  [[ "$output" != *"docs/tickets/T019-test.md"* ]]
+}
+
+@test "T20: CRLF ticket -> run_loop rejects and approve --reject fails without touching file" {
+  printf -- '---\r\nid: T020\r\ntitle: CRLF ticket\r\nstatus: open\r\npriority: P2\r\nsafe: true\r\npersona: implementer\r\n---\r\n\r\n# T020\r\n' \
+    > "$TEST_HOME/docs/tickets/T020-test.md"
+  _commit_all "add T020"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T020' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+
+  local before_hash
+  before_hash=$(git -C "$TEST_HOME" hash-object docs/tickets/T020-test.md)
+  run bash -c 'cd "$1" && ./scripts/approve.sh --reject "bad ticket" T020' _ "$TEST_HOME"
+  [ "$status" -ne 0 ]
+  # 원본 무변조 (과거: rc=0 '성공' 보고 + status 미변경)
+  [ "$(git -C "$TEST_HOME" hash-object docs/tickets/T020-test.md)" = "$before_hash" ]
+}
+
+@test "T21: ---trailing closer -> approve --reject fails without mutating body status" {
+  cat > "$TEST_HOME/docs/tickets/T021-test.md" <<'EOF'
+---
+id: T021
+title: Trailing closer
+status: open
+priority: P2
+safe: true
+persona: implementer
+---trailing
+
+# T021
+
+status: body-note-must-survive
+EOF
+  _commit_all "add T021"
+
+  local before_hash
+  before_hash=$(git -C "$TEST_HOME" hash-object docs/tickets/T021-test.md)
+  run bash -c 'cd "$1" && ./scripts/approve.sh --reject "bad closer" T021' _ "$TEST_HOME"
+  [ "$status" -ne 0 ]
+  [ "$(git -C "$TEST_HOME" hash-object docs/tickets/T021-test.md)" = "$before_hash" ]
+  grep -q "status: body-note-must-survive" "$TEST_HOME/docs/tickets/T021-test.md"
+}
+
+@test "T22: valid ticket --reject succeeds (status skipped, rejection note appended)" {
+  _make_ticket T022 false awaiting-approval
+  _commit_all "add T022"
+
+  run bash -c 'cd "$1" && ./scripts/approve.sh --reject "not needed" T022' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  grep -q '^status: skipped$' "$TEST_HOME/docs/tickets/T022-test.md"
+  grep -q 'reason: "not needed"' "$TEST_HOME/docs/tickets/T022-test.md"
+}

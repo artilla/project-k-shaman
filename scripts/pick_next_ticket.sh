@@ -70,7 +70,19 @@ ticket_id_from_path() {
 }
 
 set_status() {
-  local file="$1" new_status="$2" tmp
+  local file="$1" new_status="$2" tmp ok
+  # 리뷰 5차 P1: 교체 전에 frontmatter 유효성 검증 — 유효하지 않으면(CRLF opener,
+  # `---trailing` closer, status 0/2회) 원본을 건드리지 않고 실패한다.
+  ok=$(awk '
+    NR == 1 { if ($0 != "---") { print "no"; exit }; next }
+    !closed && $0 == "---" { closed = 1; next }
+    !closed && substr($0, 1, 7) == "status:" { n++ }
+    END { if (closed && n == 1) print "yes"; else print "no" }
+  ' "$file")
+  if [ "$ok" != "yes" ]; then
+    echo "❌ $file: frontmatter가 유효하지 않아 status를 변경할 수 없습니다." >&2
+    return 1
+  fi
   tmp=$(mktemp "${TMPDIR:-/tmp}/ralph-status.XXXXXX")
   # 리뷰 3차 P1: 최초 frontmatter 블록만 수정 (본문 `---` 블록의 status: 라인 보호)
   awk -v new_status="$new_status" '
@@ -106,24 +118,39 @@ candidates=()
 for f in docs/tickets/T*.md; do
   [ "$(basename "$f")" = "TEMPLATE.md" ] && continue
 
+  base=$(basename "$f" .md)
+  id="${base%%-*}"
+
+  # 리뷰 5차 P1: 권위 필드(safe/status는 정확히 1회, id/persona는 중복 금지) 단일성 —
+  # 셸은 첫 값, 서버는 마지막 값을 읽으므로 중복 선언은 split-brain을 만든다.
+  dup_bad=0
+  for fkey in safe status; do
+    if [ "$(frontmatter_field_count "$f" "$fkey")" != "1" ]; then
+      echo "[SKIP] $id — frontmatter의 ${fkey} 선언이 정확히 1회가 아닙니다. fail-closed로 제외 — 티켓 frontmatter를 고치세요."
+      dup_bad=1
+      break
+    fi
+  done
+  [ "$dup_bad" = "1" ] && continue
+  for fkey in id persona; do
+    if [ "$(frontmatter_field_count "$f" "$fkey")" -gt 1 ]; then
+      echo "[SKIP] $id — frontmatter의 ${fkey} 선언이 중복입니다. fail-closed로 제외 — 티켓 frontmatter를 고치세요."
+      dup_bad=1
+      break
+    fi
+  done
+  [ "$dup_bad" = "1" ] && continue
+
   status=$(field_of "$f" status || true)
   # 'open' 만 후보. done/skipped/blocked/awaiting-approval 는 제외.
   [ "$status" = "open" ] || continue
 
   # Reservation lock(state/reservations/<TXXX>.d)이 잡혀 있으면 다른 워커가 처리 중 → 제외.
-  base=$(basename "$f" .md)
-  id="${base%%-*}"
   if [ -d "state/reservations/${id}.d" ]; then continue; fi
 
   safe=$(field_of "$f" safe || true)
   # 리뷰 2차 P1-6: safe는 정확히 'true'|'false'만 허용. 과거에는 "false가 아니면 후보"라서
   # 누락·오타('True', 'yes' 등) 티켓이 승인 게이트 없이 실행됐다 — fail-closed로 제외.
-  # 리뷰 3차 P1: 최초 frontmatter에서 정확히 1회 선언 필수 (누락·중복 모두 제외).
-  safe_count=$(frontmatter_field_count "$f" safe)
-  if [ "$safe_count" != "1" ]; then
-    echo "[SKIP] $id — frontmatter의 safe 선언이 ${safe_count}회: 정확히 1회 필요. fail-closed로 제외 — 티켓 frontmatter를 고치세요."
-    continue
-  fi
   case "$safe" in
     true) ;;
     false)

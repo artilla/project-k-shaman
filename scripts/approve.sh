@@ -60,7 +60,21 @@ fi
 TICKET="${matches[0]}"
 
 set_status() {
-  local file="$1" new_status="$2" tmp
+  local file="$1" new_status="$2" tmp ok
+  # 리뷰 5차 P1: 교체 전에 frontmatter 유효성을 검증한다 — CRLF 티켓(opener 불일치)은
+  # 아무것도 안 바꾸면서 rc=0을 반환했고, `---trailing` closer는 본문 status:까지
+  # 변조했다. opener(1행 정확히 ---)·closer(정확히 ---)·status 정확히 1회가 아니면
+  # 원본을 건드리지 않고 실패한다.
+  ok=$(awk '
+    NR == 1 { if ($0 != "---") { print "no"; exit }; next }
+    !closed && $0 == "---" { closed = 1; next }
+    !closed && substr($0, 1, 7) == "status:" { n++ }
+    END { if (closed && n == 1) print "yes"; else print "no" }
+  ' "$file")
+  if [ "$ok" != "yes" ]; then
+    echo "❌ $file: frontmatter가 유효하지 않아 status를 변경할 수 없습니다 (1행 '---' opener, '---' closer, status 정확히 1회 필요 — CRLF 여부도 확인하세요)." >&2
+    return 1
+  fi
   tmp=$(mktemp "${TMPDIR:-/tmp}/approve-status.XXXXXX")
   # 리뷰 3차 P1: 최초 frontmatter 블록만 수정 (본문 `---` 블록의 status: 라인 보호)
   awk -v new_status="$new_status" '

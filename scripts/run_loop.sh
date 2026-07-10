@@ -463,26 +463,33 @@ _op_dirty_lines() {
   '
 }
 
-# 리뷰 3차 P1 + 4차 P1: 완료 판정용 WIP fingerprint.
+# 리뷰 3차/4차/5차 P1: 완료 판정용 WIP fingerprint.
 # 디스패치 직전과 완료 시점의 fingerprint가 "동일"해야 완료 — 사이클 중 WIP의
-# 추가·삭제·내용 변경을 모두 잡는 양방향 비교다. (porcelain 행만 비교하던 델타는
-# 기존 dirty 파일의 추가 수정, `?? dir/` 내부의 새 파일, 기존 untracked 삭제를
-# 놓쳤다.) 구성: porcelain 상태 행 + dirty(staged/unstaged/미추적) 파일별 내용 해시.
+# 추가·삭제·내용 변경을 모두 잡는 양방향 비교다. 구성:
+#   (1) porcelain 상태 행
+#   (2) staged/unstaged diff --raw (index blob SHA·mode 포함 — worktree가 같아도
+#       index 내용만 바꾸는 우회를 잡는다, 5차 리뷰)
+#   (3) dirty(staged/unstaged/미추적) 파일별 worktree 내용 해시
+# 경로 나열은 전부 -z(NUL 구분) — --name-only 텍스트 출력은 비ASCII·탭 경로를
+# C-quote해 `[ -f ]`가 실패, 해시가 absent로 고정되는 fail-open이 있었다(5차 리뷰).
 # 루프 자신이 쓰는 .ralph/(로그)·state/(예약 메타)는 gitignore 여부와 무관하게 제외.
 _wip_fingerprint() {
   local f
   {
     git status --porcelain 2>/dev/null | grep -vE '^.{3}(\.ralph/|state/)' | LC_ALL=C sort
-    { git diff --name-only 2>/dev/null
-      git diff --cached --name-only 2>/dev/null
-      git ls-files --others --exclude-standard 2>/dev/null
-    } | grep -vE '^(\.ralph/|state/)' | LC_ALL=C sort -u | while IFS= read -r f; do
+    { git diff --raw -z 2>/dev/null; git diff --cached --raw -z 2>/dev/null; } \
+      | tr '\0' '\n' | LC_ALL=C sort
+    { git diff --name-only -z 2>/dev/null
+      git diff --cached --name-only -z 2>/dev/null
+      git ls-files --others --exclude-standard -z 2>/dev/null
+    } | while IFS= read -r -d '' f; do
+      case "$f" in .ralph/*|state/*) continue ;; esac
       if [ -f "$f" ]; then
         printf '%s %s\n' "$f" "$(git hash-object -- "$f" 2>/dev/null || echo unhashable)"
       else
         printf '%s absent\n' "$f"
       fi
-    done
+    done | LC_ALL=C sort -u
   } 2>/dev/null
 }
 
@@ -675,14 +682,30 @@ cycle_one() {
 
   # 리뷰 2차 P1-6: safe는 정확히 'true'|'false'만 허용. 누락·오타('True', 'yes', 따옴표 등)는
   # 과거 "false가 아니면 safe" 판정으로 승인 게이트를 우회했다 — fail-closed로 실행 거부.
-  # 리뷰 3차 P1: 최초 frontmatter 블록에서 정확히 한 번 선언돼야 한다 — 누락(0)과
-  # 중복(2+, 마지막 선언이 이기는 파서 차이를 노린 주입) 모두 거부.
-  local safe_count; safe_count=$(frontmatter_field_count "$ticket" safe)
-  if [ "$safe_count" != "1" ]; then
-    echo "❌ ${id} — frontmatter의 safe 선언이 ${safe_count}회입니다. 정확히 1회 필요 (fail-closed)."
-    add_failure "$id" "safe-malformed" "${i:-0}" "$ticket"
-    return 14
-  fi
+  # 리뷰 3차 P1: safe는 최초 frontmatter 블록에서 정확히 한 번 선언돼야 한다.
+  # 리뷰 5차 P1: 권위 필드 전체로 확장 — 셸은 첫 값, 서버는 마지막 값을 읽으므로 중복
+  # 선언(예: status: open → status: done)은 실행 상태 split-brain을 만든다.
+  # safe/status는 정확히 1회, id/persona는 중복(2회+) 금지(누락은 기존 기본값 경로 유지).
+  local fkey fcount
+  for fkey in safe status id persona; do
+    fcount=$(frontmatter_field_count "$ticket" "$fkey")
+    case "$fkey" in
+      safe|status)
+        if [ "$fcount" != "1" ]; then
+          echo "❌ ${id} — frontmatter의 ${fkey} 선언이 ${fcount}회입니다. 정확히 1회 필요 (fail-closed)."
+          add_failure "$id" "frontmatter-malformed" "${i:-0}" "$ticket"
+          return 14
+        fi
+        ;;
+      *)
+        if [ "$fcount" -gt 1 ]; then
+          echo "❌ ${id} — frontmatter의 ${fkey} 선언이 ${fcount}회입니다. 중복 선언 금지 (fail-closed)."
+          add_failure "$id" "frontmatter-malformed" "${i:-0}" "$ticket"
+          return 14
+        fi
+        ;;
+    esac
+  done
   case "$safe" in
     true|false) ;;
     *)

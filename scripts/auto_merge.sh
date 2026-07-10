@@ -95,6 +95,7 @@ _fn_id="$(basename "$TICKET_PATH" | grep -oE '^T[0-9]+' || true)"
 
 _fm_id=""
 _fm_safe=0
+_fm_safe_count=0
 _fm_found=0
 _fm_closed=0
 _fm_state=0
@@ -117,6 +118,11 @@ while IFS= read -r _fmline; do
         id:*)
           _fm_id="$(printf '%s' "$_fmline" | sed 's/^id:[[:space:]]*//' | tr -d '[:space:]')"
           ;;
+      esac
+      # 리뷰 5차 P1: safe 선언 횟수 집계 — 중복(false→true, true→false 어느 순서든)은
+      # 셸/서버 파서가 서로 다른 값을 읽는 주입 벡터라 fail-closed로 거부한다.
+      case "$_fmline" in
+        safe:*) _fm_safe_count=$((_fm_safe_count + 1)) ;;
       esac
       if printf '%s\n' "$_fmline" | grep -qE '^safe:[[:space:]]*true[[:space:]]*$'; then
         _fm_safe=1
@@ -165,8 +171,10 @@ fi
 # 않은" 파일을 copy 소스 후보로 검사하지 않아 src/app.js → docs/app.md 복사가 A(추가)로만
 # 보여 조건 2를 우회했다 — --find-copies-harder로 모든 파일을 소스 후보에 포함한다.
 # pipefail(스크립트 상단 set -euo pipefail)이 git 실패를 함수 종료 코드로 전파한다.
+# 리뷰 5차 P2: diff.renameLimit이 낮게 설정된 저장소에서는 rename/copy 탐지가 조용히
+# 포기되고 `A docs/...`로 위장된다(fail-open) — -l0으로 탐지 한도를 해제한다.
 _diff_paths() {
-  git diff --name-status -M -C --find-copies-harder "$1" | awk -F'\t' '
+  git diff --name-status -M -C --find-copies-harder -l0 "$1" | awk -F'\t' '
     $1 ~ /^[RC]/ { if ($2 != "") print $2; if ($3 != "") print $3; next }
     { if ($2 != "") print $2 }
   '
@@ -194,9 +202,12 @@ if [ -n "$_fn_id" ] && [ -n "$_fm_id" ] && [ "$_fm_id" != "$_fn_id" ]; then
   ELIGIBLE=1
 fi
 
-# 조건 1: safe:true (Fix 1: frontmatter 블록 한정)
-if [ "$_fm_found" -eq 1 ] && [ "$_fm_closed" -eq 1 ] && [ "$_fm_safe" -eq 1 ]; then
+# 조건 1: safe:true (Fix 1: frontmatter 블록 한정, 리뷰 5차: 정확히 1회 선언)
+if [ "$_fm_found" -eq 1 ] && [ "$_fm_closed" -eq 1 ] && [ "$_fm_safe" -eq 1 ] && [ "$_fm_safe_count" -eq 1 ]; then
   echo "[PASS] condition 1: safe:true"
+elif [ "$_fm_safe_count" -gt 1 ]; then
+  echo "[FAIL] condition 1: duplicate safe declarations (${_fm_safe_count}) — fail-closed"
+  ELIGIBLE=1
 else
   echo "[FAIL] condition 1: safe:true not found in ticket frontmatter"
   ELIGIBLE=1
