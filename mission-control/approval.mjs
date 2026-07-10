@@ -19,7 +19,7 @@
 //   node mission-control/approval.mjs <root> <TXXX>
 //   stdout: "<state>[ 누락필드...]"   exit: ok=0 / missing=3 / malformed=4 / stale=5 / usage=2
 
-import { readFileSync, existsSync, readdirSync, realpathSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, realpathSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -100,6 +100,17 @@ export function validateApproval(root, id) {
   let text;
   try {
     if (!existsSync(f)) return { state: 'missing', missing: [...REQUIRED_FIELDS] };
+    // 리뷰 10차 P1: 승인 artifact 경계 — 마커가 symlink이거나 approvals 디렉터리의
+    // 물리 경로가 canonical(root/docs/approvals)이 아니면 승인으로 인정하지 않는다.
+    const st = lstatSync(f);
+    if (st.isSymbolicLink() || !st.isFile()) {
+      return { state: 'unverifiable', missing: [], reason: '승인 마커가 symlink/비정규 파일 — canonical 경계 위반' };
+    }
+    const dirReal = realpathSync(join(root, 'docs', 'approvals'));
+    const wantReal = join(realpathSync(root), 'docs', 'approvals');
+    if (dirReal !== wantReal) {
+      return { state: 'unverifiable', missing: [], reason: 'docs/approvals 물리 경로가 canonical이 아님 (symlink?)' };
+    }
     text = readFileSync(f, 'utf8');
   } catch {
     return { state: 'missing', missing: [...REQUIRED_FIELDS] };

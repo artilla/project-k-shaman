@@ -433,32 +433,55 @@ if [ "$ELIGIBLE" -eq 0 ]; then
       >> "$STATE_DIR/auto_merge.log"
   }
 
-  # 리뷰 8차 P1: 저장소 단위 lock — 동시 auto-merge/외부 조작과의 경합 창을 좁힌다.
-  # 리뷰 9차 P2: lock에 pid를 기록하고, 소유 프로세스가 죽었으면 stale로 재획득한다
-  # (SIGKILL 후 영구 차단 방지).
+  # 리뷰 10차 P1: clean 판정 공용 helper —
+  #   (a) --untracked-files=all: status.showUntrackedFiles=no 설정과 무관하게 미추적 검출
+  #   (b) 자기 자신의 lock 경로는 제외 (기본 STATE_DIR=state가 repo 안이라 lock 생성
+  #       직후 자신을 dirty로 오인해 항상 TOCTOU 거부되던 자기-교착 수정)
+  # git 실패는 rc로 전파 (fail-closed).
+  _wt_status_or_fail() {
+    local out
+    out="$(git status --porcelain --untracked-files=all)" || return 1
+    printf '%s' "$out" | grep -vE 'auto_merge\.lock\.d' || true
+  }
+
+  # 리뷰 8차 P1: 저장소 단위 lock. 리뷰 10차 P1: 소유는 pid가 아니라 고유 token으로
+  # 판정하고(다른 live owner가 lock을 교체해도 남의 lock을 rm하지 않음), stale 회수는
+  # 원자적 rename으로 한다 (확인-후-삭제 경합 제거).
   AM_LOCK="$STATE_DIR/auto_merge.lock.d"
-  if ! mkdir "$AM_LOCK" 2>/dev/null; then
+  AM_LOCK_TOKEN="$$-$RANDOM-$(date +%s)"
+  _am_acquire_lock() {
+    mkdir "$AM_LOCK" 2>/dev/null || return 1
+    printf '%s' "$AM_LOCK_TOKEN" > "$AM_LOCK/token"
+    echo "$$" > "$AM_LOCK/pid"
+    return 0
+  }
+  if ! _am_acquire_lock; then
     _old_pid="$(cat "$AM_LOCK/pid" 2>/dev/null || true)"
     if [ -n "$_old_pid" ] && ! kill -0 "$_old_pid" 2>/dev/null; then
-      echo "[WARN] stale auto-merge lock (pid ${_old_pid} dead) — reclaiming"
-      rm -rf "$AM_LOCK"
-      mkdir "$AM_LOCK" 2>/dev/null || { echo "[FAIL] lock reclaim raced — retry later"; exit 1; }
+      echo "[WARN] stale auto-merge lock (pid ${_old_pid} dead) — reclaiming atomically"
+      if mv "$AM_LOCK" "${AM_LOCK}.reclaim.$$" 2>/dev/null; then
+        rm -rf "${AM_LOCK}.reclaim.$$"
+        _am_acquire_lock || { echo "[FAIL] lock reclaim raced — retry later"; exit 1; }
+      else
+        echo "[FAIL] lock reclaim raced — retry later"
+        exit 1
+      fi
     else
       echo "[FAIL] another auto-merge is in progress (lock: ${AM_LOCK}, pid ${_old_pid:-unknown})"
       exit 1
     fi
   fi
-  echo "$$" > "$AM_LOCK/pid"
   # 리뷰 9차 P1: phase-aware 감사 — EXECUTED/ROLLED_BACK 확정 전에 종료(SIGTERM 등)되면
   # INTERRUPTED:<phase>를 남겨 병합 잔존 여부를 감사 로그에서 알 수 있게 한다.
+  # 리뷰 10차 P1: lock 해제는 token이 자신일 때만 (남의 lock 삭제 금지).
   AM_PHASE="pre-merge"
-  trap '[ "$AM_PHASE" != "done" ] && _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "INTERRUPTED:${AM_PHASE}"; rmdir "$AM_LOCK" 2>/dev/null || rm -rf "$AM_LOCK" 2>/dev/null || true' EXIT
+  trap '[ "$AM_PHASE" != "done" ] && _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "INTERRUPTED:${AM_PHASE}"; [ "$(cat "$AM_LOCK/token" 2>/dev/null)" = "$AM_LOCK_TOKEN" ] && rm -rf "$AM_LOCK" 2>/dev/null || true' EXIT
 
   # 리뷰 7차 P1: 병합 직전 base 재검증 — 검사(조건 3·4) 중 현재 브랜치 HEAD가
   # 움직였거나(dirty 포함) 브랜치가 바뀌었으면 병합을 거부한다 (base 측 TOCTOU).
   # 리뷰 8차 P1: git status 실패도 fail-closed (빈 출력으로 오인 금지).
   PRE_MERGE_HEAD="$(git rev-parse HEAD)" || exit 1
-  if ! _wt_status2="$(git status --porcelain)"; then
+  if ! _wt_status2="$(_wt_status_or_fail)"; then
     echo "[FAIL] git status failed before merge — refusing"
     AM_PHASE="done"; _am_log "$PRE_MERGE_HEAD" "REFUSED:status-failed"
     exit 1
@@ -501,7 +524,8 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     # 브랜치를 바꿨거나 산출물(untracked 포함)을 남겼으면 EXECUTED가 아니다.
     _final_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
     _final_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
-    if ! _final_status="$(git status --porcelain)"; then _final_status="__STATUS_FAILED__"; fi
+    # 리뷰 10차 P1: 사용자 설정(status.showUntrackedFiles=no)과 독립적인 clean 판정.
+    if ! _final_status="$(_wt_status_or_fail)"; then _final_status="__STATUS_FAILED__"; fi
     if [ "$_final_head" != "$MERGE_COMMIT" ] || [ "$_final_branch" != "$BASE_BRANCH" ] || [ -n "$_final_status" ]; then
       AM_PHASE="done"; _am_log "$_final_head" "RECOVERY_REQUIRED"
       echo "[FAIL] post-check 후 최종 상태 불일치 (HEAD=${_final_head} expected=${MERGE_COMMIT}, branch=${_final_branch}, dirty=$([ -n "$_final_status" ] && echo yes || echo no)) — RECOVERY_REQUIRED, 자동 복구하지 않음"
@@ -512,20 +536,29 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     exit 0
   else
     # 리뷰 8차 P1: 가변 ORIG_HEAD가 아니라 고정 BASE_OID로 복구.
-    # 리뷰 9차 P1: HEAD가 여전히 우리의 병합 커밋일 때만 reset — 그 사이 다른
-    # 프로세스가 커밋을 얹었으면 소유권 상실 → reset 금지, RECOVERY_REQUIRED.
-    _cur_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
-    if [ "$_cur_head" = "$MERGE_COMMIT" ] && git reset --hard "$BASE_OID" >/dev/null 2>&1; then
+    # 리뷰 9차/10차 P1: 복구는 "정확한 base ref"에 대한 CAS(update-ref <ref> <new> <old>)로
+    # 수행한다 — HEAD/현재 브랜치가 post-check에 의해 바뀌었어도 base ref가 여전히
+    # 우리의 MERGE_COMMIT일 때만 원자적으로 BASE_OID로 되돌리고, 아니면(다른 프로세스
+    # 커밋) 건드리지 않고 RECOVERY_REQUIRED. HEAD-확인-후-reset 경합도 CAS가 제거한다.
+    if git update-ref -m "auto-merge rollback ${TICKET_ID}" \
+         "refs/heads/${BASE_BRANCH}" "$BASE_OID" "$MERGE_COMMIT" 2>/dev/null; then
+      # HEAD가 base 브랜치를 가리키면 워킹트리/index도 동기화 (ref는 이미 정확)
+      if [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$BASE_BRANCH" ]; then
+        git reset --hard "$BASE_OID" >/dev/null 2>&1 \
+          || echo "[WARN] base ref는 복구됐으나 워킹트리 동기화 실패 — git reset --hard ${BASE_OID} 를 수동 실행하세요"
+      else
+        echo "[WARN] base ref는 복구됐으나 HEAD가 '${BASE_BRANCH}'가 아닙니다 — 워킹트리를 확인하세요"
+      fi
       AM_PHASE="done"; _am_log "$MERGE_COMMIT" "ROLLED_BACK"
-      echo "[FAIL] post-merge run_checks 실패 — rollback"
-      _leftover="$(git status --porcelain 2>/dev/null || true)"
+      echo "[FAIL] post-merge run_checks 실패 — rollback (ref CAS)"
+      _leftover="$(_wt_status_or_fail 2>/dev/null || true)"
       if [ -n "$_leftover" ]; then
         echo "[WARN] rollback 후 미추적/변경 산출물이 남아 있습니다 (수동 정리 필요):"
         printf '%s\n' "$_leftover"
       fi
     else
-      AM_PHASE="done"; _am_log "$_cur_head" "RECOVERY_REQUIRED"
-      echo "[FAIL] post-merge run_checks 실패 + HEAD 소유권 상실 또는 reset 실패 — RECOVERY_REQUIRED (자동 reset 안 함)"
+      AM_PHASE="done"; _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED"
+      echo "[FAIL] post-merge run_checks 실패 + base ref CAS 실패(다른 프로세스의 커밋?) — RECOVERY_REQUIRED (자동 복구 안 함)"
     fi
     exit 1
   fi

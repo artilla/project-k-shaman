@@ -71,6 +71,26 @@ if [ "$_tdir_real" != "$(pwd -P)/docs/tickets" ]; then
 fi
 
 
+
+# 리뷰 10차 P1: 쓰기 직전 identity 재검증 + same-dir temp + rename (TOCTOU/hardlink 차단).
+_file_links() {
+  if stat -f%l "$1" >/dev/null 2>&1; then stat -f%l "$1"; else stat -c%h "$1"; fi
+}
+_write_guard() {
+  local f="$1" want_dir="$2"
+  [ -h "$f" ] && { echo "❌ 쓰기 직전 재검증 실패: symlink 교체 감지" >&2; return 1; }
+  [ -f "$f" ] || { echo "❌ 쓰기 직전 재검증 실패: regular file 아님" >&2; return 1; }
+  [ "$(_file_links "$f")" = "1" ] || { echo "❌ 쓰기 직전 재검증 실패: hardlink(links>1)" >&2; return 1; }
+  [ "$(cd "$(dirname "$f")" && pwd -P)" = "$(pwd -P)/$want_dir" ] || { echo "❌ 쓰기 직전 재검증 실패: canonical 경로 아님" >&2; return 1; }
+}
+_safe_write() {  # stdin → $1 (same-dir temp + rename), $2=canonical 상대 디렉터리
+  local f="$1" want_dir="$2" tmp
+  tmp=$(mktemp "${want_dir}/.write.XXXXXX") || return 1
+  cat > "$tmp"
+  if ! _write_guard "$f" "$want_dir"; then rm -f "$tmp"; return 1; fi
+  mv -f "$tmp" "$f"
+}
+
 set_status() {
   local file="$1" new_status="$2" tmp ok
   # 리뷰 5차 P1: 교체 전에 frontmatter 유효성을 검증한다 — CRLF 티켓(opener 불일치)은
@@ -87,30 +107,41 @@ set_status() {
     echo "❌ $file: frontmatter가 유효하지 않아 status를 변경할 수 없습니다 (1행 '---' opener, '---' closer, status 정확히 1회 필요 — CRLF 여부도 확인하세요)." >&2
     return 1
   fi
-  tmp=$(mktemp "${TMPDIR:-/tmp}/approve-status.XXXXXX")
   # 리뷰 3차 P1: 최초 frontmatter 블록만 수정 (본문 `---` 블록의 status: 라인 보호)
+  # 리뷰 10차 P1: same-dir temp + rename + 직전 재검증
   awk -v new_status="$new_status" '
     NR == 1 && $0 == "---" { fm = 1; print; next }
     fm == 1 && $0 == "---" { fm = 2; print; next }
     fm == 1 && substr($0, 1, 7) == "status:" { print "status: " new_status; next }
     { print }
-  ' "$file" > "$tmp"
-  mv "$tmp" "$file"
+  ' "$file" | _safe_write "$file" "docs/tickets" || return 1
 }
 
 if [ -n "$REJECT_REASON" ]; then
   set_status "$TICKET" "skipped"
+  # 리뷰 10차 P1: append(>>)는 symlink를 따라간다 — rewrite + rename으로 교체.
   {
+    cat "$TICKET"
     printf '\n## Rejection\n\n'
     printf -- '- rejected_at: "%s"\n' "$(date -Iseconds)"
     printf -- '- reason: "%s"\n' "$REJECT_REASON"
-  } >> "$TICKET"
+  } | _safe_write "$TICKET" "docs/tickets" || exit 2
   echo "rejected $ID: $REJECT_REASON"
   exit 0
 fi
 
 mkdir -p docs/approvals
+# 리뷰 10차 P1: 승인 artifact 경계 — approvals 디렉터리(및 조상 docs)가 symlink면
+# 마커가 저장소 밖에 쓰인다. 물리 경로 대조 + 마커 자체 symlink 거부.
+if [ -h "docs/approvals" ] || [ "$(cd docs/approvals && pwd -P)" != "$(pwd -P)/docs/approvals" ]; then
+  echo "❌ docs/approvals 물리 경로가 canonical이 아닙니다 (symlink?) — 승인 거부 (fail-closed)." >&2
+  exit 2
+fi
 MARKER="docs/approvals/${ID}.md"
+if [ -h "$MARKER" ]; then
+  echo "❌ ${MARKER} 가 symlink입니다 — 승인 마커로 사용할 수 없습니다 (fail-closed)." >&2
+  exit 2
+fi
 APPROVER="${RALPH_APPROVED_BY:-}"
 if [ -z "$APPROVER" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   APPROVER="$(git config user.name || true)"
@@ -147,12 +178,20 @@ ROLLBACK_DRAFT="$(section_oneline "$TICKET" '롤백')"
 [ -n "$ROLLBACK_DRAFT" ] || ROLLBACK_DRAFT="git revert <commit>"
 
 if [ ! -f "$MARKER" ]; then
-  cat > "$MARKER" <<EOF
+  # 리뷰 10차 P1: 마커도 same-dir temp + rename — 생성 창에서의 symlink 교체 차단.
+  _mtmp=$(mktemp "docs/approvals/.marker.XXXXXX")
+  cat > "$_mtmp" <<EOF
 approved_by: "$APPROVER"
 approved_at: "$(date -Iseconds)"
 scope_confirmation: "$(yaml_escape "$SCOPE_DRAFT")"
 rollback_plan: "$(yaml_escape "$ROLLBACK_DRAFT")"
 EOF
+  if [ -h "$MARKER" ]; then
+    rm -f "$_mtmp"
+    echo "❌ ${MARKER} 가 symlink로 교체됨 — 거부 (fail-closed)." >&2
+    exit 2
+  fi
+  mv -f "$_mtmp" "$MARKER"
 fi
 
 echo "approval marker ready: $MARKER"

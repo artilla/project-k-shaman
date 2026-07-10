@@ -85,12 +85,16 @@ if [ "$GIT_REPO" = "0" ] && [ "$DRY_RUN" = "0" ]; then
 fi
 
 # ────────── 동시 실행 방지 (이 ROOT의 state/lock만 본다) ──────────
-if [ "$DRY_RUN" = "0" ] && [ -f state/lock ]; then
-  echo "🔒 state/lock 존재 — 누군가 실행 중이거나, 직전 사이클이 비정상 종료됨." >&2
-  echo "   현재 ROOT: $ROOT" >&2
-  echo "   확인 후 'rm $ROOT/state/lock' 으로 해제하세요." >&2
-  exit 3
-fi
+# 리뷰 10차 P1: 존재 확인→생성의 비원자 창에서 두 루프가 동시에 통과했다 —
+# noclobber(O_EXCL) 원자 획득으로 교체. 획득 함수는 시작 경로와 dry-run→co-pilot
+# 런타임 전환(apply_loop_mode)이 공유한다.
+acquire_global_lock() {
+  if ( set -o noclobber; printf '%s\n' "$LOCK_TOKEN" > state/lock ) 2>/dev/null; then
+    LOCK_OWNED=1
+    return 0
+  fi
+  return 1
+}
 
 # 정리할 reservation id 추적 (trap에서 사용)
 OWNED_RESERVATIONS=()
@@ -112,10 +116,10 @@ release_owned_reservation() {
 }
 
 cleanup() {
-  if [ "${LOCK_OWNED:-0}" = "1" ]; then
-    if [ "$(cat state/lock 2>/dev/null)" = "$LOCK_TOKEN" ]; then
-      rm -f state/lock 2>/dev/null || true
-    fi
+  if [ "${LOCK_OWNED:-0}" = "1" ] && [ "$(cat state/lock 2>/dev/null)" = "$LOCK_TOKEN" ]; then
+    # 리뷰 10차 P2: current_ticket도 lock 토큰이 여전히 자신일 때만 제거 —
+    # 토큰이 교체됐다면(다른 세션이 인수) 그 세션의 current_ticket일 수 있다.
+    rm -f state/lock 2>/dev/null || true
     rm -f state/current_ticket 2>/dev/null || true
   fi
   for id in "${OWNED_RESERVATIONS[@]:-}"; do
@@ -123,7 +127,29 @@ cleanup() {
   done
 }
 trap cleanup EXIT
-if [ "$DRY_RUN" = "0" ]; then printf '%s\n' "$LOCK_TOKEN" > state/lock; LOCK_OWNED=1; fi
+
+# 리뷰 10차 P1: 부모가 TERM/INT로 죽을 때 살아 있는 headless 자식(프로세스 그룹)을
+# 먼저 종료·reap한 뒤에야 EXIT trap이 coordination state(lock/reservation)를
+# 해제한다 — 과거에는 lock이 먼저 풀려 고아 자식이 나중에 파일을 썼다.
+HEADLESS_PID=""
+on_signal() {
+  if [ -n "${HEADLESS_PID:-}" ]; then
+    kill -TERM -- "-${HEADLESS_PID}" 2>/dev/null || kill -TERM "${HEADLESS_PID}" 2>/dev/null || true
+    wait "${HEADLESS_PID}" 2>/dev/null || true
+    HEADLESS_PID=""
+  fi
+  exit 143   # EXIT trap(cleanup)이 이어서 lock/reservation 해제
+}
+trap on_signal TERM INT
+
+if [ "$DRY_RUN" = "0" ]; then
+  if ! acquire_global_lock; then
+    echo "🔒 state/lock 존재 — 누군가 실행 중이거나, 직전 사이클이 비정상 종료됨." >&2
+    echo "   현재 ROOT: $ROOT" >&2
+    echo "   확인 후 'rm $ROOT/state/lock' 으로 해제하세요." >&2
+    exit 3
+  fi
+fi
 
 add_failure() {
   # add_failure <ticket_id> <stage> <cycle_retry> <message>
@@ -547,12 +573,14 @@ _wip_fingerprint() {
   printf 'files:%s\n' "$part"
 }
 
+# 리뷰 10차 P1: picker의 실패 rc를 그대로 전달한다 — 과거에는 rc가 삼켜져 오류
+# (symlink 구성, 내부 실패 등)가 "후보 없음(정상 idle)"으로 위장됐다.
 pick_next_ticket_path() {
-  local out line ticket_line=""
+  local out rc=0 line ticket_line=""
   if [ "$SAFE_ONLY" = "1" ]; then
-    out=$(./scripts/pick_next_ticket.sh --safe-only)
+    out=$(./scripts/pick_next_ticket.sh --safe-only) || rc=$?
   else
-    out=$(./scripts/pick_next_ticket.sh)
+    out=$(./scripts/pick_next_ticket.sh) || rc=$?
   fi
   while IFS= read -r line; do
     [ -z "$line" ] && continue
@@ -562,6 +590,7 @@ pick_next_ticket_path() {
     esac
   done <<< "$out"
   echo "$ticket_line"
+  return "$rc"
 }
 
 # 리뷰 2차 P1-7: 승인 마커 판정 단일 소스 — mission-control/approval.mjs.
@@ -666,11 +695,11 @@ apply_loop_mode() {
     *) return 0 ;;   # unknown/empty token → keep current flags (fail-safe)
   esac
   if [ "$new_dry" = "0" ] && [ "$LOCK_OWNED" = "0" ]; then
-    if [ -f state/lock ]; then
+    # 리뷰 10차 P1: 시작 경로와 동일한 원자적 lock primitive 사용 (존재검사→쓰기 경합 제거).
+    if ! acquire_global_lock; then
       echo "⚠️  loop_mode='${mode}' 요청이나 state/lock을 다른 세션이 보유 — dry-run 유지(락 탈취 금지)." >&2
       return 0
     fi
-    printf '%s\n' "$LOCK_TOKEN" > state/lock && LOCK_OWNED=1
   fi
   if [ "$new_safe" != "$SAFE_ONLY" ] || [ "$new_dry" != "$DRY_RUN" ]; then
     echo "🔀 loop_mode='${mode}' 적용 — safe_only=${new_safe} dry_run=${new_dry} (사이클 경계)"
@@ -688,9 +717,9 @@ cycle_one() {
   apply_loop_mode
 
   # 리뷰 9차 P2: canonical 디렉터리 체인이 symlink면 "후보 없음(idle)"으로 위장하지
-  # 않고 명시적으로 실패한다 (picker exit 2와 짝).
-  if [ -h "docs" ] || [ -h "docs/tickets" ]; then
-    echo "❌ docs 또는 docs/tickets가 symlink입니다 — canonical 경계 위반 (fail-closed)."
+  # 않고 명시적으로 실패한다 (picker exit 2와 짝). 리뷰 10차 P1: DONE/ 포함.
+  if [ -h "docs" ] || [ -h "docs/tickets" ] || [ -h "docs/tickets/DONE" ]; then
+    echo "❌ docs 또는 docs/tickets(/DONE)가 symlink입니다 — canonical 경계 위반 (fail-closed)."
     return 4
   fi
 
@@ -739,10 +768,13 @@ cycle_one() {
       return 11
     fi
     ticket="${specific_matches[0]}"
-  elif [ "$SAFE_ONLY" = "1" ]; then
-    ticket=$(pick_next_ticket_path)
   else
-    ticket=$(pick_next_ticket_path)
+    local picker_rc=0
+    ticket=$(pick_next_ticket_path) || picker_rc=$?
+    if [ "$picker_rc" -ne 0 ]; then
+      echo "❌ pick_next_ticket.sh 실패 (rc=${picker_rc}) — 정상 idle로 처리하지 않습니다 (fail-closed)."
+      return 11
+    fi
   fi
 
   if [ -z "$ticket" ]; then
@@ -1023,12 +1055,22 @@ EOF
 
   local headless_rc reservation_meta
   reservation_meta="$SESSION_STATE_ROOT/state/reservations/${id}.d/meta"
+  # 리뷰 10차 P1: 자체 프로세스 그룹(set -m)으로 디스패치하고 PID를 추적 —
+  # 부모가 TERM을 받으면 on_signal이 이 그룹을 먼저 종료·reap한 뒤 lock을 푼다.
   set +e
-  CLAUDE_TIMEOUT_SECONDS="$timeout_seconds" \
-    RALPH_SESSION_META_FILE="$reservation_meta" \
-    RALPH_STATE_ROOT="$SESSION_STATE_ROOT" \
-    ./scripts/run_headless.sh "$prompt" "$ROOT" 2>&1 | tee -a "$headless_log"
-  headless_rc=${PIPESTATUS[0]}
+  set -m
+  (
+    CLAUDE_TIMEOUT_SECONDS="$timeout_seconds" \
+      RALPH_SESSION_META_FILE="$reservation_meta" \
+      RALPH_STATE_ROOT="$SESSION_STATE_ROOT" \
+      ./scripts/run_headless.sh "$prompt" "$ROOT" 2>&1 | tee -a "$headless_log"
+    exit "${PIPESTATUS[0]}"
+  ) &
+  HEADLESS_PID=$!
+  set +m
+  wait "$HEADLESS_PID"
+  headless_rc=$?
+  HEADLESS_PID=""
   set -e
 
   if [ "$headless_rc" -ne 0 ]; then
@@ -1164,11 +1206,19 @@ EOF
     echo "🤖 마무리 세션(재프롬프트) 디스패치... (stage=$wip_stage)" | tee -a "$headless_log"
     local reprompt_rc
     set +e
-    CLAUDE_TIMEOUT_SECONDS="$timeout_seconds" \
-      RALPH_SESSION_META_FILE="$reservation_meta" \
-      RALPH_STATE_ROOT="$SESSION_STATE_ROOT" \
-      ./scripts/run_headless.sh "$reprompt_prompt" "$ROOT" 2>&1 | tee -a "$headless_log"
-    reprompt_rc=${PIPESTATUS[0]}
+    set -m
+    (
+      CLAUDE_TIMEOUT_SECONDS="$timeout_seconds" \
+        RALPH_SESSION_META_FILE="$reservation_meta" \
+        RALPH_STATE_ROOT="$SESSION_STATE_ROOT" \
+        ./scripts/run_headless.sh "$reprompt_prompt" "$ROOT" 2>&1 | tee -a "$headless_log"
+      exit "${PIPESTATUS[0]}"
+    ) &
+    HEADLESS_PID=$!
+    set +m
+    wait "$HEADLESS_PID"
+    reprompt_rc=$?
+    HEADLESS_PID=""
     set -e
 
     if [ "$reprompt_rc" -ne 0 ]; then

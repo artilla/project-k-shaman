@@ -52,6 +52,29 @@ if [ "$_tdir_real" != "$(pwd -P)/docs/tickets" ]; then
   exit 2
 fi
 
+
+# 리뷰 10차 P1: 쓰기 직전 identity 재검증 + same-dir temp + rename.
+# - 재검증: 초기 검사 후 파일이 symlink/hardlink로 교체되는 TOCTOU 창 축소
+# - rename은 대상 링크 inode 자체를 교체하므로, 그 사이 symlink로 바뀌어도
+#   외부 대상 파일은 변조되지 않는다 (cross-device mv의 copy-through 방지 겸용)
+_file_links() {
+  if stat -f%l "$1" >/dev/null 2>&1; then stat -f%l "$1"; else stat -c%h "$1"; fi
+}
+_write_guard() {
+  local f="$1" want_dir="$2"
+  [ -h "$f" ] && { echo "❌ 쓰기 직전 재검증 실패: symlink 교체 감지" >&2; return 1; }
+  [ -f "$f" ] || { echo "❌ 쓰기 직전 재검증 실패: regular file 아님" >&2; return 1; }
+  [ "$(_file_links "$f")" = "1" ] || { echo "❌ 쓰기 직전 재검증 실패: hardlink(links>1)" >&2; return 1; }
+  [ "$(cd "$(dirname "$f")" && pwd -P)" = "$(pwd -P)/$want_dir" ] || { echo "❌ 쓰기 직전 재검증 실패: canonical 경로 아님" >&2; return 1; }
+}
+_safe_write() {  # stdin → $1 (same-dir temp + rename), $2=canonical 상대 디렉터리
+  local f="$1" want_dir="$2" tmp
+  tmp=$(mktemp "${want_dir}/.write.XXXXXX") || return 1
+  cat > "$tmp"
+  if ! _write_guard "$f" "$want_dir"; then rm -f "$tmp"; return 1; fi
+  mv -f "$tmp" "$f"
+}
+
 # 하드 가드: open 상태만.
 status="$(awk '/^---$/{fm++;next} fm==1 && $1=="status:"{sub(/^[^:]+:[ \t]*/,"");sub(/[ \t]+#.*$/,"");gsub(/^[ \t]+|[ \t]+$/,"");print;exit}' "$file")"
 if [ "$status" != "open" ]; then
@@ -79,7 +102,7 @@ fi
 
 # 프론트매터 블록(1..fm_end) 바이트 보존 + 빈 줄 + 새 본문. in-place 재기록(unlink 비의존).
 content="$( head -n "$fm_end" "$file"; printf '\n'; cat "$tmp" )"
-printf '%s\n' "$content" > "$file"
+printf '%s\n' "$content" | _safe_write "$file" "docs/tickets" || exit 4
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git add "$file"

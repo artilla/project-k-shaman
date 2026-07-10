@@ -17,6 +17,7 @@ setup() {
   cp "$REPO_ROOT/scripts/run_loop.sh" "$TEST_HOME/scripts/run_loop.sh"
   cp "$REPO_ROOT/scripts/orchestrator.sh" "$TEST_HOME/scripts/orchestrator.sh"
   cp "$REPO_ROOT/scripts/approve.sh" "$TEST_HOME/scripts/approve.sh"
+  cp "$REPO_ROOT/scripts/ticket_edit.sh" "$TEST_HOME/scripts/ticket_edit.sh"
   # 리뷰 2차 P1-7: run_loop의 safe:false 승인 판정은 mission-control/approval.mjs 단일 소스.
   cp "$REPO_ROOT/mission-control/approval.mjs" "$TEST_HOME/mission-control/approval.mjs"
   cp "$REPO_ROOT/.gitignore" "$TEST_HOME/.gitignore"
@@ -803,4 +804,124 @@ console.log('nested-quote-preserved');
 " "$REPO_ROOT/mission-control/server.mjs" "$TEST_HOME/nested.md"
   [ "$status" -eq 0 ]
   [[ "$output" == *"nested-quote-preserved"* ]]
+}
+
+# ── 리뷰 10차 P1 회귀 ─────────────────────────────────────────────────────────
+
+@test "T36: concurrent run_loop -> exactly one acquires the atomic lock" {
+  _make_ticket T036 true
+  _commit_all "add T036"
+  cat > "$TEST_HOME/scripts/run_headless.sh" <<'EOF'
+#!/usr/bin/env bash
+sleep 2
+exit 0
+EOF
+  chmod +x "$TEST_HOME/scripts/run_headless.sh"
+
+  ( cd "$TEST_HOME" && ./scripts/run_loop.sh T036 >/dev/null 2>&1 ) &
+  local p1=$!
+  ( cd "$TEST_HOME" && ./scripts/run_loop.sh T036 >/dev/null 2>&1 ) &
+  local p2=$!
+  local r1=0 r2=0
+  wait "$p1" || r1=$?
+  wait "$p2" || r2=$?
+  # 정확히 하나가 lock 거부(rc=3)여야 한다 (둘 다 진입 금지)
+  if [ "$r1" -eq 3 ]; then [ "$r2" -ne 3 ]; else [ "$r2" -eq 3 ]; fi
+}
+
+@test "T37: picker generic failure (rc=42) propagates, not treated as idle" {
+  cat > "$TEST_HOME/scripts/pick_next_ticket.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "picker internal error" >&2
+exit 42
+EOF
+  chmod +x "$TEST_HOME/scripts/pick_next_ticket.sh"
+  _commit_all "fake failing picker"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh' _ "$TEST_HOME"
+  [ "$status" -eq 11 ]
+  [[ "$output" == *"idle로 처리하지 않습니다"* ]]
+  [[ "$output" != *"처리할 open 티켓 없음"* ]]
+}
+
+@test "T38: DONE directory symlink -> picker refuses exit 2 (deps cannot be satisfied externally)" {
+  rmdir "$TEST_HOME/docs/tickets/DONE" 2>/dev/null || rm -rf "$TEST_HOME/docs/tickets/DONE"
+  mkdir -p "$TEST_HOME/external-done"
+  printf -- '---\nid: T001\nstatus: done\nsafe: true\n---\n' > "$TEST_HOME/external-done/T001-dep.md"
+  ln -s ../../external-done "$TEST_HOME/docs/tickets/DONE"
+  cat > "$TEST_HOME/docs/tickets/T038-test.md" <<'EOF'
+---
+id: T038
+title: dep test
+status: open
+priority: P2
+safe: true
+persona: implementer
+depends_on: [T001]
+---
+# T038
+EOF
+  _commit_all "add T038 with symlinked DONE"
+
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 2 ]
+  [[ "$output" != *"T038-test.md"* ]]
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T038 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 4 ]
+}
+
+@test "T39: docs/approvals symlink -> approve refused and validator returns unverifiable" {
+  _make_ticket T039 false
+  _commit_all "add T039"
+  rmdir "$TEST_HOME/docs/approvals" 2>/dev/null || rm -rf "$TEST_HOME/docs/approvals"
+  mkdir -p "$TEST_HOME/external-approvals"
+  ln -s ../external-approvals "$TEST_HOME/docs/approvals"
+
+  run bash -c 'cd "$1" && EDITOR= ./scripts/approve.sh T039' _ "$TEST_HOME"
+  [ "$status" -eq 2 ]
+  [ "$(ls "$TEST_HOME/external-approvals" | wc -l | tr -d ' ')" = "0" ]
+
+  # 외부에 마커가 있어도 검증기는 unverifiable(exit 6) — safe:false 실행 승인 불성립
+  printf -- 'approved_by: "T"\napproved_at: "2026-07-10T09:00:00+09:00"\nscope_confirmation: "Test scope is approved"\nrollback_plan: "git revert HEAD"\n' \
+    > "$TEST_HOME/external-approvals/T039.md"
+  run node "$TEST_HOME/mission-control/approval.mjs" "$TEST_HOME" T039
+  [ "$status" -eq 6 ]
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T039' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+}
+
+@test "T40: hardlinked ticket -> writer refuses (links>1 guard)" {
+  _make_ticket T040 true
+  _commit_all "add T040"
+  ln "$TEST_HOME/docs/tickets/T040-test.md" "$TEST_HOME/hardlink-copy.md"
+
+  run bash -c 'cd "$1" && ./scripts/ticket_edit.sh set-priority T040 P1' _ "$TEST_HOME"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"hardlink"* ]]
+  grep -q '^priority: P2$' "$TEST_HOME/docs/tickets/T040-test.md"
+}
+
+@test "T41: CR-contaminated safe line -> shell rejects and server invalidates the field alike" {
+  printf -- '---\nid: T041\ntitle: t\nstatus: open\npriority: P2\nsafe: true\r\npersona: implementer\n---\n# T041\n' \
+    > "$TEST_HOME/docs/tickets/T041-test.md"
+  _commit_all "add T041 with CR safe line"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T041' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+
+  command -v node >/dev/null 2>&1 || skip "node not available"
+  run node --input-type=module -e "
+import { readFileSync } from 'node:fs';
+const src = readFileSync(process.argv[1], 'utf8');
+const fnStart = src.indexOf('function parseFrontmatter');
+const fnEnd = src.indexOf('// ── Read model');
+const parseFrontmatter = new Function(src.slice(fnStart, fnEnd) + '; return parseFrontmatter;')();
+const fm = parseFrontmatter(readFileSync(process.argv[2], 'utf8'));
+if (fm && fm.safe === true) { console.error('server promoted CR line', fm); process.exit(1); }
+console.log('cr-line-invalidated');
+" "$REPO_ROOT/mission-control/server.mjs" "$TEST_HOME/docs/tickets/T041-test.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cr-line-invalidated"* ]]
 }

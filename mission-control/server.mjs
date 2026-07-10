@@ -182,6 +182,10 @@ function parseFrontmatter(content) {
   const seenKeys = new Set();
   const duplicateKeys = new Set();
   for (const line of match[1].split('\n')) {
+    // 리뷰 10차 P1: LF 문서 속 CR 잔재(`safe: true\r`)를 trim으로 승격하지 않는다 —
+    // 셸(field_of)은 CR을 값에 보존해 거부하므로, 서버도 해당 라인을 무효화해
+    // (필드 미설정 → malformed 흐름) 판정을 일치시킨다.
+    if (line.includes('\r')) continue;
     const m = line.match(/^(\w+):\s*(.*)/);
     if (!m) continue;
     const [, key, rawFull] = m;
@@ -223,6 +227,11 @@ let modelFingerprint = '';
 
 function listTicketFiles() {
   const files = [];
+  // 리뷰 10차 P2: tickets 루트 자체가 symlink면 외부 카드가 렌더·디스패치 대상이 된다 —
+  // 모델에서 통째로 제외 (writer들의 exit 2는 최후 방어선일 뿐).
+  try {
+    if (lstatSync(TICKETS_DIR).isSymbolicLink()) return files;
+  } catch { return files; }
   const collect = (dir, doneDir = false) => {
     if (!existsSync(dir)) return;
     for (const f of readdirSync(dir)) {
@@ -330,6 +339,15 @@ function buildModel() {
             // 리뷰 9차 P1: 실행기(run_loop)는 persona를 [A-Za-z0-9_-]+로 제한한다 —
             // 경로 조작형 persona는 UI/writer에서도 malformed로 취급.
             persona_malformed: !/^[A-Za-z0-9_-]*$/.test(String(fm.persona || '')),
+            // 리뷰 10차 P2: skill 파일이 없거나 symlink면 run_loop rc=12 — writable 카드로
+            // 표시하지 않는다 (persona 기본값 implementer).
+            skill_unavailable: (() => {
+              const persona = /^[A-Za-z0-9_-]+$/.test(String(fm.persona || '')) ? String(fm.persona) : 'implementer';
+              try {
+                const st = lstatSync(join(ROOT, 'skills', `${persona}.md`));
+                return st.isSymbolicLink() || !st.isFile();
+              } catch { return true; }
+            })(),
             // 리뷰 7차 P1: 실행기는 frontmatter id == 파일명 ID(T<숫자>, 전체 basename
             // 형식 포함)를 요구한다 — 불일치 카드(T301 파일 + id:T999)에 Run 미노출.
             id_malformed: (() => {
@@ -981,7 +999,8 @@ function renderTicketCard(ticket, doneIds, nowMs, isLocalhost = true, failCount 
   // 리뷰 5차 P2: status 누락·권위 필드 중복도 실행기가 거부하므로 동일하게 미노출.
   // 리뷰 8차 P1: Run뿐 아니라 메타·본문·lifecycle writer 전부 동일 게이트(cardWritable).
   const cardWritable = !ticket.safe_malformed && !ticket.status_missing
-      && !ticket.authority_malformed && !ticket.id_malformed && !ticket.persona_malformed;
+      && !ticket.authority_malformed && !ticket.id_malformed && !ticket.persona_malformed
+      && !ticket.skill_unavailable;
   const runButton = isLocalhost && status === 'open' && !blocked && cardWritable
     ? renderWriteButton({
         label: 'Run',
@@ -4744,8 +4763,9 @@ function execPlan(payload) {
     const t = canonicalMatches[0];
     // 리뷰 9차 P1: dispatch 검증을 UI의 cardWritable과 동급으로 — safe/status/persona
     // malformed 티켓에 직접 HTTP 요청해도 writer가 실행되지 않는다.
-    if (t.id_malformed || t.authority_malformed || t.safe_malformed || t.status_missing || t.persona_malformed) {
-      throw new Error(`ticket ${ticketId} has malformed identity/authority/safe/status/persona frontmatter — refusing dispatch`);
+    if (t.id_malformed || t.authority_malformed || t.safe_malformed || t.status_missing
+        || t.persona_malformed || t.skill_unavailable) {
+      throw new Error(`ticket ${ticketId} has malformed identity/authority/safe/status/persona/skill frontmatter — refusing dispatch`);
     }
   }
 

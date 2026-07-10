@@ -124,8 +124,9 @@ shopt -s nullglob
 
 # 리뷰 8차 P1: docs/·docs/tickets/ 자체가 symlink면 canonical 경계가 깨진다 — fail-closed.
 # 리뷰 9차 P2: 구성 오류를 exit 0("후보 없음"=정상 idle)으로 위장하지 않는다 — exit 2.
-if [ -h "docs" ] || [ -h "docs/tickets" ]; then
-  echo "docs/tickets 경로가 symlink입니다 — canonical 경계 위반 (fail-closed, exit 2)." >&2
+# 리뷰 10차 P1: DONE/ symlink도 포함 — 외부 파일이 depends_on을 충족시키는 우회 차단.
+if [ -h "docs" ] || [ -h "docs/tickets" ] || [ -h "docs/tickets/DONE" ]; then
+  echo "docs/tickets(/DONE) 경로가 symlink입니다 — canonical 경계 위반 (fail-closed, exit 2)." >&2
   exit 2
 fi
 
@@ -215,10 +216,12 @@ deps_satisfied() {
   for dep in "${arr[@]}"; do
     dep=$(echo "$dep" | tr -d '" '"'"' ')
     [ -z "$dep" ] && continue
-    if [ ! -f "docs/tickets/DONE/${dep}-"*.md ] 2>/dev/null && \
-       ! ls docs/tickets/DONE/${dep}-*.md >/dev/null 2>&1; then
-      return 1
-    fi
+    # 리뷰 10차 P1: DONE 파일 자체가 symlink(외부 파일)면 의존성 충족으로 치지 않는다.
+    local dep_ok=0 dep_f
+    for dep_f in docs/tickets/DONE/"${dep}"-*.md; do
+      [ -f "$dep_f" ] && [ ! -h "$dep_f" ] && dep_ok=1 && break
+    done
+    [ "$dep_ok" = "1" ] || return 1
   done
   return 0
 }
