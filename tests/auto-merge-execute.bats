@@ -812,3 +812,94 @@ EOF
   [[ "$output" == *"잔존 프로세스"* ]]
   ! grep -q $'\tEXECUTED$' "$TEST_HOME/state/auto_merge.log"
 }
+
+# ── 리뷰 13차 P1 회귀 ─────────────────────────────────────────────────────────
+
+@test "execute: TERM during post-checks rolls unverified merge off base (no leftover 2-parent HEAD)" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  local base
+  base="$(git -C "$d" rev-parse main)"
+
+  cat > "$TEST_HOME/mock_checks_slow2.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/slow2.flag" ]; then touch "$TEST_HOME/slow2.flag"; exit 0; fi
+sleep 271832
+EOF
+  chmod +x "$TEST_HOME/mock_checks_slow2.sh"
+
+  ( cd "$d" && \
+    LINT_EXTERNAL_DOCS_CMD="$MOCK_LINT" \
+    RUN_CHECKS_CMD="$TEST_HOME/mock_checks_slow2.sh" \
+    CHECK_SCOPE_OMISSION_CMD="$MOCK_SCOPE" \
+    STATE_DIR="$TEST_HOME/state" \
+    exec "$SCRIPT_PATH" "$TEST_HOME/T999-test.md" --execute --branch ralph/T999 --base main ) \
+    > "$TEST_HOME/term2.log" 2>&1 & local ap=$!
+  local i=0
+  while [ ! -f "$TEST_HOME/slow2.flag" ] && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i+1)); done
+  sleep 1
+  kill -TERM "$ap" 2>/dev/null || true
+  wait "$ap" 2>/dev/null || true
+  pkill -f 'sleep 271832' 2>/dev/null || true
+
+  # 미검증 merge가 base에 남지 않는다 — 신호 시점 CAS 롤백
+  [ "$(git -C "$d" rev-parse main)" = "$base" ]
+  [ -z "$(git -C "$d" status --porcelain)" ]
+  grep -q 'INTERRUPTED_ROLLED_BACK' "$TEST_HOME/state/auto_merge.log"
+  # 정상 롤백됐으므로 recovery marker는 남지 않는다
+  [ ! -e "$TEST_HOME/state/auto_merge.recovery" ]
+}
+
+@test "execute: recovery marker refuses new merges until manually cleared" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  local base
+  base="$(git -C "$d" rev-parse main)"
+  mkdir -p "$TEST_HOME/state"
+  touch "$TEST_HOME/state/auto_merge.recovery"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RECOVERY_REQUIRED 상태"* ]]
+  [ "$(git -C "$d" rev-parse main)" = "$base" ]
+  grep -q 'REFUSED:recovery-pending' "$TEST_HOME/state/auto_merge.log"
+}
+
+@test "execute: concurrent tracked change in rollback window is preserved (REF_ONLY, not reset away)" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  echo base > "$d/tracked.md"
+  git -C "$d" add tracked.md
+  git -C "$d" commit -q -m "tracked file"
+
+  # post-check가 (rollback 스냅샷 창의) 동시 변경을 흉내: tracked 파일 수정 후 exit 1
+  cat > "$TEST_HOME/mock_checks_conc.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/conc.flag" ]; then touch "$TEST_HOME/conc.flag"; exit 0; fi
+echo concurrent >> '$d/tracked.md'
+exit 1
+EOF
+  chmod +x "$TEST_HOME/mock_checks_conc.sh"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_conc.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  # 동시 변경은 reset --hard로 파괴되지 않고 보존된다
+  grep -q 'concurrent' "$d/tracked.md"
+  grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+}

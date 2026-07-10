@@ -593,15 +593,32 @@ _wip_fingerprint() {
 # 검사한다 — picker와 동일 계약. dep 증거는 파일명이 아니라 실제 frontmatter
 # (id 일치 + status done) + git tracked + 비-symlink로 판정하고, dep ID는 앞뒤
 # 공백/따옴표만 벗겨 내부 공백('T 0 0 1')이 승격되지 않게 한다.
+# 리뷰 13차 P1: lock 토큰 소유 재확인 헬퍼 — 예약·디스패치 등 "쓰기/실행" 직전마다
+# 호출한다. 사이클 시작 시 1회 검사로는 tag 이후 탈취를 못 잡았다.
+_assert_token() {
+  [ "$DRY_RUN" = "0" ] || return 0
+  [ "${LOCK_OWNED:-0}" = "1" ] || return 0
+  [ "$(cat state/lock 2>/dev/null)" = "$LOCK_TOKEN" ]
+}
+
 deps_satisfied_strict() {
   local file="$1" deps dep dep_ok dep_f done_real
   deps=$(awk '
     NR == 1 { if ($0 != "---") exit; next }
     $0 == "---" { exit }
     substr($0, 1, 11) == "depends_on:" {
-      sub(/^[^:]+:[ \t]*/, ""); gsub(/[][]/, ""); print; exit
+      sub(/^[^:]+:[ \t]*/, ""); print; exit
     }
   ' "$file")
+  # 리뷰 13차 P1: inline comment 제거 후, 외곽 브래킷은 "정확히 한 쌍"만 벗긴다 —
+  # 내부 브래킷까지 지우면 [T[001]] → T001 로 malformed 값이 정상 ID로 승격된다.
+  # 미폐 브래킷은 malformed → 미충족 (fail-closed).
+  deps="$(printf '%s' "$deps" | sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+  case "$deps" in
+    '['*']') deps="${deps#\[}"; deps="${deps%\]}" ;;
+    '['*|*']') return 1 ;;
+  esac
+  deps="$(printf '%s' "$deps" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
   [ -z "$deps" ] && return 0
 
   done_real="$(cd docs/tickets/DONE 2>/dev/null && pwd -P)" || return 1
@@ -610,7 +627,13 @@ deps_satisfied_strict() {
   local arr
   IFS=',' read -ra arr <<< "$deps"
   for dep in "${arr[@]}"; do
-    dep="$(printf '%s' "$dep" | sed "s/^[[:space:]\"']*//; s/[[:space:]\"']*\$//")"
+    # 리뷰 13차 P1: 공백만 strip하고 quote는 "같은 쌍" 1겹만 벗긴다 — 혼합 제거는
+    # 미폐 quote("T001')를 정상 ID로 승격시켰다.
+    dep="$(printf '%s' "$dep" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    case "$dep" in
+      '"'*'"') dep="${dep#\"}"; dep="${dep%\"}" ;;
+      "'"*"'") dep="${dep#?}"; dep="${dep%?}" ;;
+    esac
     [ -z "$dep" ] && continue
     [[ "$dep" =~ ^T[0-9]+$ ]] || return 1
     dep_ok=0
@@ -963,6 +986,13 @@ EOF
   #        git worktree는 이 경로를 공유하지 않으므로 worker가 볼 수 없음.)
   #       orchestrator의 책임 분담을 신뢰한다.
   if [ "$DRY_RUN" = "0" ]; then
+    # 리뷰 13차 P1: 예약/실행 직전 토큰 재확인 — pre-cycle tag 이후 lock이 탈취됐다면
+    # foreign lock 상태로 reservation/current_ticket을 쓰지 않는다.
+    if ! _assert_token; then
+      echo "❌ 예약 직전 state/lock 토큰이 교체됨 — 소유권 상실, 예약·디스패치하지 않습니다 (fail-closed)."
+      LOCK_OWNED=0
+      return 16
+    fi
     if [ "$NO_RESERVE" = "1" ]; then
       echo "🔒 (orchestrator가 책임) lock 검증 skip — --no-reserve 모드"
     else
@@ -1140,6 +1170,12 @@ EOF
   reservation_meta="$SESSION_STATE_ROOT/state/reservations/${id}.d/meta"
   # 리뷰 10차 P1: 자체 프로세스 그룹(set -m)으로 디스패치하고 PID를 추적 —
   # 부모가 TERM을 받으면 on_signal이 이 그룹을 먼저 종료·reap한 뒤 lock을 푼다.
+  # 리뷰 13차 P1: 디스패치 직전 토큰 재확인 — 탈취된 lock으로 headless를 띄우지 않는다.
+  if [ "$DRY_RUN" = "0" ] && ! _assert_token; then
+    echo "❌ 디스패치 직전 state/lock 토큰이 교체됨 — headless를 실행하지 않습니다 (fail-closed)."
+    LOCK_OWNED=0
+    return 16
+  fi
   set +e
   set -m
   (
@@ -1153,8 +1189,33 @@ EOF
   set +m
   wait "$HEADLESS_PID"
   headless_rc=$?
+  # 리뷰 13차 P1: leader가 정상 종료해도 백그라운드 자손이 그룹에 남아 있으면
+  # 결과를 신뢰하지 않는다 — 지연 writer가 lock 해제 후 worktree를 오염시키는
+  # 창을 닫는다. 그룹 정리(TERM→KILL bounded) 후 실패로 처리.
+  _headless_leftover=0
+  if kill -0 -- "-${HEADLESS_PID}" 2>/dev/null; then
+    _headless_leftover=1
+    echo "⚠️  headless 종료 후 프로세스 그룹에 잔존 자손 감지 — 정리합니다 (TERM→KILL)."
+    kill -TERM -- "-${HEADLESS_PID}" 2>/dev/null || true
+    _hl_i=0
+    while kill -0 -- "-${HEADLESS_PID}" 2>/dev/null && [ "$_hl_i" -lt 20 ]; do sleep 0.25; _hl_i=$((_hl_i+1)); done
+    kill -KILL -- "-${HEADLESS_PID}" 2>/dev/null || true
+  fi
   HEADLESS_PID=""
   set -e
+  # 리뷰 13차 P1: headless 종료 직후(성공/실패 공통) 토큰 재확인 — 실패 분기로
+  # 빠지면 사후 토큰 검사에 도달하지 않아 탈취가 rc=5로 위장되던 문제.
+  if [ "$DRY_RUN" = "0" ] && [ "${LOCK_OWNED:-0}" = "1" ] && ! _assert_token; then
+    echo "❌ headless 종료 직후 state/lock 토큰이 교체됨 — 결과를 확정하지 않고 중단합니다 (fail-closed)."
+    LOCK_OWNED=0
+    return 16
+  fi
+  if [ "$_headless_leftover" = "1" ]; then
+    echo "❌ headless가 백그라운드 자손을 남긴 채 종료 — 완료 계약 위반, 결과를 신뢰하지 않습니다."
+    add_failure "$id" "leftover-descendants" "${i:-0}" "$ticket"
+    save_headless_diagnostics "$id" "leftover-descendants" "$timeout_seconds" "$headless_rc"
+    return 5
+  fi
 
   if [ "$headless_rc" -ne 0 ]; then
     if [ "$headless_rc" = "124" ] || [ "$headless_rc" = "137" ]; then

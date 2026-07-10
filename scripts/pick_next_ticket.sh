@@ -208,9 +208,18 @@ deps_satisfied() {
   deps=$(awk '
     /^---$/ { fm = !fm; next }
     fm && $1 == "depends_on:" {
-      sub(/^[^:]+:[ \t]*/, ""); gsub(/[][]/, ""); print; exit
+      sub(/^[^:]+:[ \t]*/, ""); print; exit
     }
   ' "$file")
+  # 리뷰 13차 P1: inline comment 제거 후 외곽 브래킷은 정확히 한 쌍만 벗긴다 —
+  # 내부 브래킷까지 지우면 [T[001]] → T001 로 malformed 값이 승격된다. 미폐 브래킷은
+  # malformed → 미충족 (fail-closed).
+  deps="$(printf '%s' "$deps" | sed 's/[[:space:]]#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+  case "$deps" in
+    '['*']') deps="${deps#\[}"; deps="${deps%\]}" ;;
+    '['*|*']') return 1 ;;
+  esac
+  deps="$(printf '%s' "$deps" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
   [ -z "$deps" ] && return 0
   IFS=',' read -ra arr <<< "$deps"
   # 리뷰 11차 P1: 사용 시점에 DONE 물리 경로를 재검증 — 초기 검사 후 디렉터리가
@@ -220,9 +229,13 @@ deps_satisfied() {
   [ "$done_real" = "$(pwd -P)/docs/tickets/DONE" ] || return 1
 
   for dep in "${arr[@]}"; do
-    # 리뷰 12차 P1: 앞뒤 공백/따옴표만 제거 — 전체 삭제(tr -d)는 'T 0 0 1'을
-    # T001로 압축해 형식 검사를 우회시켰다.
-    dep="$(printf '%s' "$dep" | sed "s/^[[:space:]\"']*//; s/[[:space:]\"']*\$//")"
+    # 리뷰 12차 P1 + 13차 P1: 공백만 strip하고 quote는 "같은 쌍" 1겹만 벗긴다 —
+    # 혼합 제거는 미폐 quote("T001')를 정상 ID로 승격시켰다.
+    dep="$(printf '%s' "$dep" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    case "$dep" in
+      '"'*'"') dep="${dep#\"}"; dep="${dep%\"}" ;;
+      "'"*"'") dep="${dep#?}"; dep="${dep%?}" ;;
+    esac
     [ -z "$dep" ] && continue
     # 리뷰 11차 P1: dependency ID 형식 강제 — 비정상 ID(글롭 문자 등)가 DONE 밖
     # 파일을 완료 증거로 만들던 우회 차단.

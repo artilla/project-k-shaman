@@ -10,7 +10,7 @@ import { createServer as createHttpsServer } from 'node:https';
 import { readFileSync, existsSync, readdirSync, statSync, lstatSync, realpathSync, watch, appendFileSync, mkdirSync, openSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve, sep, basename } from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto'; // ADR-0200 T292: console 승인 nonce·sha256
 import { resolvePrivatePathBindings } from './private-path.mjs';
 import { loadPrivatePathTlsOptions, schemeForBinding } from './tls-certificates.mjs';
@@ -326,7 +326,18 @@ function buildModel() {
     }
   } catch { /* directory may not exist */ }
 
-  // Scan tickets and DONE/; DONE directory placement is authoritative.
+  // Scan tickets and DONE/. 리뷰 13차 P2: DONE "디렉터리 위치"만으로 done으로
+  // 치지 않는다 — runner의 dep 증거 계약(id 일치 + status:done + git tracked)과
+  // 정합하도록 검증하고, 불충분하면 done_evidence_invalid로 표시해 doneIds에서
+  // 제외한다 (Board가 Ready로 보이는데 run-loop는 rc=11인 불일치 제거).
+  let trackedDone = null;
+  try {
+    trackedDone = new Set(
+      execFileSync('git', ['ls-files', '--', 'docs/tickets/DONE'], { cwd: ROOT })
+        .toString().split('\n').filter(Boolean)
+        .map(p => p.replace(/^docs\/tickets\//, ''))
+    );
+  } catch { trackedDone = null; } // non-git 환경 — runner도 GIT_REPO=0이면 tracked 검사 없음
   try {
     if (existsSync(TICKETS_DIR)) {
       for (const entry of listTicketFiles()) {
@@ -338,12 +349,17 @@ function buildModel() {
             continue;
           }
           let status = entry.doneDir ? 'done' : String(fm.status || 'open');
+          const doneEvidenceInvalid = entry.doneDir && (
+            String(fm.status || '') !== 'done'
+            || (trackedDone !== null && !trackedDone.has(entry.file))
+          );
           if (reserved.has(String(fm.id))) status = 'forging';
           const reservationStat = reservationStats.get(String(fm.id));
           const ticket = {
             id: String(fm.id),
             title: String(fm.title || ''),
             status,
+            done_evidence_invalid: doneEvidenceInvalid,
             priority: String(fm.priority || ''),
             // 리뷰 2차 P1-6: strict — 정확히 true일 때만 safe (누락/오타는 fail-closed로 unsafe 표시).
             // 리뷰 4차 P2: 중복 safe 선언도 malformed — 실행기(frontmatter_field_count ≠ 1 거부)와 정합.
@@ -3121,7 +3137,7 @@ function autonomyControlScript() {
 
 function renderBoardPage({ isLocalhost = true } = {}) {
   const { byStatus } = getModel();
-  const doneIds = new Set((byStatus.done || []).map(t => String(t.id)));
+  const doneIds = new Set((byStatus.done || []).filter(t => !t.done_evidence_invalid && !t.id_malformed).map(t => String(t.id)));
   const nowMs = Date.now();
   const isBlocked = t => (t.depends_on || []).some(id => !doneIds.has(String(id)));
   // ADR-0190 T284: id→{title,status} 대조 맵(읽기). dep 칩을 blocker 제목·상태로 해소.

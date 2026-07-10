@@ -1164,3 +1164,176 @@ console.log('cr-persona-flagged');
   [ "$status" -eq 0 ]
   [[ "$output" == *"cr-persona-flagged"* ]]
 }
+
+# ── 리뷰 13차 P1 회귀 ─────────────────────────────────────────────────────────
+
+@test "T52: malformed dep values are not promoted; inline comment is tolerated" {
+  printf -- '---\nid: T001\ntitle: t\nstatus: done\nsafe: true\n---\n# T001\n' > "$TEST_HOME/docs/tickets/DONE/T001-dep.md"
+  # 내부 브래킷 — [T[001]]이 T001로 승격되면 안 된다
+  printf -- '---\nid: T520\ntitle: t\nstatus: open\npriority: P2\nsafe: true\npersona: implementer\ndepends_on: [T[001]]\n---\n# T520\n' > "$TEST_HOME/docs/tickets/T520-test.md"
+  # 미폐 quote — "T001' 도 승격 금지
+  printf -- '---\nid: T521\ntitle: t\nstatus: open\npriority: P2\nsafe: true\npersona: implementer\ndepends_on: ["T001'"'"']\n---\n# T521\n' > "$TEST_HOME/docs/tickets/T521-test.md"
+  # 정상 inline comment는 dependency 판정을 방해하지 않는다
+  printf -- '---\nid: T522\ntitle: t\nstatus: open\npriority: P2\nsafe: true\npersona: implementer\ndepends_on: [T001] # after T001\n---\n# T522\n' > "$TEST_HOME/docs/tickets/T522-test.md"
+  _commit_all "add T52x dep parser cases"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T520 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 11 ]
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T521 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 11 ]
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T522 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"T520-test.md"* ]]
+  [[ "$output" != *"T521-test.md"* ]]
+  [[ "$output" == *"T522-test.md"* ]]
+}
+
+@test "T53: lock token stolen after pre-cycle tag -> no reservation/dispatch, rc=16" {
+  _make_ticket T530 true open
+  cat > "$TEST_HOME/scripts/run_headless.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "MUST-NOT-DISPATCH" >&2
+exit 99
+EOF
+  chmod +x "$TEST_HOME/scripts/run_headless.sh"
+  _commit_all "add T530"
+
+  # git tag 시점(예약 직전)에 lock을 탈취하는 git wrapper
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$TEST_HOME/bin"
+  cat > "$TEST_HOME/bin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "tag" ]; then echo stolen > "$TEST_HOME/state/lock"; fi
+exec "$realgit" "\$@"
+EOF
+  chmod +x "$TEST_HOME/bin/git"
+
+  run bash -c 'cd "$1" && PATH="$1/bin:$PATH" ./scripts/run_loop.sh T530' _ "$TEST_HOME"
+  [ "$status" -eq 16 ]
+  [[ "$output" != *"MUST-NOT-DISPATCH"* ]]
+  [[ "$output" == *"예약 직전"* ]]
+  # 남의 lock 보존
+  [ "$(cat "$TEST_HOME/state/lock")" = "stolen" ]
+}
+
+@test "T54: headless leaving detached background descendants -> reaped, result not trusted" {
+  _make_ticket T540 true open
+  cat > "$TEST_HOME/scripts/run_headless.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+awk '/^---\$/{fm=!fm;print;next} fm && \$1=="status:"{print "status: done";next}{print}' \
+  docs/tickets/T540-test.md > /tmp/t540.\$\$ && mv /tmp/t540.\$\$ docs/tickets/T540-test.md
+git mv docs/tickets/T540-test.md docs/tickets/DONE/T540-test.md
+git add -A; git commit -qm "T540: done"
+( sleep 6; echo late > "$TEST_HOME/late.txt" ) >/dev/null 2>&1 &
+exit 0
+EOF
+  chmod +x "$TEST_HOME/scripts/run_headless.sh"
+  _commit_all "add T540"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T540' _ "$TEST_HOME"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"잔존 자손"* ]]
+  sleep 7
+  # 지연 writer는 회수되어 worktree를 오염시키지 못한다
+  [ ! -f "$TEST_HOME/late.txt" ]
+}
+
+@test "T55: decisions serialize with ticket status - skipped ticket cannot be approved or re-rejected" {
+  _make_ticket T550 false open
+  # 이미 reject된 상태를 흉내
+  run bash -c 'cd "$1" && ./scripts/approve.sh --reject "first" T550' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+
+  run bash -c 'cd "$1" && ./scripts/approve.sh T550' _ "$TEST_HOME"
+  [ "$status" -eq 3 ]
+  [ ! -f "$TEST_HOME/docs/approvals/T550.md" ]
+
+  run bash -c 'cd "$1" && ./scripts/approve.sh --reject "second" T550' _ "$TEST_HOME"
+  [ "$status" -eq 3 ]
+  # 첫 결정(Rejection 1회)만 남는다
+  [ "$(grep -c '## Rejection' "$TEST_HOME/docs/tickets/T550-test.md")" -eq 1 ]
+}
+
+@test "T56: reject producer partial failure (awk dies mid-stream) leaves the ticket untouched" {
+  _make_ticket T560 false awaiting-approval
+  _commit_all "add T560"
+
+  local realawk
+  realawk="$(command -v awk)"
+  mkdir -p "$TEST_HOME/fakebin"
+  cat > "$TEST_HOME/fakebin/awk" <<EOF
+#!/usr/bin/env bash
+"$realawk" "\$@" | head -3
+exit 1
+EOF
+  chmod +x "$TEST_HOME/fakebin/awk"
+
+  local before
+  before="$(cksum "$TEST_HOME/docs/tickets/T560-test.md")"
+  run bash -c 'cd "$1" && PATH="$1/fakebin:$PATH" ./scripts/approve.sh --reject "no" T560' _ "$TEST_HOME"
+  [ "$status" -ne 0 ]
+  [ "$before" = "$(cksum "$TEST_HOME/docs/tickets/T560-test.md")" ]
+  [ -z "$(ls "$TEST_HOME/docs/tickets/".stage.* 2>/dev/null)" ]
+}
+
+@test "T58: true concurrent approval race - ln loser aborts, winner's decision untouched" {
+  _make_ticket T580 false awaiting-approval
+  _commit_all "add T580"
+
+  # 생성 창(-f 검사 후 ~ ln 전) 한가운데서 호출되는 date를 가로채 경쟁자의 마커를
+  # 먼저 심는다 — 결정적(deterministic) 동시 승인 경합 재현.
+  local realdate
+  realdate="$(command -v date)"
+  mkdir -p "$TEST_HOME/racebin"
+  cat > "$TEST_HOME/racebin/date" <<EOF
+#!/usr/bin/env bash
+m="$TEST_HOME/docs/approvals/T580.md"
+if [ ! -e "\$m" ]; then
+  printf 'approved_by: "rival"\napproved_at: "2026-01-01T00:00:00+00:00"\nscope_confirmation: "rival"\nrollback_plan: "rival"\n' > "\$m.rival.\$\$"
+  ln "\$m.rival.\$\$" "\$m" 2>/dev/null || true
+  rm -f "\$m.rival.\$\$"
+fi
+exec "$realdate" "\$@"
+EOF
+  chmod +x "$TEST_HOME/racebin/date"
+
+  run bash -c 'cd "$1" && PATH="$1/racebin:$PATH" EDITOR=true ./scripts/approve.sh T580' _ "$TEST_HOME"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"동시 승인 경합"* ]]
+  # 패자는 남의 마커를 편집/검증 대상으로 삼지 않는다
+  [[ "$output" != *"approval marker ready"* ]]
+  # 승자(경쟁자)의 결정이 그대로 보존된다
+  grep -q 'approved_by: "rival"' "$TEST_HOME/docs/approvals/T580.md"
+  [ "$(grep -c 'approved_by:' "$TEST_HOME/docs/approvals/T580.md")" -eq 1 ]
+}
+
+@test "T57: concurrent writers are serialized - no silent lost update" {
+  _make_ticket T570 true open
+  _commit_all "add T570"
+
+  # bats는 test 본문을 errexit로 실행 — 실패 rc를 `|| rc=$?`로 잡아야 서브셸이
+  # rc 기록 전에 중단되지 않는다.
+  ( cd "$TEST_HOME" && rc=0 && ./scripts/ticket_edit.sh set-priority T570 P1 > "$TEST_HOME/w_a.log" 2>&1 || rc=$?; echo "$rc" > "$TEST_HOME/w_a.rc" ) &
+  ( cd "$TEST_HOME" && rc=0 && ./scripts/ticket_edit.sh set-labels T570 "alpha,beta" > "$TEST_HOME/w_b.log" 2>&1 || rc=$?; echo "$rc" > "$TEST_HOME/w_b.rc" ) &
+  wait
+
+  local f="$TEST_HOME/docs/tickets/T570-test.md"
+  # 각 변경은 "반영"되었거나 "명시적으로 거부/실패"해야 한다 — 조용한 유실 금지.
+  if ! grep -q '^priority: P1' "$f"; then
+    grep -Eq '내용 변경 감지|실패' "$TEST_HOME/w_a.log"
+    [ "$(cat "$TEST_HOME/w_a.rc")" -ne 0 ]
+  fi
+  if ! grep -q '^labels: \[alpha, beta\]' "$f"; then
+    grep -Eq '내용 변경 감지|실패' "$TEST_HOME/w_b.log"
+    [ "$(cat "$TEST_HOME/w_b.rc")" -ne 0 ]
+  fi
+  # 최소 한쪽은 성공
+  grep -q '^priority: P1' "$f" || grep -q '^labels: \[alpha, beta\]' "$f"
+  # write lock 잔존 없음
+  [ ! -d "$TEST_HOME/state/ticket_write.lock.d" ]
+}

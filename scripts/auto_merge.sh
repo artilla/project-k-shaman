@@ -531,6 +531,69 @@ if [ "$ELIGIBLE" -eq 0 ]; then
       exit 1
     fi
   fi
+  # 리뷰 13차 P1: 이전 실행이 RECOVERY_REQUIRED로 끝났으면(미검증 merge/불명 상태
+  # 잔존 가능) 새 auto-merge를 시작하지 않는다 — 수동 복구 후 marker를 제거해야 한다.
+  AM_RECOVERY="$STATE_DIR/auto_merge.recovery"
+  _am_mark_recovery() {
+    : > "$AM_RECOVERY" 2>/dev/null || echo "[WARN] recovery marker 기록 실패: ${AM_RECOVERY}" >&2
+  }
+  if [ -e "$AM_RECOVERY" ]; then
+    _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "REFUSED:recovery-pending"
+    echo "[FAIL] 이전 auto-merge가 RECOVERY_REQUIRED 상태입니다 — 수동 복구 후 ${AM_RECOVERY} 를 제거하세요. 새 병합을 거부합니다 (fail-closed)."
+    exit 1
+  fi
+
+  # 리뷰 13차 P1: CAS 후 워크트리 동기화 — status의 모든 항목이 "정확히 merge 잔상"
+  # (내용이 MERGE_COMMIT의 해당 blob과 일치)일 때만 reset --hard 한다. 스냅샷과
+  # reset 사이에 끼어든 동시 변경(다른 파일 수정 ' M'/'MM', untracked '??', rename 등)
+  # 이 하나라도 있으면 파괴적 reset을 포기하고 보존한다 (fail-closed).
+  # 반환: 0=완전 복구(reset), 1=ref-only(worktree 보존).
+  _sync_worktree_after_cas() {
+    [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$BASE_BRANCH" ] || return 1
+    local _now _line _st _p _want _have
+    _now="$(_wt_status_or_fail 2>/dev/null)" || return 1
+    [ -z "$_now" ] && return 0
+    case "$_now" in *'"'*) return 1 ;; esac
+    while IFS= read -r _line; do
+      [ -z "$_line" ] && continue
+      _st="${_line%"${_line#??}"}"
+      _p="${_line#???}"
+      case "$_st" in
+        'M '|'A ')
+          _want="$(git rev-parse -q --verify "${MERGE_COMMIT}:${_p}" 2>/dev/null)" || return 1
+          _have="$(git hash-object -- "$_p" 2>/dev/null)" || return 1
+          [ "$_want" = "$_have" ] || return 1
+          ;;
+        'D ')
+          git rev-parse -q --verify "${MERGE_COMMIT}:${_p}" >/dev/null 2>&1 && return 1
+          [ -e "$_p" ] && return 1
+          ;;
+        *) return 1 ;;
+      esac
+    done <<EOF
+$_now
+EOF
+    git reset --hard HEAD >/dev/null 2>&1
+  }
+
+  # 리뷰 13차 P1: 신호 시점에 이미 merge 커밋이 존재하면(merged, 또는 merging 중
+  # 훅 단계에서 커밋 생성) 미검증 결과를 base에 남기지 않는다 — CAS 롤백을 시도하고,
+  # 불가능하면 recovery marker를 남겨 다음 실행을 차단한다.
+  _am_signal_rollback() {
+    local _mc="$1"
+    if git update-ref -m "auto-merge signal rollback ${TICKET_ID}"          "refs/heads/${BASE_BRANCH}" "$BASE_OID" "$_mc" 2>/dev/null; then
+      if MERGE_COMMIT="$_mc" _sync_worktree_after_cas; then
+        _am_log "$BASE_OID" "INTERRUPTED_ROLLED_BACK"
+      else
+        _am_log "$BASE_OID" "INTERRUPTED_ROLLED_BACK_REF_ONLY"
+        _am_mark_recovery
+      fi
+    else
+      _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED:signal"
+      _am_mark_recovery
+    fi
+  }
+
   # 리뷰 9차 P1: phase-aware 감사 — EXECUTED/ROLLED_BACK 확정 전에 종료(SIGTERM 등)되면
   # INTERRUPTED:<phase>를 남겨 병합 잔존 여부를 감사 로그에서 알 수 있게 한다.
   # 리뷰 10차 P1: lock 해제는 token이 자신일 때만 (남의 lock 삭제 금지).
@@ -549,9 +612,28 @@ if [ "$ELIGIBLE" -eq 0 ]; then
       kill -KILL -- "-${AM_CHECK_PID}" 2>/dev/null || true
       wait "${AM_CHECK_PID}" 2>/dev/null || true
     fi
-    # 리뷰 12차 P1: merge 도중 신호였다면 반쯤 남은 merge 상태를 정리 시도 (실패는 무해 —
-    # EXIT trap의 INTERRUPTED 감사가 잔존을 알린다).
-    [ "${AM_PHASE:-}" = "merging" ] && git merge --abort >/dev/null 2>&1 || true
+    # 리뷰 12차 P1 + 13차 P1: merge 도중 신호면 abort 시도. abort가 안 되고 이미
+    # merge 커밋이 만들어졌다면(훅 단계 등) CAS 롤백 — 미검증 merge를 base에 남긴 채
+    # lock만 풀리는 창을 닫는다.
+    if [ "${AM_PHASE:-}" = "merging" ]; then
+      if ! git merge --abort >/dev/null 2>&1; then
+        local _h
+        _h="$(git rev-parse HEAD 2>/dev/null || true)"
+        if [ -n "$_h" ] && [ "$_h" != "$BASE_OID" ] \
+           && [ "$(git rev-parse -q --verify "${_h}^1" 2>/dev/null)" = "$BASE_OID" ] \
+           && [ "$(git rev-parse -q --verify "${_h}^2" 2>/dev/null)" = "$BRANCH_OID" ]; then
+          _am_signal_rollback "$_h"
+        fi
+      fi
+      if [ -e "$(git rev-parse --git-dir 2>/dev/null)/MERGE_HEAD" ]; then
+        _am_mark_recovery
+      fi
+    fi
+    # 리뷰 13차 P1: merge 커밋 확정 후(post-check 창) 신호 — 미검증 merge를 그대로
+    # 두지 않고 CAS 롤백한다. 실패 시 recovery marker로 다음 실행을 차단.
+    if [ "${AM_PHASE:-}" = "merged" ] && [ -n "${MERGE_COMMIT:-}" ]; then
+      _am_signal_rollback "$MERGE_COMMIT"
+    fi
     exit 143
   }
   trap _am_on_signal TERM INT HUP
@@ -618,7 +700,7 @@ if [ "$ELIGIBLE" -eq 0 ]; then
         printf '%s\n' "$_ab_left"
       fi
     else
-      AM_PHASE="done"; _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED"
+      AM_PHASE="done"; _am_mark_recovery; _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED"
       echo "[FAIL] git merge failed AND abort failed — RECOVERY_REQUIRED (수동 확인 필요)"
     fi
     exit 1
@@ -632,7 +714,7 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   _p1="$(git rev-parse "${MERGE_COMMIT}^1" 2>/dev/null || true)"
   _p2="$(git rev-parse "${MERGE_COMMIT}^2" 2>/dev/null || true)"
   if [ "$_p1" != "$BASE_OID" ] || [ "$_p2" != "$BRANCH_OID" ]; then
-    AM_PHASE="done"; _am_log "$MERGE_COMMIT" "RECOVERY_REQUIRED"
+    AM_PHASE="done"; _am_mark_recovery; _am_log "$MERGE_COMMIT" "RECOVERY_REQUIRED"
     echo "[FAIL] HEAD(${MERGE_COMMIT}) is not our merge of (${BASE_OID}, ${BRANCH_OID}) — ownership lost, NOT resetting. RECOVERY_REQUIRED."
     exit 1
   fi
@@ -645,7 +727,7 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     # 리뷰 10차 P1: 사용자 설정(status.showUntrackedFiles=no)과 독립적인 clean 판정.
     if ! _final_status="$(_wt_status_or_fail)"; then _final_status="__STATUS_FAILED__"; fi
     if [ "$_final_head" != "$MERGE_COMMIT" ] || [ "$_final_branch" != "$BASE_BRANCH" ] || [ -n "$_final_status" ]; then
-      AM_PHASE="done"; _am_log "$_final_head" "RECOVERY_REQUIRED"
+      AM_PHASE="done"; _am_mark_recovery; _am_log "$_final_head" "RECOVERY_REQUIRED"
       echo "[FAIL] post-check 후 최종 상태 불일치 (HEAD=${_final_head} expected=${MERGE_COMMIT}, branch=${_final_branch}, dirty=$([ -n "$_final_status" ] && echo yes || echo no)) — RECOVERY_REQUIRED, 자동 복구하지 않음"
       exit 1
     fi
@@ -654,6 +736,7 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     # 있으므로 수동 확인을 요구한다 (감사 없는 EXECUTED 금지).
     if [ "$AM_AUDIT_FAILED" -ne 0 ]; then
       AM_PHASE="done"
+      _am_mark_recovery
       echo "[FAIL] merge는 완료됐으나 감사 로그 기록 실패 — RECOVERY_REQUIRED(감사 경로 복구 후 수동 기록 필요): ${MERGE_COMMIT}"
       exit 1
     fi
@@ -666,27 +749,16 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     # 수행한다 — HEAD/현재 브랜치가 post-check에 의해 바뀌었어도 base ref가 여전히
     # 우리의 MERGE_COMMIT일 때만 원자적으로 BASE_OID로 되돌리고, 아니면(다른 프로세스
     # 커밋) 건드리지 않고 RECOVERY_REQUIRED. HEAD-확인-후-reset 경합도 CAS가 제거한다.
-    # 리뷰 12차 P1: 워크트리 판정을 CAS "이전"에 스냅샷 — CAS로 ref를 먼저 되감으면
-    # index/worktree가 merge 결과로 남아 status가 반드시 dirty가 되어 정상 경로가
-    # 항상 REF_ONLY로 고착되던 버그 수정. CAS 직전 clean(=post-check 산출물 없음)이면
-    # CAS 후 `git reset --hard HEAD`(ref 불변, worktree/index만 동기화)로 완전 복구.
-    _wt_pre_rb="$(_wt_status_or_fail 2>/dev/null || echo '__STATUS_FAILED__')"
+    # 리뷰 12차 P1 + 13차 P1: CAS 후 워크트리 동기화는 "각 dirty 항목의 내용이
+    # 정확히 merge 잔상(MERGE_COMMIT blob과 일치)"일 때만 수행 — 스냅샷과 reset
+    # 사이에 끼어든 동시 변경은 항목 단위 blob 대조가 잡아내 보존한다(REF_ONLY).
     if git update-ref -m "auto-merge rollback ${TICKET_ID}" \
          "refs/heads/${BASE_BRANCH}" "$BASE_OID" "$MERGE_COMMIT" 2>/dev/null; then
       _ref_only=1
-      if [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$BASE_BRANCH" ]; then
-        if [ -z "$_wt_pre_rb" ]; then
-          # CAS 직전 clean → 현재 worktree/index 내용은 merge 잔상뿐. HEAD(=base)로 동기화.
-          if git reset --hard HEAD >/dev/null 2>&1; then
-            _ref_only=0
-          else
-            echo "[WARN] base ref는 복구됐으나 워킹트리 동기화 실패 — git reset --hard ${BASE_OID} 를 수동 실행하세요"
-          fi
-        else
-          echo "[WARN] post-check 산출물/변경 감지 — reset 생략, 보존 (수동으로 git reset --hard ${BASE_OID} 검토)"
-        fi
+      if _sync_worktree_after_cas; then
+        _ref_only=0
       else
-        echo "[WARN] base ref는 복구됐으나 HEAD가 '${BASE_BRANCH}'가 아닙니다 — 워킹트리를 확인하세요"
+        echo "[WARN] merge 잔상 외 변경/산출물 또는 검증 실패 — reset 생략, worktree 보존 (수동으로 git reset --hard ${BASE_OID} 검토)"
       fi
       AM_PHASE="done"
       if [ "$_ref_only" -eq 0 ]; then
@@ -701,7 +773,7 @@ if [ "$ELIGIBLE" -eq 0 ]; then
         printf '%s\n' "$_leftover"
       fi
     else
-      AM_PHASE="done"; _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED"
+      AM_PHASE="done"; _am_mark_recovery; _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED"
       echo "[FAIL] post-merge run_checks 실패 + base ref CAS 실패(다른 프로세스의 커밋?) — RECOVERY_REQUIRED (자동 복구 안 함)"
     fi
     exit 1
