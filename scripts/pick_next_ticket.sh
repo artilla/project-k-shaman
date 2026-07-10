@@ -213,12 +213,23 @@ deps_satisfied() {
   ' "$file")
   [ -z "$deps" ] && return 0
   IFS=',' read -ra arr <<< "$deps"
+  # 리뷰 11차 P1: 사용 시점에 DONE 물리 경로를 재검증 — 초기 검사 후 디렉터리가
+  # 교체되는 경합 차단.
+  local done_real
+  done_real="$(cd docs/tickets/DONE 2>/dev/null && pwd -P)" || return 1
+  [ "$done_real" = "$(pwd -P)/docs/tickets/DONE" ] || return 1
+
   for dep in "${arr[@]}"; do
     dep=$(echo "$dep" | tr -d '" '"'"' ')
     [ -z "$dep" ] && continue
+    # 리뷰 11차 P1: dependency ID 형식 강제 — 비정상 ID(글롭 문자 등)가 DONE 밖
+    # 파일을 완료 증거로 만들던 우회 차단.
+    if ! [[ "$dep" =~ ^T[0-9]+$ ]]; then
+      return 1
+    fi
     # 리뷰 10차 P1: DONE 파일 자체가 symlink(외부 파일)면 의존성 충족으로 치지 않는다.
     local dep_ok=0 dep_f
-    for dep_f in docs/tickets/DONE/"${dep}"-*.md; do
+    for dep_f in docs/tickets/DONE/"${dep}"-*.md docs/tickets/DONE/"${dep}".md; do
       [ -f "$dep_f" ] && [ ! -h "$dep_f" ] && dep_ok=1 && break
     done
     [ "$dep_ok" = "1" ] || return 1

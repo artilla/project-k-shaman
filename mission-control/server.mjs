@@ -182,10 +182,17 @@ function parseFrontmatter(content) {
   const seenKeys = new Set();
   const duplicateKeys = new Set();
   for (const line of match[1].split('\n')) {
-    // 리뷰 10차 P1: LF 문서 속 CR 잔재(`safe: true\r`)를 trim으로 승격하지 않는다 —
-    // 셸(field_of)은 CR을 값에 보존해 거부하므로, 서버도 해당 라인을 무효화해
-    // (필드 미설정 → malformed 흐름) 판정을 일치시킨다.
-    if (line.includes('\r')) continue;
+    // 리뷰 10차 P1: LF 문서 속 CR 잔재(`safe: true\r`)를 trim으로 승격하지 않는다.
+    // 리뷰 11차 P1: 단, key/중복 "집계"에는 포함한다 — CR safe + 정상 safe 조합에서
+    // 셸(선언 2회 → rc=14)과 달리 서버가 중복을 못 보던 은닉 해소. 값은 무효.
+    if (line.includes('\r')) {
+      const mr = line.match(/^(\w+):/);
+      if (mr) {
+        if (seenKeys.has(mr[1])) duplicateKeys.add(mr[1]);
+        seenKeys.add(mr[1]);
+      }
+      continue;
+    }
     const m = line.match(/^(\w+):\s*(.*)/);
     if (!m) continue;
     const [, key, rawFull] = m;
@@ -229,8 +236,10 @@ function listTicketFiles() {
   const files = [];
   // 리뷰 10차 P2: tickets 루트 자체가 symlink면 외부 카드가 렌더·디스패치 대상이 된다 —
   // 모델에서 통째로 제외 (writer들의 exit 2는 최후 방어선일 뿐).
+  // 리뷰 11차 P2: docs 조상 경계까지 realpath로 대조 — writer(pwd -P) 판정과 일치.
   try {
     if (lstatSync(TICKETS_DIR).isSymbolicLink()) return files;
+    if (realpathSync(TICKETS_DIR) !== join(realpathSync(ROOT), 'docs', 'tickets')) return files;
   } catch { return files; }
   const collect = (dir, doneDir = false) => {
     if (!existsSync(dir)) return;
@@ -344,6 +353,8 @@ function buildModel() {
             skill_unavailable: (() => {
               const persona = /^[A-Za-z0-9_-]+$/.test(String(fm.persona || '')) ? String(fm.persona) : 'implementer';
               try {
+                // 리뷰 11차 P2: skills/ 조상 경계까지 realpath 대조 (run_loop pwd -P 판정과 일치).
+                if (realpathSync(join(ROOT, 'skills')) !== join(realpathSync(ROOT), 'skills')) return true;
                 const st = lstatSync(join(ROOT, 'skills', `${persona}.md`));
                 return st.isSymbolicLink() || !st.isFile();
               } catch { return true; }
@@ -407,6 +418,11 @@ function setupWatchers() {
   } catch { /* may not exist in test environments */ }
   try {
     if (existsSync(RESERVATIONS_DIR)) watch(RESERVATIONS_DIR, invalidate);
+  } catch { /* may not exist */ }
+  // 리뷰 11차 P2: skill 파일 변경도 모델(skill_unavailable)에 반영되도록 무효화.
+  try {
+    const skillsDir = join(ROOT, 'skills');
+    if (existsSync(skillsDir)) watch(skillsDir, invalidate);
   } catch { /* may not exist */ }
 }
 setupWatchers();

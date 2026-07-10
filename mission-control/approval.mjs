@@ -106,6 +106,10 @@ export function validateApproval(root, id) {
     if (st.isSymbolicLink() || !st.isFile()) {
       return { state: 'unverifiable', missing: [], reason: '승인 마커가 symlink/비정규 파일 — canonical 경계 위반' };
     }
+    // 리뷰 11차 P1: hardlink(nlink>1) 마커는 다른 경로의 동일 inode — identity 불확실.
+    if (st.nlink > 1) {
+      return { state: 'unverifiable', missing: [], reason: '승인 마커가 hardlink(nlink>1) — identity 불확실' };
+    }
     const dirReal = realpathSync(join(root, 'docs', 'approvals'));
     const wantReal = join(realpathSync(root), 'docs', 'approvals');
     if (dirReal !== wantReal) {

@@ -671,3 +671,50 @@ EOF
   [[ "$output" == *"stale auto-merge lock"* ]]
   [[ "$output" == *"auto-merge executed"* ]]
 }
+
+# ── 리뷰 11차 P1 회귀 ─────────────────────────────────────────────────────────
+
+@test "execute: modifying a file whose path contains the lock string is still detected (exact-path exclusion)" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  # lock 문자열이 포함된 일반 tracked 파일 — substring 제외였다면 dirty가 숨는다
+  mkdir -p "$d/docs"
+  echo "note" > "$d/docs/auto_merge.lock.d-notes.md"
+  git -C "$d" add docs/auto_merge.lock.d-notes.md
+  git -C "$d" commit -q -m "add note file"
+
+  # post-check가 그 파일을 수정하고 exit 0 → 최종 검증이 dirty를 봐야 한다
+  cat > "$TEST_HOME/mock_checks_dirtyname.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/dn.flag" ]; then touch "$TEST_HOME/dn.flag"; exit 0; fi
+echo modified >> '$d/docs/auto_merge.lock.d-notes.md'
+exit 0
+EOF
+  chmod +x "$TEST_HOME/mock_checks_dirtyname.sh"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_dirtyname.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RECOVERY_REQUIRED"* ]]
+}
+
+@test "execute: in-repo custom STATE_DIR audit log does not break final clean verdict" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$d/state2' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"auto-merge executed"* ]]
+  grep -q "EXECUTED" "$d/state2/auto_merge.log"
+}

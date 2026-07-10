@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, symlinkSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -147,6 +147,19 @@ test('CLI가 symlink 경유 경로로 실행돼도 판정한다 (macOS /var→/p
       assert.equal(code, 3); // missing — exit 0(fail-open)이면 회귀
     } finally { rmSync(root, { recursive: true, force: true }); }
   } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test('hardlink 마커 → unverifiable (identity 불확실)', () => {
+  const root = makeRoot();
+  try {
+    writeTicket(root, 'T907', '승인 범위');
+    writeMarker(root, 'T907', { scope: yamlEscapeCut('승인 범위') });
+    assert.equal(validateApproval(root, 'T907').state, 'ok');
+    linkSync(join(root, 'docs', 'approvals', 'T907.md'), join(root, 'elsewhere.md'));
+    const v = validateApproval(root, 'T907');
+    assert.equal(v.state, 'unverifiable');
+    assert.match(v.reason, /hardlink/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test('CLI 종료 코드 계약: ok=0 / missing=3 / malformed=4 / stale=5', () => {

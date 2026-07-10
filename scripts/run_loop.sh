@@ -117,10 +117,16 @@ release_owned_reservation() {
 
 cleanup() {
   if [ "${LOCK_OWNED:-0}" = "1" ] && [ "$(cat state/lock 2>/dev/null)" = "$LOCK_TOKEN" ]; then
-    # 리뷰 10차 P2: current_ticket도 lock 토큰이 여전히 자신일 때만 제거 —
-    # 토큰이 교체됐다면(다른 세션이 인수) 그 세션의 current_ticket일 수 있다.
-    rm -f state/lock 2>/dev/null || true
-    rm -f state/current_ticket 2>/dev/null || true
+    # 리뷰 10차 P2 + 11차 P1: cat→rm 창을 좁히기 위해 mv(rename) 기반 CAS 해제 —
+    # 이동한 파일의 토큰이 자신이 아니면(그 사이 교체) 원복한다.
+    if mv state/lock "state/.lock.release.$$" 2>/dev/null; then
+      if [ "$(cat "state/.lock.release.$$" 2>/dev/null)" = "$LOCK_TOKEN" ]; then
+        rm -f "state/.lock.release.$$" 2>/dev/null || true
+        rm -f state/current_ticket 2>/dev/null || true
+      else
+        mv "state/.lock.release.$$" state/lock 2>/dev/null || true
+      fi
+    fi
   fi
   for id in "${OWNED_RESERVATIONS[@]:-}"; do
     release_owned_reservation "$id"
@@ -128,19 +134,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 리뷰 10차 P1: 부모가 TERM/INT로 죽을 때 살아 있는 headless 자식(프로세스 그룹)을
+# 리뷰 10차 P1: 부모가 신호로 죽을 때 살아 있는 headless 자식(프로세스 그룹)을
 # 먼저 종료·reap한 뒤에야 EXIT trap이 coordination state(lock/reservation)를
-# 해제한다 — 과거에는 lock이 먼저 풀려 고아 자식이 나중에 파일을 썼다.
+# 해제한다. 리뷰 11차 P1: HUP 포함, bounded TERM→KILL(신호 무시 자손 회수),
+# HEADLESS_PID 대입 직전 경합은 $! fallback으로 커버.
 HEADLESS_PID=""
 on_signal() {
-  if [ -n "${HEADLESS_PID:-}" ]; then
-    kill -TERM -- "-${HEADLESS_PID}" 2>/dev/null || kill -TERM "${HEADLESS_PID}" 2>/dev/null || true
-    wait "${HEADLESS_PID}" 2>/dev/null || true
-    HEADLESS_PID=""
+  local hp="${HEADLESS_PID:-}"
+  [ -z "$hp" ] && hp="${!:-}"
+  if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then
+    kill -TERM -- "-${hp}" 2>/dev/null || kill -TERM "${hp}" 2>/dev/null || true
+    local i=0
+    while kill -0 "$hp" 2>/dev/null && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i+1)); done
+    if kill -0 "$hp" 2>/dev/null; then
+      kill -KILL -- "-${hp}" 2>/dev/null || kill -KILL "$hp" 2>/dev/null || true
+    fi
+    wait "$hp" 2>/dev/null || true
   fi
+  HEADLESS_PID=""
   exit 143   # EXIT trap(cleanup)이 이어서 lock/reservation 해제
 }
-trap on_signal TERM INT
+trap on_signal TERM INT HUP
 
 if [ "$DRY_RUN" = "0" ]; then
   if ! acquire_global_lock; then
@@ -694,6 +708,14 @@ apply_loop_mode() {
       return 0 ;;
     *) return 0 ;;   # unknown/empty token → keep current flags (fail-safe)
   esac
+  if [ "$new_dry" = "0" ] && [ "$DRY_RUN" = "1" ]; then
+    # 리뷰 11차 P1: 실행 모드 전환은 시작 시 전제조건을 다시 통과해야 한다 —
+    # 비-Git 디렉터리에서 dry-run으로 시작한 뒤 전환해 실제 디스패치되던 우회 차단.
+    if [ "$GIT_REPO" != "1" ]; then
+      echo "⚠️  loop_mode='${mode}' 요청이나 git 저장소가 아님 — dry-run 유지 (실행 전제조건 미충족)." >&2
+      return 0
+    fi
+  fi
   if [ "$new_dry" = "0" ] && [ "$LOCK_OWNED" = "0" ]; then
     # 리뷰 10차 P1: 시작 경로와 동일한 원자적 lock primitive 사용 (존재검사→쓰기 경합 제거).
     if ! acquire_global_lock; then
@@ -715,6 +737,16 @@ cycle_one() {
 
   # ADR-0054 §3.2: honor a runtime mode switch at this cycle boundary.
   apply_loop_mode
+
+  # 리뷰 11차 P1: 사이클마다 lock 토큰 소유를 재확인 — 첫 사이클 후 토큰이 교체됐다면
+  # (다른 세션 인수/수동 개입) 다음 사이클을 예약·디스패치하지 않는다.
+  if [ "$DRY_RUN" = "0" ] && [ "${LOCK_OWNED:-0}" = "1" ]; then
+    if [ "$(cat state/lock 2>/dev/null)" != "$LOCK_TOKEN" ]; then
+      echo "❌ state/lock 토큰이 교체됨 — 소유권 상실, 루프를 중단합니다 (fail-closed)."
+      LOCK_OWNED=0
+      return 16
+    fi
+  fi
 
   # 리뷰 9차 P2: canonical 디렉터리 체인이 symlink면 "후보 없음(idle)"으로 위장하지
   # 않고 명시적으로 실패한다 (picker exit 2와 짝). 리뷰 10차 P1: DONE/ 포함.
@@ -1288,7 +1320,10 @@ EOF
   fi
 
   echo "✅ cycle done — $ticket → DONE/  (lock은 trap에서 정리됨)"
-  rm -f state/current_ticket
+  # 리뷰 11차 P1: current_ticket도 lock 토큰이 자신일 때만 제거 (소유권 결속).
+  if [ "$(cat state/lock 2>/dev/null)" = "$LOCK_TOKEN" ]; then
+    rm -f state/current_ticket
+  fi
   return 0
 }
 

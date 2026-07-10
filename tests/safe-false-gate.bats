@@ -925,3 +925,91 @@ console.log('cr-line-invalidated');
   [ "$status" -eq 0 ]
   [[ "$output" == *"cr-line-invalidated"* ]]
 }
+
+# ── 리뷰 11차 P1 회귀 ─────────────────────────────────────────────────────────
+
+@test "T42: CR safe line plus normal safe line -> both shell and server treat as duplicate" {
+  printf -- '---\nid: T042\ntitle: t\nstatus: open\npriority: P2\nsafe: true\r\nsafe: true\npersona: implementer\n---\n# T042\n' \
+    > "$TEST_HOME/docs/tickets/T042-test.md"
+  _commit_all "add T042 CR duplicate"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T042' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+
+  command -v node >/dev/null 2>&1 || skip "node not available"
+  run node --input-type=module -e "
+import { readFileSync } from 'node:fs';
+const src = readFileSync(process.argv[1], 'utf8');
+const fnStart = src.indexOf('function parseFrontmatter');
+const fnEnd = src.indexOf('// ── Read model');
+const parseFrontmatter = new Function(src.slice(fnStart, fnEnd) + '; return parseFrontmatter;')();
+const fm = parseFrontmatter(readFileSync(process.argv[2], 'utf8'));
+if (!fm || !(fm._duplicateKeys || []).includes('safe')) { console.error('server missed CR duplicate', fm); process.exit(1); }
+console.log('cr-duplicate-detected');
+" "$REPO_ROOT/mission-control/server.mjs" "$TEST_HOME/docs/tickets/T042-test.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cr-duplicate-detected"* ]]
+}
+
+@test "T43: malformed dependency id (glob) does not satisfy deps" {
+  _make_ticket T001 true done
+  git -C "$TEST_HOME" mv docs/tickets/T001-test.md docs/tickets/DONE/T001-test.md 2>/dev/null || {
+    mv "$TEST_HOME/docs/tickets/T001-test.md" "$TEST_HOME/docs/tickets/DONE/T001-test.md"
+  }
+  cat > "$TEST_HOME/docs/tickets/T043-test.md" <<'EOF'
+---
+id: T043
+title: dep glob test
+status: open
+priority: P2
+safe: true
+persona: implementer
+depends_on: [T*]
+---
+# T043
+EOF
+  _commit_all "add T043 with glob dep"
+
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"T043-test.md"* ]]
+}
+
+@test "T44: dry-run in non-git dir cannot be switched to co-pilot via loop_mode" {
+  # 주의: TEST_HOME 하위는 git 워크트리 내부라 non-git이 아니다 — repo 밖 임시 디렉터리 사용.
+  local ng
+  ng="$(mktemp -d)"
+  mkdir -p "$ng/scripts" "$ng/docs/tickets/DONE" "$ng/skills" "$ng/state" "$ng/mission-control"
+  cp "$TEST_HOME/scripts/run_loop.sh" "$ng/scripts/"
+  cp "$TEST_HOME/scripts/run_checks.sh" "$ng/scripts/"
+  cp "$TEST_HOME/mission-control/approval.mjs" "$ng/mission-control/"
+  cat > "$ng/scripts/run_headless.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "MUST-NOT-DISPATCH" >&2
+exit 99
+EOF
+  cat > "$ng/scripts/pick_next_ticket.sh" <<'EOF'
+#!/usr/bin/env bash
+ls docs/tickets/T*.md 2>/dev/null | head -1
+EOF
+  chmod +x "$ng/scripts/"*.sh
+  echo stub > "$ng/skills/implementer.md"
+  echo x > "$ng/docs/master-spec.md"; echo x > "$ng/docs/runbook.md"
+  cat > "$ng/docs/tickets/T044-test.md" <<'EOF'
+---
+id: T044
+title: t
+status: open
+priority: P2
+safe: true
+persona: implementer
+---
+# T044
+EOF
+  echo "co-pilot" > "$ng/state/loop_mode"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T044 --dry-run' _ "$ng"
+  rm -rf "$ng"
+  [[ "$output" != *"MUST-NOT-DISPATCH"* ]]
+  [[ "$output" == *"실행 전제조건 미충족"* ]]
+}

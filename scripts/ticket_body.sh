@@ -60,20 +60,38 @@ fi
 _file_links() {
   if stat -f%l "$1" >/dev/null 2>&1; then stat -f%l "$1"; else stat -c%h "$1"; fi
 }
+_stat_ino() { stat -f '%d:%i' "$1" 2>/dev/null || stat -c '%d:%i' "$1" 2>/dev/null; }
 _write_guard() {
   local f="$1" want_dir="$2"
   [ -h "$f" ] && { echo "❌ 쓰기 직전 재검증 실패: symlink 교체 감지" >&2; return 1; }
   [ -f "$f" ] || { echo "❌ 쓰기 직전 재검증 실패: regular file 아님" >&2; return 1; }
   [ "$(_file_links "$f")" = "1" ] || { echo "❌ 쓰기 직전 재검증 실패: hardlink(links>1)" >&2; return 1; }
+  # 리뷰 11차 P1: 읽기 시점에 기록한 dev/inode와 일치해야 한다 — 같은 경로에 놓인
+  # "다른" regular 파일로의 교체(TOCTOU)를 잡는다.
+  if [ -n "${EXPECT_INO:-}" ] && [ "$(_stat_ino "$f")" != "$EXPECT_INO" ]; then
+    echo "❌ 쓰기 직전 재검증 실패: 파일 identity(dev/inode) 변경" >&2; return 1
+  fi
   [ "$(cd "$(dirname "$f")" && pwd -P)" = "$(pwd -P)/$want_dir" ] || { echo "❌ 쓰기 직전 재검증 실패: canonical 경로 아님" >&2; return 1; }
 }
 _safe_write() {  # stdin → $1 (same-dir temp + rename), $2=canonical 상대 디렉터리
-  local f="$1" want_dir="$2" tmp
+  local f="$1" want_dir="$2" tmp perm
   tmp=$(mktemp "${want_dir}/.write.XXXXXX") || return 1
-  cat > "$tmp"
+  # 리뷰 11차 P1: 입력 복사 실패(부분 출력)를 성공으로 넘기지 않는다.
+  if ! cat > "$tmp"; then
+    rm -f "$tmp"
+    echo "❌ 임시 파일 쓰기 실패 — 원본 무변조 유지" >&2
+    return 1
+  fi
   if ! _write_guard "$f" "$want_dir"; then rm -f "$tmp"; return 1; fi
+  # 리뷰 11차 P2: rename이 기존 mode를 잃지 않도록 보존 (0600 고정 방지).
+  perm="$(stat -f '%Lp' "$f" 2>/dev/null || stat -c '%a' "$f" 2>/dev/null || true)"
+  [ -n "$perm" ] && chmod "$perm" "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$f"
 }
+
+# 리뷰 11차 P1: 읽기 시점 identity 고정 — 이후 모든 쓰기는 같은 dev/inode여야 한다.
+EXPECT_INO="$(_stat_ino "${file}")"
+
 
 # 하드 가드: open 상태만.
 status="$(awk '/^---$/{fm++;next} fm==1 && $1=="status:"{sub(/^[^:]+:[ \t]*/,"");sub(/[ \t]+#.*$/,"");gsub(/^[ \t]+|[ \t]+$/,"");print;exit}' "$file")"

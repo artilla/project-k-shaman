@@ -204,10 +204,55 @@ if [ -z "$CHANGED_FILES_ARG" ]; then
   fi
 fi
 
+# 리뷰 10차 P1: clean 판정 공용 helper —
+#   (a) --untracked-files=all: status.showUntrackedFiles=no 설정과 무관하게 미추적 검출
+#   (b) 자기 자신의 산출물(lock·감사 로그)만 정확한 상대 경로로 제외
+# 리뷰 11차 P1: substring grep은 같은 문자열이 든 일반 파일 변경까지 숨겼다 —
+# repo-상대 정확 경로(prefix) 매칭으로 교체. in-repo STATE_DIR의 감사 로그도
+# clean 검사 후 생성돼 최종 dirty를 만들었으므로 제외 목록에 포함.
+# git 실패는 rc로 전파 (fail-closed).
+# 상대화 기준은 스크립트 ROOT가 아니라 "지금 검사하는 git 저장소"의 top-level —
+# in-repo custom STATE_DIR(예: <repo>/state2)도 정확히 제외돼야 한다 (리뷰 11차).
+_GIT_TOP="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+# macOS: --show-toplevel은 물리 경로를 주지만 STATE_DIR 인자는 /var 같은 symlink
+# 경로일 수 있다 — 부모 디렉터리를 pwd -P로 물리화한 뒤 상대화한다. 경로가 아직
+# 없으면(첫 실행) status에도 안 나오므로 빈 값이어도 무해.
+_phys_of() {
+  local d
+  d="$(cd "$(dirname "$1")" 2>/dev/null && pwd -P)" || { printf '%s' "$1"; return; }
+  printf '%s/%s' "$d" "$(basename "$1")"
+}
+_rel_of() {
+  case "$1" in
+    "$_GIT_TOP"/*) [ -n "$_GIT_TOP" ] && printf '%s' "${1#"$_GIT_TOP"/}" ;;
+    /*) printf '' ;;    # repo 밖 절대 경로 — status에 나타나지 않음
+    *) printf '%s' "$1" ;;
+  esac
+}
+_wt_status_or_fail() {
+  local out lock_rel log_rel
+  lock_rel="$(_rel_of "$(_phys_of "$STATE_DIR/auto_merge.lock.d")")"
+  log_rel="$(_rel_of "$(_phys_of "$STATE_DIR/auto_merge.log")")"
+  out="$(git status --porcelain --untracked-files=all)" || return 1
+  printf '%s' "$out" | awk -v lock="$lock_rel" -v log_f="$log_rel" '
+    {
+      p = substr($0, 4)
+      if (lock != "" && (p == lock || p == lock "/" || index(p, lock "/") == 1)) next
+      if (lock != "" && index(p, lock ".reclaim.") == 1) next
+      if (log_f != "" && p == log_f) next
+      print
+    }'
+}
+
+
 # ── --execute 전제조건 검사 ──────────────────────────────────────────────────────
 # (eval-only 기본 경로에는 도달하지 않음 — git mutation 0 구조 보장)
 if [ "$EXECUTE" -eq 1 ]; then
-  _wt_dirty="$(git status --porcelain)"
+  # 리뷰 11차: 전제조건도 자기 STATE_DIR 산출물(lock·감사 로그)을 제외한 clean 판정 사용.
+  if ! _wt_dirty="$(_wt_status_or_fail)"; then
+    echo "[FAIL] git status failed — refusing"
+    exit 1
+  fi
   _cur_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'HEAD')"
   if [ -n "$_wt_dirty" ] || [ "$_cur_branch" != "$BASE_BRANCH" ]; then
     echo "[FAIL] --execute requires clean working tree on ${BASE_BRANCH}"
@@ -427,21 +472,16 @@ if [ "$ELIGIBLE" -eq 0 ]; then
 
   mkdir -p "$STATE_DIR"
 
+  # 리뷰 11차 P1: 감사 기록 실패를 조용히 넘기지 않는다 — stderr 경고 + 플래그.
+  # EXECUTED 확정은 감사 기록 성공을 전제로 한다 (감사 없는 성공 금지).
+  AM_AUDIT_FAILED=0
   _am_log() {
-    printf '%s\t%s\t%s\t%s\t%s\n' \
+    if ! printf '%s\t%s\t%s\t%s\t%s\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TICKET_ID" "$BRANCH_ARG" "$1" "$2" \
-      >> "$STATE_DIR/auto_merge.log"
-  }
-
-  # 리뷰 10차 P1: clean 판정 공용 helper —
-  #   (a) --untracked-files=all: status.showUntrackedFiles=no 설정과 무관하게 미추적 검출
-  #   (b) 자기 자신의 lock 경로는 제외 (기본 STATE_DIR=state가 repo 안이라 lock 생성
-  #       직후 자신을 dirty로 오인해 항상 TOCTOU 거부되던 자기-교착 수정)
-  # git 실패는 rc로 전파 (fail-closed).
-  _wt_status_or_fail() {
-    local out
-    out="$(git status --porcelain --untracked-files=all)" || return 1
-    printf '%s' "$out" | grep -vE 'auto_merge\.lock\.d' || true
+      >> "$STATE_DIR/auto_merge.log" 2>/dev/null; then
+      echo "[AUDIT-FAIL] ${2} (${1}) — ${STATE_DIR}/auto_merge.log 기록 실패 (경로/권한 확인)" >&2
+      AM_AUDIT_FAILED=1
+    fi
   }
 
   # 리뷰 8차 P1: 저장소 단위 lock. 리뷰 10차 P1: 소유는 pid가 아니라 고유 token으로
@@ -449,19 +489,39 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   # 원자적 rename으로 한다 (확인-후-삭제 경합 제거).
   AM_LOCK="$STATE_DIR/auto_merge.lock.d"
   AM_LOCK_TOKEN="$$-$RANDOM-$(date +%s)"
+  # 리뷰 11차 P1: token/pid 기록 실패를 획득 성공으로 처리하지 않는다 (rc=2로 구분,
+  # 부분 생성물은 회수).
   _am_acquire_lock() {
     mkdir "$AM_LOCK" 2>/dev/null || return 1
-    printf '%s' "$AM_LOCK_TOKEN" > "$AM_LOCK/token"
-    echo "$$" > "$AM_LOCK/pid"
+    if ! printf '%s' "$AM_LOCK_TOKEN" > "$AM_LOCK/token" 2>/dev/null \
+       || ! echo "$$" > "$AM_LOCK/pid" 2>/dev/null; then
+      rm -rf "$AM_LOCK" 2>/dev/null || true
+      return 2
+    fi
     return 0
   }
-  if ! _am_acquire_lock; then
+  _acq_rc=0; _am_acquire_lock || _acq_rc=$?
+  if [ "$_acq_rc" -eq 2 ]; then
+    echo "[FAIL] lock 기록 실패 (권한/공간?) — 획득으로 처리하지 않음"
+    exit 1
+  fi
+  if [ "$_acq_rc" -eq 1 ]; then
     _old_pid="$(cat "$AM_LOCK/pid" 2>/dev/null || true)"
     if [ -n "$_old_pid" ] && ! kill -0 "$_old_pid" 2>/dev/null; then
       echo "[WARN] stale auto-merge lock (pid ${_old_pid} dead) — reclaiming atomically"
-      if mv "$AM_LOCK" "${AM_LOCK}.reclaim.$$" 2>/dev/null; then
-        rm -rf "${AM_LOCK}.reclaim.$$"
-        _am_acquire_lock || { echo "[FAIL] lock reclaim raced — retry later"; exit 1; }
+      _stale_dir="${AM_LOCK}.reclaim.$$"
+      if mv "$AM_LOCK" "$_stale_dir" 2>/dev/null; then
+        # 리뷰 11차 P1: 회수를 "관찰한 그 lock"에 결속 — rename된 디렉터리의 pid가
+        # 관찰값과 다르면(그 사이 새 owner로 교체) 원복하고 거부한다.
+        _moved_pid="$(cat "$_stale_dir/pid" 2>/dev/null || true)"
+        if [ "$_moved_pid" != "$_old_pid" ]; then
+          mv "$_stale_dir" "$AM_LOCK" 2>/dev/null || true
+          echo "[FAIL] lock owner changed during reclaim — refusing"
+          exit 1
+        fi
+        rm -rf "$_stale_dir"
+        _acq_rc=0; _am_acquire_lock || _acq_rc=$?
+        if [ "$_acq_rc" -ne 0 ]; then echo "[FAIL] lock reclaim raced — retry later"; exit 1; fi
       else
         echo "[FAIL] lock reclaim raced — retry later"
         exit 1
@@ -476,6 +536,31 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   # 리뷰 10차 P1: lock 해제는 token이 자신일 때만 (남의 lock 삭제 금지).
   AM_PHASE="pre-merge"
   trap '[ "$AM_PHASE" != "done" ] && _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "INTERRUPTED:${AM_PHASE}"; [ "$(cat "$AM_LOCK/token" 2>/dev/null)" = "$AM_LOCK_TOKEN" ] && rm -rf "$AM_LOCK" 2>/dev/null || true' EXIT
+  # 리뷰 11차 P1: TERM/INT/HUP 시 실행 중인 post-check 자식 그룹을 먼저 종료·reap한
+  # 뒤에야 EXIT trap이 lock을 해제한다 (자식이 lock 해제 후에도 실행되던 문제).
+  AM_CHECK_PID=""
+  _am_on_signal() {
+    if [ -n "${AM_CHECK_PID:-}" ]; then
+      kill -TERM -- "-${AM_CHECK_PID}" 2>/dev/null || kill -TERM "${AM_CHECK_PID}" 2>/dev/null || true
+      local _i=0
+      while kill -0 "${AM_CHECK_PID}" 2>/dev/null && [ "$_i" -lt 10 ]; do sleep 0.5; _i=$((_i+1)); done
+      kill -KILL -- "-${AM_CHECK_PID}" 2>/dev/null || true
+      wait "${AM_CHECK_PID}" 2>/dev/null || true
+    fi
+    exit 143
+  }
+  trap _am_on_signal TERM INT HUP
+  # post-check를 자체 프로세스 그룹으로 실행해 신호 시 회수 가능하게.
+  _run_post_checks() {
+    local rc=0
+    set -m
+    "$RUN_CHECKS_CMD" >/dev/null 2>&1 &
+    AM_CHECK_PID=$!
+    set +m
+    wait "$AM_CHECK_PID" || rc=$?
+    AM_CHECK_PID=""
+    return "$rc"
+  }
 
   # 리뷰 7차 P1: 병합 직전 base 재검증 — 검사(조건 3·4) 중 현재 브랜치 HEAD가
   # 움직였거나(dirty 포함) 브랜치가 바뀌었으면 병합을 거부한다 (base 측 TOCTOU).
@@ -496,12 +581,14 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   if ! git merge --no-ff "$BRANCH_OID" -m "auto-merge: ${TICKET_ID} (ELIGIBLE)"; then
     AM_PHASE="merge-failed"
     # 리뷰 9차 P1: 복구 실패를 성공(ROLLED_BACK)으로 위장하지 않는다.
-    if git merge --abort >/dev/null 2>&1 || git reset --hard "$BASE_OID" >/dev/null 2>&1; then
+    # 리뷰 11차 P1: 비-CAS reset fallback 제거 — abort 실패면 워크트리 상태를
+    # 추정으로 덮지 않고 RECOVERY_REQUIRED로 중단한다.
+    if git merge --abort >/dev/null 2>&1; then
       AM_PHASE="done"; _am_log "$BASE_OID" "ROLLED_BACK"
-      echo "[FAIL] git merge failed — rolled back to base"
+      echo "[FAIL] git merge failed — aborted cleanly"
     else
       AM_PHASE="done"; _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED"
-      echo "[FAIL] git merge failed AND rollback failed — RECOVERY_REQUIRED (수동 확인 필요)"
+      echo "[FAIL] git merge failed AND abort failed — RECOVERY_REQUIRED (수동 확인 필요)"
     fi
     exit 1
   fi
@@ -519,7 +606,7 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     exit 1
   fi
 
-  if "$RUN_CHECKS_CMD" >/dev/null 2>&1; then
+  if _run_post_checks; then
     # 리뷰 9차 P1: 성공 확정 전 최종 상태 재검증 — post-check가 HEAD를 움직였거나
     # 브랜치를 바꿨거나 산출물(untracked 포함)을 남겼으면 EXECUTED가 아니다.
     _final_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -531,7 +618,15 @@ if [ "$ELIGIBLE" -eq 0 ]; then
       echo "[FAIL] post-check 후 최종 상태 불일치 (HEAD=${_final_head} expected=${MERGE_COMMIT}, branch=${_final_branch}, dirty=$([ -n "$_final_status" ] && echo yes || echo no)) — RECOVERY_REQUIRED, 자동 복구하지 않음"
       exit 1
     fi
-    AM_PHASE="done"; _am_log "$MERGE_COMMIT" "EXECUTED"
+    _am_log "$MERGE_COMMIT" "EXECUTED"
+    # 리뷰 11차 P1: 감사 기록이 실패했으면 성공으로 끝내지 않는다 — 병합은 남아
+    # 있으므로 수동 확인을 요구한다 (감사 없는 EXECUTED 금지).
+    if [ "$AM_AUDIT_FAILED" -ne 0 ]; then
+      AM_PHASE="done"
+      echo "[FAIL] merge는 완료됐으나 감사 로그 기록 실패 — RECOVERY_REQUIRED(감사 경로 복구 후 수동 기록 필요): ${MERGE_COMMIT}"
+      exit 1
+    fi
+    AM_PHASE="done"
     echo "[PASS] auto-merge executed: ${MERGE_COMMIT}"
     exit 0
   else
@@ -542,15 +637,31 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     # 커밋) 건드리지 않고 RECOVERY_REQUIRED. HEAD-확인-후-reset 경합도 CAS가 제거한다.
     if git update-ref -m "auto-merge rollback ${TICKET_ID}" \
          "refs/heads/${BASE_BRANCH}" "$BASE_OID" "$MERGE_COMMIT" 2>/dev/null; then
-      # HEAD가 base 브랜치를 가리키면 워킹트리/index도 동기화 (ref는 이미 정확)
+      # 리뷰 11차 P1: CAS 이후의 reset --hard는 그 사이 생긴 새 변경을 제거할 수 있다 —
+      # HEAD가 base 브랜치이고 워킹트리에 새 변경이 없을 때만 동기화하고, 그 외에는
+      # reset을 생략하고 ROLLED_BACK_REF_ONLY로 정직하게 기록한다.
+      _ref_only=1
       if [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$BASE_BRANCH" ]; then
-        git reset --hard "$BASE_OID" >/dev/null 2>&1 \
-          || echo "[WARN] base ref는 복구됐으나 워킹트리 동기화 실패 — git reset --hard ${BASE_OID} 를 수동 실행하세요"
+        _wt_now=""
+        if _wt_now="$(_wt_status_or_fail)" && [ -z "$_wt_now" ]; then
+          if git reset --hard "$BASE_OID" >/dev/null 2>&1; then
+            _ref_only=0
+          else
+            echo "[WARN] base ref는 복구됐으나 워킹트리 동기화 실패 — git reset --hard ${BASE_OID} 를 수동 실행하세요"
+          fi
+        else
+          echo "[WARN] 워킹트리에 새 변경/판정 불가 — reset 생략 (수동으로 git reset --hard ${BASE_OID} 검토)"
+        fi
       else
         echo "[WARN] base ref는 복구됐으나 HEAD가 '${BASE_BRANCH}'가 아닙니다 — 워킹트리를 확인하세요"
       fi
-      AM_PHASE="done"; _am_log "$MERGE_COMMIT" "ROLLED_BACK"
-      echo "[FAIL] post-merge run_checks 실패 — rollback (ref CAS)"
+      AM_PHASE="done"
+      if [ "$_ref_only" -eq 0 ]; then
+        _am_log "$MERGE_COMMIT" "ROLLED_BACK"
+      else
+        _am_log "$MERGE_COMMIT" "ROLLED_BACK_REF_ONLY"
+      fi
+      echo "[FAIL] post-merge run_checks 실패 — rollback (ref CAS$([ "$_ref_only" -eq 1 ] && echo ', worktree 미동기화'))"
       _leftover="$(_wt_status_or_fail 2>/dev/null || true)"
       if [ -n "$_leftover" ]; then
         echo "[WARN] rollback 후 미추적/변경 산출물이 남아 있습니다 (수동 정리 필요):"
