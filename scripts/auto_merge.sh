@@ -124,7 +124,8 @@ while IFS= read -r _fmline; do
       case "$_fmline" in
         safe:*) _fm_safe_count=$((_fm_safe_count + 1)) ;;
       esac
-      if printf '%s\n' "$_fmline" | grep -qE '^safe:[[:space:]]*true[[:space:]]*$'; then
+      # 리뷰 6차 P2: quoted scalar("true") 허용 — 셸 field_of·서버 파서와 동일 계약.
+      if printf '%s\n' "$_fmline" | grep -qE '^safe:[[:space:]]*("true"|true)[[:space:]]*$'; then
         _fm_safe=1
       fi
       ;;
@@ -161,6 +162,31 @@ if [ "$EXECUTE" -eq 1 ]; then
     echo "[FAIL] --execute requires clean working tree on ${BASE_BRANCH}"
     exit 1
   fi
+
+  # 리뷰 6차 P1: 티켓-브랜치 연결 — 승인된 티켓 ID로 무관한 브랜치를 병합하는 우회 차단.
+  # 브랜치 basename이 정확히 TICKET_ID이거나 TICKET_ID- 접두여야 한다 (예: ralph/T999).
+  _branch_base="${BRANCH_ARG##*/}"
+  case "$_branch_base" in
+    "$TICKET_ID"|"$TICKET_ID"-*) ;;
+    *)
+      echo "[FAIL] branch '${BRANCH_ARG}' is not linked to ticket ${TICKET_ID} (expected .../${TICKET_ID} or .../${TICKET_ID}-*)"
+      exit 1
+      ;;
+  esac
+fi
+
+# ── 리뷰 6차 P1: base/branch commit OID 고정 (TOCTOU 차단) ────────────────────────
+# 검사(조건 2·4)와 병합 사이에 브랜치 ref가 이동하면 검사받지 않은 커밋이 병합됐다.
+# 시작 시점에 OID를 고정하고 diff·commit-count·merge 전부 이 OID만 사용한다.
+BASE_OID=""
+BRANCH_OID=""
+if [ -z "$CHANGED_FILES_ARG" ]; then
+  BASE_OID="$(git rev-parse --verify "${BASE_BRANCH}^{commit}" 2>/dev/null || true)"
+  if [ "$EXECUTE" -eq 1 ]; then
+    BRANCH_OID="$(git rev-parse --verify "${BRANCH_ARG}^{commit}" 2>/dev/null || true)"
+  else
+    BRANCH_OID="$(git rev-parse --verify "HEAD^{commit}" 2>/dev/null || true)"
+  fi
 fi
 
 # ── changed-files 결정 ────────────────────────────────────────────────────────
@@ -173,24 +199,37 @@ fi
 # pipefail(스크립트 상단 set -euo pipefail)이 git 실패를 함수 종료 코드로 전파한다.
 # 리뷰 5차 P2: diff.renameLimit이 낮게 설정된 저장소에서는 rename/copy 탐지가 조용히
 # 포기되고 `A docs/...`로 위장된다(fail-open) — -l0으로 탐지 한도를 해제한다.
+# 리뷰 6차 P2: -z(NUL 구분)로 파싱 — 텍스트 출력은 비ASCII 경로(docs/한글.md)를
+# C-quote해 docs/ 밖 경로로 오인, 정당한 병합을 거부했다.
 _diff_paths() {
-  git diff --name-status -M -C --find-copies-harder -l0 "$1" | awk -F'\t' '
-    $1 ~ /^[RC]/ { if ($2 != "") print $2; if ($3 != "") print $3; next }
-    { if ($2 != "") print $2 }
-  '
+  git diff --name-status -M -C --find-copies-harder -l0 -z "$1" | {
+    st=""
+    p=""
+    while IFS= read -r -d '' st; do
+      case "$st" in
+        R*|C*)
+          IFS= read -r -d '' p && printf '%s\n' "$p"
+          IFS= read -r -d '' p && printf '%s\n' "$p"
+          ;;
+        *)
+          IFS= read -r -d '' p && printf '%s\n' "$p"
+          ;;
+      esac
+    done
+  }
 }
 
 # 리뷰 3차 P1: diff 실패(잘못된 base/branch 등)를 `|| true`로 삼키면 빈 변경 목록이
 # 되어 조건 2가 공허하게 PASS했다 — diff 실패는 조건 2 실패로 처리한다(fail-closed).
+# 리뷰 6차 P1: diff는 고정 OID만 사용 (ref 이동 무시).
 TMPCHANGED="$(mktemp)"
 DIFF_FAILED=0
 if [ -n "$CHANGED_FILES_ARG" ]; then
   cp "$CHANGED_FILES_ARG" "$TMPCHANGED"
-elif [ "$EXECUTE" -eq 1 ]; then
-  # --execute: synthetic changed-files 불가, 실제 브랜치 diff 사용
-  _diff_paths "${BASE_BRANCH}...${BRANCH_ARG}" > "$TMPCHANGED" || DIFF_FAILED=1
+elif [ -z "$BASE_OID" ] || [ -z "$BRANCH_OID" ]; then
+  DIFF_FAILED=1
 else
-  _diff_paths "${BASE_BRANCH}...HEAD" > "$TMPCHANGED" || DIFF_FAILED=1
+  _diff_paths "${BASE_OID}...${BRANCH_OID}" > "$TMPCHANGED" || DIFF_FAILED=1
 fi
 
 # ── 5조건 평가 ────────────────────────────────────────────────────────────────
@@ -322,7 +361,9 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   fi
 
   # ── --execute: (c) 단일-commit 검증 + merge + post-merge 검사 ──────────────
-  COMMIT_COUNT="$(git rev-list --count "${BASE_BRANCH}..${BRANCH_ARG}")"
+  # 리뷰 6차 P1: count·merge 모두 시작 시 고정한 OID 사용 — 검사 후 ref가 이동해도
+  # 검사받은 커밋만 병합된다(TOCTOU 차단).
+  COMMIT_COUNT="$(git rev-list --count "${BASE_OID}..${BRANCH_OID}")"
   if [ "$COMMIT_COUNT" -ne 1 ]; then
     echo "[FAIL] (c) single-commit 위반: ${COMMIT_COUNT} commits"
     exit 1
@@ -330,7 +371,7 @@ if [ "$ELIGIBLE" -eq 0 ]; then
 
   mkdir -p "$STATE_DIR"
   PRE_MERGE_HEAD="$(git rev-parse HEAD)"
-  if ! git merge --no-ff "$BRANCH_ARG" -m "auto-merge: ${TICKET_ID} (ELIGIBLE)"; then
+  if ! git merge --no-ff "$BRANCH_OID" -m "auto-merge: ${TICKET_ID} (ELIGIBLE)"; then
     git merge --abort >/dev/null 2>&1 || git reset --hard "$PRE_MERGE_HEAD" >/dev/null 2>&1 || true
     printf '%s\t%s\t%s\t%s\tROLLED_BACK\n' \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TICKET_ID" "$BRANCH_ARG" "$PRE_MERGE_HEAD" \

@@ -38,6 +38,8 @@ field_of() {
       sub(/^[^:]+:[ \t]*/, "", line)
       sub(/[ \t]+#.*$/, "", line)
       gsub(/^[ \t]+|[ \t]+$/, "", line)
+      # 리뷰 6차 P2: quoted scalar 허용 — 서버 파서와 동일 계약.
+      if (line ~ /^".*"$/) line = substr(line, 2, length(line) - 2)
       val = line
       found = 1
     }
@@ -121,10 +123,10 @@ for f in docs/tickets/T*.md; do
   base=$(basename "$f" .md)
   id="${base%%-*}"
 
-  # 리뷰 5차 P1: 권위 필드(safe/status는 정확히 1회, id/persona는 중복 금지) 단일성 —
-  # 셸은 첫 값, 서버는 마지막 값을 읽으므로 중복 선언은 split-brain을 만든다.
+  # 리뷰 5차 P1: 권위 필드 단일성 — 셸은 첫 값, 서버는 마지막 값을 읽으므로 중복 선언은
+  # split-brain을 만든다. 리뷰 6차 P1: id는 정확히 1회 + T<숫자> 형식 + 파일명 ID 일치.
   dup_bad=0
-  for fkey in safe status; do
+  for fkey in safe status id; do
     if [ "$(frontmatter_field_count "$f" "$fkey")" != "1" ]; then
       echo "[SKIP] $id — frontmatter의 ${fkey} 선언이 정확히 1회가 아닙니다. fail-closed로 제외 — 티켓 frontmatter를 고치세요."
       dup_bad=1
@@ -132,14 +134,19 @@ for f in docs/tickets/T*.md; do
     fi
   done
   [ "$dup_bad" = "1" ] && continue
-  for fkey in id persona; do
-    if [ "$(frontmatter_field_count "$f" "$fkey")" -gt 1 ]; then
-      echo "[SKIP] $id — frontmatter의 ${fkey} 선언이 중복입니다. fail-closed로 제외 — 티켓 frontmatter를 고치세요."
-      dup_bad=1
-      break
-    fi
-  done
-  [ "$dup_bad" = "1" ] && continue
+  if [ "$(frontmatter_field_count "$f" persona)" -gt 1 ]; then
+    echo "[SKIP] $id — frontmatter의 persona 선언이 중복입니다. fail-closed로 제외 — 티켓 frontmatter를 고치세요."
+    continue
+  fi
+  fm_id=$(field_of "$f" id || true)
+  if ! [[ "$id" =~ ^T[0-9]+$ ]]; then
+    echo "[SKIP] $id — 파일명 ID가 T<숫자> 형식이 아닙니다. fail-closed로 제외."
+    continue
+  fi
+  if [ "$fm_id" != "$id" ]; then
+    echo "[SKIP] $id — frontmatter id('${fm_id}')가 파일명 ID와 다릅니다. fail-closed로 제외 — 티켓을 고치세요."
+    continue
+  fi
 
   status=$(field_of "$f" status || true)
   # 'open' 만 후보. done/skipped/blocked/awaiting-approval 는 제외.

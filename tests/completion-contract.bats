@@ -396,3 +396,55 @@ EOF
   [ "$status" -eq 7 ]
   [[ "$output" == *"no-commit"* ]]
 }
+
+# ── 리뷰 6차 P1: symlink 재타깃 fingerprint 회귀 ──────────────────────────────
+
+@test "C15: untracked symlink retargeted to same-content file -> no-commit rc=7" {
+  local main_home="$TEST_BASE/main-home"
+  _make_home "$main_home"
+  # 같은 내용의 두 파일 + 링크 (미추적) — hash-object는 대상 내용을 따라가므로
+  # readlink를 기록하지 않으면 b→c 재타깃이 보이지 않았다
+  echo "same content" > "$main_home/src/target-b.txt"
+  echo "same content" > "$main_home/src/target-c.txt"
+  git -C "$main_home" add src/target-b.txt src/target-c.txt
+  git -C "$main_home" commit -q -m "add targets"
+  ln -s target-b.txt "$main_home/src/link"
+
+  cat > "$main_home/scripts/run_headless.sh" <<EOF
+${_fake_headless_prologue}
+ln -sfn target-c.txt src/link
+tmp=\$(mktemp)
+awk '/^---\$/ { fm = !fm; print; next } fm && \$1 == "status:" { print "status: done"; next } { print }' "\$ticket" > "\$tmp"
+mv "\$tmp" "\$ticket"
+git add "\$ticket"
+git mv "\$ticket" "docs/tickets/DONE/\$(basename "\$ticket")"
+git commit -q -m "\${id}: done, symlink retargeted" -- docs
+EOF
+  chmod +x "$main_home/scripts/run_headless.sh"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T100' _ "$main_home"
+  [ "$status" -eq 7 ]
+  [[ "$output" == *"no-commit"* ]]
+}
+
+@test "C16: assume-unchanged file modified by persona -> no-commit rc=7" {
+  local main_home="$TEST_BASE/main-home"
+  _make_home "$main_home"
+  git -C "$main_home" update-index --assume-unchanged src/app.js
+
+  cat > "$main_home/scripts/run_headless.sh" <<EOF
+${_fake_headless_prologue}
+echo "hidden change behind assume-unchanged" >> src/app.js
+tmp=\$(mktemp)
+awk '/^---\$/ { fm = !fm; print; next } fm && \$1 == "status:" { print "status: done"; next } { print }' "\$ticket" > "\$tmp"
+mv "\$tmp" "\$ticket"
+git add "\$ticket"
+git mv "\$ticket" "docs/tickets/DONE/\$(basename "\$ticket")"
+git commit -q -m "\${id}: done, hidden change" -- docs
+EOF
+  chmod +x "$main_home/scripts/run_headless.sh"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T100' _ "$main_home"
+  [ "$status" -eq 7 ]
+  [[ "$output" == *"no-commit"* ]]
+}

@@ -367,6 +367,8 @@ field_of() {
       sub(/^[^:]+:[ \t]*/, "", line)
       sub(/[ \t]+#.*$/, "", line)
       gsub(/^[ \t]+|[ \t]+$/, "", line)
+      # 리뷰 6차 P2: quoted scalar("open", "implementer") 허용 — 서버 파서와 동일 계약.
+      if (line ~ /^".*"$/) line = substr(line, 2, length(line) - 2)
       val = line
       found = 1
     }
@@ -463,34 +465,52 @@ _op_dirty_lines() {
   '
 }
 
-# 리뷰 3차/4차/5차 P1: 완료 판정용 WIP fingerprint.
+# 리뷰 3~6차 P1/P2: 완료 판정용 WIP fingerprint.
 # 디스패치 직전과 완료 시점의 fingerprint가 "동일"해야 완료 — 사이클 중 WIP의
-# 추가·삭제·내용 변경을 모두 잡는 양방향 비교다. 구성:
-#   (1) porcelain 상태 행
-#   (2) staged/unstaged diff --raw (index blob SHA·mode 포함 — worktree가 같아도
-#       index 내용만 바꾸는 우회를 잡는다, 5차 리뷰)
-#   (3) dirty(staged/unstaged/미추적) 파일별 worktree 내용 해시
-# 경로 나열은 전부 -z(NUL 구분) — --name-only 텍스트 출력은 비ASCII·탭 경로를
-# C-quote해 `[ -f ]`가 실패, 해시가 absent로 고정되는 fail-open이 있었다(5차 리뷰).
+# 추가·삭제·내용 변경을 모두 잡는 양방향 비교다. 구성 (각 줄은 스트림의 해시):
+#   status: porcelain 상태 행 (C-quote 표현이라도 pre/post 동일 표현 — 비교엔 충분)
+#   raw:    staged/unstaged `diff --raw -z` — index blob SHA·mode 변경 탐지.
+#           NUL을 그대로 hash-object에 넣는다 (6차: tr '\0' '\n' 변환은 개행 포함
+#           파일명과 구분자가 충돌해 fingerprint 위조가 가능했다).
+#   files:  dirty(staged/unstaged/미추적) + assume-unchanged/skip-worktree 파일별
+#           유형·내용 레코드(NUL 구분)의 해시.
+#           - symlink는 [ -f ]/hash-object가 대상을 따라가 재타깃(b→c)을 놓쳤다(6차)
+#             → 링크 자신의 readlink 값을 기록.
+#           - assume-unchanged(소문자 태그)/skip-worktree(S) 파일은 status에 안 보여
+#             내용 변경이 숨었다(6차) → 해시 대상에 포함.
+# git 실패는 GITFAIL sentinel + stderr를 억제하지 않아 로그에 드러난다(6차 P2 —
+# 단 pre/post 모두 실패하면 동일 sentinel이라 구분 불가, 알려진 한계).
 # 루프 자신이 쓰는 .ralph/(로그)·state/(예약 메타)는 gitignore 여부와 무관하게 제외.
+# files 스트림은 별도 함수로 분리한다 — bash 3.2(macOS)의 $() 파서는 명령 치환 안의
+# case 패턴 `)` 를 오해석해 syntax error를 내고, 그 결과 files 해시가 깨진 리터럴로
+# 고정돼 내용 변경을 전부 놓쳤다(6차 검증 중 발견).
+_wip_files_stream() {
+  local f entry
+  { git diff --name-only -z
+    git diff --cached --name-only -z
+    git ls-files --others --exclude-standard -z
+    git ls-files -v -z | while IFS= read -r -d '' entry; do
+      case "$entry" in
+        [a-z]" "*|"S "*) printf '%s\0' "${entry#* }" ;;
+      esac
+    done
+  } | while IFS= read -r -d '' f; do
+    case "$f" in .ralph/*|state/*) continue ;; esac
+    if [ -h "$f" ]; then
+      printf '%s\0symlink:%s\0' "$f" "$(readlink "./$f" 2>/dev/null || echo unreadable)"
+    elif [ -f "$f" ]; then
+      printf '%s\0blob:%s\0' "$f" "$(git hash-object -- "$f" 2>/dev/null || echo unhashable)"
+    else
+      printf '%s\0absent\0' "$f"
+    fi
+  done
+}
+
 _wip_fingerprint() {
-  local f
-  {
-    git status --porcelain 2>/dev/null | grep -vE '^.{3}(\.ralph/|state/)' | LC_ALL=C sort
-    { git diff --raw -z 2>/dev/null; git diff --cached --raw -z 2>/dev/null; } \
-      | tr '\0' '\n' | LC_ALL=C sort
-    { git diff --name-only -z 2>/dev/null
-      git diff --cached --name-only -z 2>/dev/null
-      git ls-files --others --exclude-standard -z 2>/dev/null
-    } | while IFS= read -r -d '' f; do
-      case "$f" in .ralph/*|state/*) continue ;; esac
-      if [ -f "$f" ]; then
-        printf '%s %s\n' "$f" "$(git hash-object -- "$f" 2>/dev/null || echo unhashable)"
-      else
-        printf '%s absent\n' "$f"
-      fi
-    done | LC_ALL=C sort -u
-  } 2>/dev/null
+  # grep은 매치 0건이면 rc=1 — pipefail이 이를 실패로 오인하지 않게 || true로 감싼다.
+  printf 'status:%s\n' "$({ git status --porcelain | grep -vE '^.{3}(\.ralph/|state/)' || true; } | LC_ALL=C sort | git hash-object --stdin || echo GITFAIL)"
+  printf 'raw:%s\n' "$({ git diff --raw -z; git diff --cached --raw -z; } | git hash-object --stdin || echo GITFAIL)"
+  printf 'files:%s\n' "$(_wip_files_stream | git hash-object --stdin || echo GITFAIL)"
 }
 
 pick_next_ticket_path() {
@@ -686,26 +706,30 @@ cycle_one() {
   # 리뷰 5차 P1: 권위 필드 전체로 확장 — 셸은 첫 값, 서버는 마지막 값을 읽으므로 중복
   # 선언(예: status: open → status: done)은 실행 상태 split-brain을 만든다.
   # safe/status는 정확히 1회, id/persona는 중복(2회+) 금지(누락은 기존 기본값 경로 유지).
+  # 리뷰 6차 P1: id는 정확히 1회 + T<숫자> 형식 + 파일명 ID와 일치 (공용 계약 —
+  # 서버는 frontmatter id를 신뢰하므로 불일치는 감사 기록이 다른 티켓에 달리는 우회였다).
   local fkey fcount
-  for fkey in safe status id persona; do
+  for fkey in safe status id; do
     fcount=$(frontmatter_field_count "$ticket" "$fkey")
-    case "$fkey" in
-      safe|status)
-        if [ "$fcount" != "1" ]; then
-          echo "❌ ${id} — frontmatter의 ${fkey} 선언이 ${fcount}회입니다. 정확히 1회 필요 (fail-closed)."
-          add_failure "$id" "frontmatter-malformed" "${i:-0}" "$ticket"
-          return 14
-        fi
-        ;;
-      *)
-        if [ "$fcount" -gt 1 ]; then
-          echo "❌ ${id} — frontmatter의 ${fkey} 선언이 ${fcount}회입니다. 중복 선언 금지 (fail-closed)."
-          add_failure "$id" "frontmatter-malformed" "${i:-0}" "$ticket"
-          return 14
-        fi
-        ;;
-    esac
+    if [ "$fcount" != "1" ]; then
+      echo "❌ ${id} — frontmatter의 ${fkey} 선언이 ${fcount}회입니다. 정확히 1회 필요 (fail-closed)."
+      add_failure "$id" "frontmatter-malformed" "${i:-0}" "$ticket"
+      return 14
+    fi
   done
+  fcount=$(frontmatter_field_count "$ticket" persona)
+  if [ "$fcount" -gt 1 ]; then
+    echo "❌ ${id} — frontmatter의 persona 선언이 ${fcount}회입니다. 중복 선언 금지 (fail-closed)."
+    add_failure "$id" "frontmatter-malformed" "${i:-0}" "$ticket"
+    return 14
+  fi
+
+  local fm_id; fm_id=$(field_of "$ticket" id || true)
+  if ! [[ "$id" =~ ^T[0-9]+$ ]] || [ "$fm_id" != "$id" ]; then
+    echo "❌ 파일명 ID('${id}')와 frontmatter id('${fm_id}')가 다르거나 T<숫자> 형식이 아닙니다 (fail-closed)."
+    add_failure "$id" "frontmatter-malformed" "${i:-0}" "$ticket"
+    return 14
+  fi
   case "$safe" in
     true|false) ;;
     *)
@@ -770,6 +794,14 @@ EOF
   # ────────── 4. Persona 라우팅 ──────────
   local persona; persona=$(field_of "$ticket" persona)
   [ -z "$persona" ] && persona="implementer"
+
+  # 리뷰 6차 P1: persona는 skills/<persona>.md 경로에 그대로 들어간다 — `../` 등
+  # 경로 조작으로 skills/ 밖 파일이 페르소나로 로드되던 우회를 문자 화이트리스트로 차단.
+  if ! [[ "$persona" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "❌ persona '$persona' 형식 비정상 — [A-Za-z0-9_-]만 허용합니다 (경로 조작 차단, fail-closed)."
+    add_failure "${id:-unknown}" "unknown-persona" "${i:-0}" "persona='$persona'"
+    return 12
+  fi
 
   local skill_file="skills/${persona}.md"
   if [ ! -f "$skill_file" ]; then

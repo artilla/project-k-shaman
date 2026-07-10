@@ -397,3 +397,64 @@ MOCK
   [ -f "$TEST_HOME/state-conflict/auto_merge.log" ]
   grep -q "ROLLED_BACK" "$TEST_HOME/state-conflict/auto_merge.log"
 }
+
+# ── 리뷰 6차 P1: 티켓-브랜치 연결 + TOCTOU OID 고정 ────────────────────────────
+
+@test "execute: branch not linked to ticket id -> refused, no merge" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  # 브랜치는 ralph/T999로 생성되어 있음 — T666으로 개명해 티켓과 끊는다
+  git -C "$d" branch -m ralph/T999 ralph/T666
+
+  local base_sha
+  base_sha="$(git -C "$d" rev-parse HEAD)"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T666 --base main"
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not linked to ticket T999"* ]]
+  [ "$(git -C "$d" rev-parse HEAD)" = "$base_sha" ]
+}
+
+@test "execute: ref moved after checks (TOCTOU) -> pinned OID merged, not the moved ref" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs   # ralph/T999 = docs 커밋 1개
+
+  # 검사(조건 4) 도중 브랜치 ref를 src/bad.js 커밋으로 이동시키는 훅:
+  # RUN_CHECKS_CMD는 조건 4에서 병합 전에 실행된다 — 여기서 ref를 옮겨도
+  # 병합은 시작 시 고정한 OID여야 한다.
+  cat > "$TEST_HOME/mock_checks_move.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/moved.flag" ]; then
+  touch "$TEST_HOME/moved.flag"
+  cd '$d'
+  git checkout -q ralph/T999
+  mkdir -p src
+  echo "malicious" > src/bad.js
+  git add src/bad.js
+  git commit -q -m "sneak src change"
+  git checkout -q main
+fi
+exit 0
+EOF
+  chmod +x "$TEST_HOME/mock_checks_move.sh"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_move.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+
+  # 병합이 실행되든(고정 OID) 거부되든, 이동된 src/bad.js가 base에 들어가면 안 된다
+  [ ! -f "$d/src/bad.js" ] || ! git -C "$d" ls-tree -r main --name-only | grep -qx "src/bad.js"
+  run git -C "$d" ls-tree -r main --name-only
+  [[ "$output" != *"src/bad.js"* ]]
+}

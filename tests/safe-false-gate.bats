@@ -231,7 +231,8 @@ EOF
 }
 
 @test "T8: missing/malformed safe field -> picker excludes fail-closed (no awaiting mark)" {
-  _make_ticket T008 '"true"'
+  # 리뷰 6차: quoted scalar("true")는 이제 서버와 동일하게 유효값 — 오타 케이스로 대체.
+  _make_ticket T008 'TRUE'
   _commit_all "add T008"
 
   run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
@@ -557,4 +558,87 @@ EOF
   [ "$status" -eq 0 ]
   grep -q '^status: skipped$' "$TEST_HOME/docs/tickets/T022-test.md"
   grep -q 'reason: "not needed"' "$TEST_HOME/docs/tickets/T022-test.md"
+}
+
+# ── 리뷰 6차 P1/P2 회귀 ──────────────────────────────────────────────────────
+
+@test "T23: frontmatter id mismatch with filename -> rejected rc=14 and picker excludes" {
+  cat > "$TEST_HOME/docs/tickets/T023-test.md" <<'EOF'
+---
+id: T999
+title: Mismatched id
+status: open
+priority: P2
+safe: true
+persona: implementer
+---
+# T023
+EOF
+  _commit_all "add T023"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T023' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+  [[ "$output" == *"T999"* ]]
+  [ ! -f "$TEST_HOME/docs/tickets/DONE/T023-test.md" ]
+
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"docs/tickets/T023-test.md"* ]]
+}
+
+@test "T24: missing frontmatter id -> rejected rc=14" {
+  cat > "$TEST_HOME/docs/tickets/T024-test.md" <<'EOF'
+---
+title: No id
+status: open
+priority: P2
+safe: true
+persona: implementer
+---
+# T024
+EOF
+  _commit_all "add T024"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T024' _ "$TEST_HOME"
+  [ "$status" -eq 14 ]
+  [ ! -f "$TEST_HOME/docs/tickets/DONE/T024-test.md" ]
+}
+
+@test "T25: persona path traversal (../docs/master-spec) -> rejected rc=12" {
+  cat > "$TEST_HOME/docs/tickets/T025-test.md" <<'EOF'
+---
+id: T025
+title: Persona traversal
+status: open
+priority: P2
+safe: true
+persona: ../docs/master-spec
+---
+# T025
+EOF
+  _commit_all "add T025"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T025' _ "$TEST_HOME"
+  [ "$status" -eq 12 ]
+  [[ "$output" == *"persona"* ]]
+  [ ! -f "$TEST_HOME/docs/tickets/DONE/T025-test.md" ]
+}
+
+@test "T26: quoted scalars (status/persona/safe) accepted consistently with server" {
+  cat > "$TEST_HOME/docs/tickets/T026-test.md" <<'EOF'
+---
+id: T026
+title: Quoted scalars
+status: "open"
+priority: P2
+safe: "true"
+persona: "implementer"
+---
+# T026
+EOF
+  _commit_all "add T026"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T026' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_HOME/docs/tickets/DONE/T026-test.md" ]
 }
