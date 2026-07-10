@@ -7,7 +7,7 @@
 
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
-import { readFileSync, existsSync, readdirSync, statSync, realpathSync, watch, appendFileSync, mkdirSync, openSync, closeSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync, lstatSync, realpathSync, watch, appendFileSync, mkdirSync, openSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, resolve, sep, basename } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -198,7 +198,11 @@ function parseFrontmatter(content) {
     // 리뷰 7차 P2: unquote를 boolean 판정보다 먼저 — `safe: "true"`가 문자열로 남아
     // 셸(실행 허용)과 어긋나던 split-brain 해소. 셸 field_of도 쌍·홑따옴표를 벗긴다.
     // 리뷰 8차 P2: 같은 종류의 쌍일 때만 unquote — `"open'` 혼합 쌍을 벗기지 않는다.
-    const unquoted = raw.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1');
+    // 리뷰 9차 P1: 외곽 quote 종류를 한 번만 판단(if/else) — 체이닝은 `"'true'"`를
+    // 두 겹 벗겨 boolean으로 승격시켰다 (셸은 한 겹만 벗긴다).
+    let unquoted = raw;
+    if (/^".*"$/.test(raw)) unquoted = raw.slice(1, -1);
+    else if (/^'.*'$/.test(raw)) unquoted = raw.slice(1, -1);
     if (unquoted === 'true') {
       fm[key] = true;
     } else if (unquoted === 'false') {
@@ -223,8 +227,11 @@ function listTicketFiles() {
     if (!existsSync(dir)) return;
     for (const f of readdirSync(dir)) {
       const fp = join(dir, f);
+      // 리뷰 9차 P1: lstatSync — statSync는 symlink 티켓/디렉터리를 따라가
+      // 외부 파일이 canonical 티켓으로 모델에 올라왔다. symlink는 제외(fail-closed).
       let st;
-      try { st = statSync(fp); } catch { continue; }
+      try { st = lstatSync(fp); } catch { continue; }
+      if (st.isSymbolicLink()) continue;
       if (st.isDirectory()) {
         if (f === 'DONE') collect(fp, true);
         continue;
@@ -320,6 +327,9 @@ function buildModel() {
             // status 누락(기본화된 'open')이나 권위 필드 중복 티켓에 Run을 노출하지 않는다.
             status_missing: !entry.doneDir && !fm.status,
             authority_malformed: (fm._duplicateKeys || []).some(k => ['id', 'status', 'persona', 'safe'].includes(k)),
+            // 리뷰 9차 P1: 실행기(run_loop)는 persona를 [A-Za-z0-9_-]+로 제한한다 —
+            // 경로 조작형 persona는 UI/writer에서도 malformed로 취급.
+            persona_malformed: !/^[A-Za-z0-9_-]*$/.test(String(fm.persona || '')),
             // 리뷰 7차 P1: 실행기는 frontmatter id == 파일명 ID(T<숫자>, 전체 basename
             // 형식 포함)를 요구한다 — 불일치 카드(T301 파일 + id:T999)에 Run 미노출.
             id_malformed: (() => {
@@ -971,7 +981,7 @@ function renderTicketCard(ticket, doneIds, nowMs, isLocalhost = true, failCount 
   // 리뷰 5차 P2: status 누락·권위 필드 중복도 실행기가 거부하므로 동일하게 미노출.
   // 리뷰 8차 P1: Run뿐 아니라 메타·본문·lifecycle writer 전부 동일 게이트(cardWritable).
   const cardWritable = !ticket.safe_malformed && !ticket.status_missing
-      && !ticket.authority_malformed && !ticket.id_malformed;
+      && !ticket.authority_malformed && !ticket.id_malformed && !ticket.persona_malformed;
   const runButton = isLocalhost && status === 'open' && !blocked && cardWritable
     ? renderWriteButton({
         label: 'Run',
@@ -4732,8 +4742,10 @@ function execPlan(payload) {
       throw new Error(`ticketId ${ticketId} resolves to ${canonicalMatches.length} tickets — refusing (need exactly 1 canonical)`);
     }
     const t = canonicalMatches[0];
-    if (t.id_malformed || t.authority_malformed) {
-      throw new Error(`ticket ${ticketId} has malformed identity/authority frontmatter — refusing dispatch`);
+    // 리뷰 9차 P1: dispatch 검증을 UI의 cardWritable과 동급으로 — safe/status/persona
+    // malformed 티켓에 직접 HTTP 요청해도 writer가 실행되지 않는다.
+    if (t.id_malformed || t.authority_malformed || t.safe_malformed || t.status_missing || t.persona_malformed) {
+      throw new Error(`ticket ${ticketId} has malformed identity/authority/safe/status/persona frontmatter — refusing dispatch`);
     }
   }
 

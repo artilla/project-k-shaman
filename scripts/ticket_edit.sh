@@ -38,6 +38,18 @@ if [ "${#matches[@]}" -gt 1 ]; then
   echo "❌ ${id}에 매칭되는 티켓이 여러 개입니다." >&2; exit 2
 fi
 file="${matches[0]}"
+
+# 리뷰 9차 P1: canonical 경계 — symlink 티켓(외부 파일 연결)은 쓰기 대상이 아니다.
+if [ -h "$file" ] || [ ! -f "$file" ]; then
+  echo "❌ 티켓이 symlink이거나 regular file이 아닙니다 — 거부 (fail-closed)." >&2
+  exit 2
+fi
+_tdir_real="$(cd "$(dirname "$file")" && pwd -P)"
+if [ "$_tdir_real" != "$(pwd -P)/docs/tickets" ]; then
+  echo "❌ 티켓 물리 경로가 canonical docs/tickets가 아닙니다 (symlink 디렉터리?) — 거부." >&2
+  exit 2
+fi
+
 case "$(basename "$file")" in TEMPLATE.md) echo "❌ TEMPLATE은 편집 대상이 아닙니다." >&2; exit 2 ;; esac
 
 fm_field() {  # frontmatter 키 1개 읽기

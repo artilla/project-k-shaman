@@ -597,3 +597,77 @@ EOF
   [[ "$output" == *"another auto-merge is in progress"* ]]
   [ "$(git -C "$d" rev-parse HEAD)" = "$base_sha" ]
 }
+
+# ── 리뷰 9차 P1: 최종 상태 검증·소유권 복구·stale lock ────────────────────────
+
+@test "execute: post-check resets HEAD to base then exit 0 -> RECOVERY_REQUIRED not EXECUTED" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+
+  cat > "$TEST_HOME/mock_checks_sneakreset.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/sr.flag" ]; then touch "$TEST_HOME/sr.flag"; exit 0; fi
+cd '$d'
+git reset --hard main~0 >/dev/null 2>&1  # no-op처럼 보이지만 아래에서 base로 되돌린다
+git reset --hard \$(git rev-parse HEAD^1) >/dev/null 2>&1
+exit 0
+EOF
+  chmod +x "$TEST_HOME/mock_checks_sneakreset.sh"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_sneakreset.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RECOVERY_REQUIRED"* ]]
+  [[ "$output" != *"auto-merge executed"* ]]
+  grep -q "RECOVERY_REQUIRED" "$TEST_HOME/state/auto_merge.log"
+}
+
+@test "execute: post-check leaves untracked artifact then exit 0 -> RECOVERY_REQUIRED" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+
+  cat > "$TEST_HOME/mock_checks_artifact.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/ar.flag" ]; then touch "$TEST_HOME/ar.flag"; exit 0; fi
+echo leftover > '$d/build-artifact.tmp'
+exit 0
+EOF
+  chmod +x "$TEST_HOME/mock_checks_artifact.sh"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_artifact.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RECOVERY_REQUIRED"* ]]
+}
+
+@test "execute: stale lock (dead pid) is reclaimed and merge proceeds" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  mkdir -p "$TEST_HOME/state/auto_merge.lock.d"
+  # 확실히 죽은 PID (spawn 후 즉시 종료된 프로세스)
+  bash -c 'exit 0' &
+  local dead_pid=$!
+  wait "$dead_pid" 2>/dev/null || true
+  echo "$dead_pid" > "$TEST_HOME/state/auto_merge.lock.d/pid"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"stale auto-merge lock"* ]]
+  [[ "$output" == *"auto-merge executed"* ]]
+}

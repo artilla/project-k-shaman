@@ -123,9 +123,10 @@ mark_awaiting_approval() {
 shopt -s nullglob
 
 # 리뷰 8차 P1: docs/·docs/tickets/ 자체가 symlink면 canonical 경계가 깨진다 — fail-closed.
+# 리뷰 9차 P2: 구성 오류를 exit 0("후보 없음"=정상 idle)으로 위장하지 않는다 — exit 2.
 if [ -h "docs" ] || [ -h "docs/tickets" ]; then
-  echo "docs/tickets 경로가 symlink입니다 — fail-closed로 후보를 선정하지 않습니다." >&2
-  exit 0
+  echo "docs/tickets 경로가 symlink입니다 — canonical 경계 위반 (fail-closed, exit 2)." >&2
+  exit 2
 fi
 
 candidates=()

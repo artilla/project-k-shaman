@@ -727,11 +727,13 @@ console.log('server-shell-parser-consistent');
   mv "$TEST_HOME/docs/tickets" "$TEST_HOME/docs/real-tickets"
   ln -s real-tickets "$TEST_HOME/docs/tickets"
 
+  # 리뷰 9차 P2: 구성 오류는 idle로 위장하지 않는다 — run_loop rc=4, picker exit 2
   run bash -c 'cd "$1" && ./scripts/run_loop.sh T031 --dry-run' _ "$TEST_HOME"
-  [ "$status" -eq 11 ]
+  [ "$status" -eq 4 ]
+  [[ "$output" == *"symlink"* ]]
 
   run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 2 ]
   [[ "$output" != *"T031"* ]]
 }
 
@@ -744,4 +746,61 @@ console.log('server-shell-parser-consistent');
   run bash -c 'cd "$1" && ./scripts/run_loop.sh T032 --dry-run' _ "$TEST_HOME"
   [ "$status" -eq 12 ]
   [[ "$output" == *"skills"* ]]
+}
+
+# ── 리뷰 9차 P1/P2 회귀 ──────────────────────────────────────────────────────
+
+@test "T33: approve --reject on symlinked ticket -> refused, target untouched" {
+  cat > "$TEST_HOME/outside-T033.md" <<'EOF'
+---
+id: T033
+title: external target
+status: open
+priority: P2
+safe: false
+persona: implementer
+---
+# external
+EOF
+  ln -s ../../outside-T033.md "$TEST_HOME/docs/tickets/T033-link.md"
+  _commit_all "add symlinked ticket T033"
+
+  run bash -c 'cd "$1" && ./scripts/approve.sh --reject "no" T033' _ "$TEST_HOME"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"symlink"* ]]
+  # 외부 대상 파일은 무변조
+  grep -q '^status: open$' "$TEST_HOME/outside-T033.md"
+  [ ! -f "$TEST_HOME/docs/approvals/T033.md" ]
+}
+
+@test "T34: dry-run with foreign state/lock preserves it (ownership-scoped cleanup)" {
+  _make_ticket T034 true
+  _commit_all "add T034"
+  echo "foreign-owner" > "$TEST_HOME/state/lock"
+  echo "docs/tickets/other.md" > "$TEST_HOME/state/current_ticket"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T034 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  # foreign 실행 상태가 살아 있어야 한다 (과거: EXIT trap이 무조건 삭제)
+  [ -f "$TEST_HOME/state/lock" ]
+  [ "$(cat "$TEST_HOME/state/lock")" = "foreign-owner" ]
+  [ -f "$TEST_HOME/state/current_ticket" ]
+}
+
+@test "T35: server parser does not double-unquote nested quotes" {
+  command -v node >/dev/null 2>&1 || skip "node not available"
+  # safe: "'true'" — 외곽 큰따옴표 한 겹만 벗겨야 하며 boolean true로 승격되면 안 된다
+  printf -- '---\nid: T906\nstatus: open\nsafe: "%s"\n---\nbody' "'true'" > "$TEST_HOME/nested.md"
+  run node --input-type=module -e "
+import { readFileSync } from 'node:fs';
+const src = readFileSync(process.argv[1], 'utf8');
+const fnStart = src.indexOf('function parseFrontmatter');
+const fnEnd = src.indexOf('// ── Read model');
+const parseFrontmatter = new Function(src.slice(fnStart, fnEnd) + '; return parseFrontmatter;')();
+const nested = parseFrontmatter(readFileSync(process.argv[2], 'utf8'));
+if (!nested || nested.safe === true || nested.safe === false) { console.error('nested unquote mismatch', nested); process.exit(1); }
+console.log('nested-quote-preserved');
+" "$REPO_ROOT/mission-control/server.mjs" "$TEST_HOME/nested.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"nested-quote-preserved"* ]]
 }

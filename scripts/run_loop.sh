@@ -94,18 +94,36 @@ fi
 
 # 정리할 reservation id 추적 (trap에서 사용)
 OWNED_RESERVATIONS=()
+
+# 리뷰 9차 P1: cleanup은 "자신이 만든" 실행 상태만 제거한다 — 과거에는 foreign
+# state/lock이 있는 채로 --dry-run만 돌려도 EXIT trap이 남의 lock·current_ticket을
+# 지웠다. lock에는 소유 토큰(pid-epoch)을 기록하고, 토큰이 일치할 때만 지운다.
+LOCK_TOKEN="$$-$(date +%s)"
+
+# reservation도 meta의 pid가 자신일 때만 삭제 (같은 id로 다른 프로세스가 재생성한
+# reservation을 지우는 오류 방지 — 리뷰 9차 P2).
+release_owned_reservation() {
+  local id="$1" d="$SESSION_STATE_ROOT/state/reservations/${id}.d"
+  [ -n "$id" ] || return 0
+  [ -f "$d/meta" ] || return 0
+  [ "$(awk -F= '/^pid=/{print $2; exit}' "$d/meta" 2>/dev/null)" = "$$" ] || return 0
+  archive_session_events "$id" 2>/dev/null || true
+  rm -rf "$d" 2>/dev/null || true
+}
+
 cleanup() {
-  rm -f state/lock 2>/dev/null || true
-  rm -f state/current_ticket 2>/dev/null || true
-  for id in "${OWNED_RESERVATIONS[@]:-}"; do
-    if [ -n "$id" ]; then
-      archive_session_events "$id" 2>/dev/null || true
-      rm -rf "$SESSION_STATE_ROOT/state/reservations/${id}.d" 2>/dev/null || true
+  if [ "${LOCK_OWNED:-0}" = "1" ]; then
+    if [ "$(cat state/lock 2>/dev/null)" = "$LOCK_TOKEN" ]; then
+      rm -f state/lock 2>/dev/null || true
     fi
+    rm -f state/current_ticket 2>/dev/null || true
+  fi
+  for id in "${OWNED_RESERVATIONS[@]:-}"; do
+    release_owned_reservation "$id"
   done
 }
 trap cleanup EXIT
-if [ "$DRY_RUN" = "0" ]; then touch state/lock; LOCK_OWNED=1; fi
+if [ "$DRY_RUN" = "0" ]; then printf '%s\n' "$LOCK_TOKEN" > state/lock; LOCK_OWNED=1; fi
 
 add_failure() {
   # add_failure <ticket_id> <stage> <cycle_retry> <message>
@@ -652,7 +670,7 @@ apply_loop_mode() {
       echo "⚠️  loop_mode='${mode}' 요청이나 state/lock을 다른 세션이 보유 — dry-run 유지(락 탈취 금지)." >&2
       return 0
     fi
-    touch state/lock && LOCK_OWNED=1
+    printf '%s\n' "$LOCK_TOKEN" > state/lock && LOCK_OWNED=1
   fi
   if [ "$new_safe" != "$SAFE_ONLY" ] || [ "$new_dry" != "$DRY_RUN" ]; then
     echo "🔀 loop_mode='${mode}' 적용 — safe_only=${new_safe} dry_run=${new_dry} (사이클 경계)"
@@ -668,6 +686,13 @@ cycle_one() {
 
   # ADR-0054 §3.2: honor a runtime mode switch at this cycle boundary.
   apply_loop_mode
+
+  # 리뷰 9차 P2: canonical 디렉터리 체인이 symlink면 "후보 없음(idle)"으로 위장하지
+  # 않고 명시적으로 실패한다 (picker exit 2와 짝).
+  if [ -h "docs" ] || [ -h "docs/tickets" ]; then
+    echo "❌ docs 또는 docs/tickets가 symlink입니다 — canonical 경계 위반 (fail-closed)."
+    return 4
+  fi
 
   # ────────── 1. Pre-flight: 워크트리 청결 검사 ──────────
   # dry-run은 git/lock 변경이 없으므로 dirty 검사 자체가 의미 없음 → skip.
@@ -1237,10 +1262,10 @@ for ((i=1; i<=CYCLES; i++)); do
     fails_in_a_row=$((fails_in_a_row+1))
     if [ "$fails_in_a_row" -ge 3 ]; then
       echo "🛑 연속 3회 실패 — 자동 루프 정지. state/failures.log 확인."
-      touch state/lock  # 의도적으로 lock 남김
+      touch state/lock  # 의도적으로 lock 남김 (토큰 없음 = 인간 확인 필요 표식)
       trap - EXIT
       for id in "${OWNED_RESERVATIONS[@]:-}"; do
-        [ -n "$id" ] && rm -rf "state/reservations/${id}.d" 2>/dev/null || true
+        release_owned_reservation "$id"
       done
       exit 9
     fi

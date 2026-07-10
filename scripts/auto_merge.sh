@@ -93,6 +93,16 @@ if [ -h "$TICKETS_DIR" ] || { [ -d "$TICKETS_DIR/DONE" ] && [ -h "$TICKETS_DIR/D
   echo "[FAIL] tickets directory '${TICKETS_DIR}' (or DONE/) is a symlink — refusing" >&2
   exit 2
 fi
+# 리뷰 9차 P1: 중간 조상 symlink(예: $ROOT/docs → 외부 디렉터리)도 차단 — 기본
+# TICKETS_DIR일 때 물리 경로가 ROOT 물리 경로 + /docs/tickets 그대로여야 한다.
+if [ "$TICKETS_DIR" = "$ROOT/docs/tickets" ]; then
+  _root_real="$(cd "$ROOT" && pwd -P)"
+  _td_real="$(cd "$TICKETS_DIR" 2>/dev/null && pwd -P || true)"
+  if [ "$_td_real" != "$_root_real/docs/tickets" ]; then
+    echo "[FAIL] tickets path resolves outside canonical ROOT (docs 체인에 symlink?) — refusing" >&2
+    exit 2
+  fi
+fi
 _ticket_dir_real="$(cd "$(dirname "$TICKET_PATH")" 2>/dev/null && pwd -P || true)"
 _tickets_real="$(cd "$TICKETS_DIR" 2>/dev/null && pwd -P || true)"
 if [ -z "$_tickets_real" ] || { [ "$_ticket_dir_real" != "$_tickets_real" ] && [ "$_ticket_dir_real" != "$_tickets_real/DONE" ]; }; then
@@ -417,14 +427,32 @@ if [ "$ELIGIBLE" -eq 0 ]; then
 
   mkdir -p "$STATE_DIR"
 
+  _am_log() {
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TICKET_ID" "$BRANCH_ARG" "$1" "$2" \
+      >> "$STATE_DIR/auto_merge.log"
+  }
+
   # 리뷰 8차 P1: 저장소 단위 lock — 동시 auto-merge/외부 조작과의 경합 창을 좁힌다.
-  # 원자적 mkdir 기반, 종료 시 trap으로 해제.
+  # 리뷰 9차 P2: lock에 pid를 기록하고, 소유 프로세스가 죽었으면 stale로 재획득한다
+  # (SIGKILL 후 영구 차단 방지).
   AM_LOCK="$STATE_DIR/auto_merge.lock.d"
   if ! mkdir "$AM_LOCK" 2>/dev/null; then
-    echo "[FAIL] another auto-merge is in progress (lock: ${AM_LOCK})"
-    exit 1
+    _old_pid="$(cat "$AM_LOCK/pid" 2>/dev/null || true)"
+    if [ -n "$_old_pid" ] && ! kill -0 "$_old_pid" 2>/dev/null; then
+      echo "[WARN] stale auto-merge lock (pid ${_old_pid} dead) — reclaiming"
+      rm -rf "$AM_LOCK"
+      mkdir "$AM_LOCK" 2>/dev/null || { echo "[FAIL] lock reclaim raced — retry later"; exit 1; }
+    else
+      echo "[FAIL] another auto-merge is in progress (lock: ${AM_LOCK}, pid ${_old_pid:-unknown})"
+      exit 1
+    fi
   fi
-  trap 'rmdir "$AM_LOCK" 2>/dev/null || true' EXIT
+  echo "$$" > "$AM_LOCK/pid"
+  # 리뷰 9차 P1: phase-aware 감사 — EXECUTED/ROLLED_BACK 확정 전에 종료(SIGTERM 등)되면
+  # INTERRUPTED:<phase>를 남겨 병합 잔존 여부를 감사 로그에서 알 수 있게 한다.
+  AM_PHASE="pre-merge"
+  trap '[ "$AM_PHASE" != "done" ] && _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "INTERRUPTED:${AM_PHASE}"; rmdir "$AM_LOCK" 2>/dev/null || rm -rf "$AM_LOCK" 2>/dev/null || true' EXIT
 
   # 리뷰 7차 P1: 병합 직전 base 재검증 — 검사(조건 3·4) 중 현재 브랜치 HEAD가
   # 움직였거나(dirty 포함) 브랜치가 바뀌었으면 병합을 거부한다 (base 측 TOCTOU).
@@ -432,49 +460,73 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   PRE_MERGE_HEAD="$(git rev-parse HEAD)" || exit 1
   if ! _wt_status2="$(git status --porcelain)"; then
     echo "[FAIL] git status failed before merge — refusing"
+    AM_PHASE="done"; _am_log "$PRE_MERGE_HEAD" "REFUSED:status-failed"
     exit 1
   fi
   if [ "$PRE_MERGE_HEAD" != "$BASE_OID" ] \
      || [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != "$BASE_BRANCH" ] \
      || [ -n "$_wt_status2" ]; then
     echo "[FAIL] base '${BASE_BRANCH}' moved or dirtied since checks (HEAD=${PRE_MERGE_HEAD} expected=${BASE_OID}) — merge refused (TOCTOU)"
+    AM_PHASE="done"; _am_log "$PRE_MERGE_HEAD" "REFUSED:toctou"
     exit 1
   fi
   if ! git merge --no-ff "$BRANCH_OID" -m "auto-merge: ${TICKET_ID} (ELIGIBLE)"; then
-    git merge --abort >/dev/null 2>&1 || git reset --hard "$BASE_OID" >/dev/null 2>&1 || true
-    printf '%s\t%s\t%s\t%s\tROLLED_BACK\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TICKET_ID" "$BRANCH_ARG" "$BASE_OID" \
-      >> "$STATE_DIR/auto_merge.log"
-    echo "[FAIL] git merge failed — rollback"
+    AM_PHASE="merge-failed"
+    # 리뷰 9차 P1: 복구 실패를 성공(ROLLED_BACK)으로 위장하지 않는다.
+    if git merge --abort >/dev/null 2>&1 || git reset --hard "$BASE_OID" >/dev/null 2>&1; then
+      AM_PHASE="done"; _am_log "$BASE_OID" "ROLLED_BACK"
+      echo "[FAIL] git merge failed — rolled back to base"
+    else
+      AM_PHASE="done"; _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED"
+      echo "[FAIL] git merge failed AND rollback failed — RECOVERY_REQUIRED (수동 확인 필요)"
+    fi
     exit 1
   fi
+  AM_PHASE="merged"
   MERGE_COMMIT="$(git rev-parse HEAD)"
 
-  # 리뷰 8차 P1: merge parent 검증(CAS) — 재검증과 merge 사이의 잔여 경합 창에서
-  # HEAD가 바뀌었으면 첫 부모가 BASE_OID가 아니게 된다 → 즉시 고정 OID로 롤백.
-  if [ "$(git rev-parse "${MERGE_COMMIT}^1" 2>/dev/null)" != "$BASE_OID" ]; then
-    git reset --hard "$BASE_OID" >/dev/null 2>&1 || true
-    printf '%s\t%s\t%s\t%s\tROLLED_BACK\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TICKET_ID" "$BRANCH_ARG" "$MERGE_COMMIT" \
-      >> "$STATE_DIR/auto_merge.log"
-    echo "[FAIL] merge first-parent != pinned BASE_OID (raced) — rolled back"
+  # 리뷰 8차 P1 + 9차 P1: merge 결과 소유권 검증(CAS) — HEAD 커밋의 부모가 정확히
+  # (BASE_OID, BRANCH_OID)일 때만 "우리가 만든 병합"이다. 아니면 다른 프로세스의
+  # 커밋일 수 있으므로 reset하지 않고 RECOVERY_REQUIRED로 중단한다 (남의 커밋 삭제 금지).
+  _p1="$(git rev-parse "${MERGE_COMMIT}^1" 2>/dev/null || true)"
+  _p2="$(git rev-parse "${MERGE_COMMIT}^2" 2>/dev/null || true)"
+  if [ "$_p1" != "$BASE_OID" ] || [ "$_p2" != "$BRANCH_OID" ]; then
+    AM_PHASE="done"; _am_log "$MERGE_COMMIT" "RECOVERY_REQUIRED"
+    echo "[FAIL] HEAD(${MERGE_COMMIT}) is not our merge of (${BASE_OID}, ${BRANCH_OID}) — ownership lost, NOT resetting. RECOVERY_REQUIRED."
     exit 1
   fi
 
   if "$RUN_CHECKS_CMD" >/dev/null 2>&1; then
-    printf '%s\t%s\t%s\t%s\tEXECUTED\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TICKET_ID" "$BRANCH_ARG" "$MERGE_COMMIT" \
-      >> "$STATE_DIR/auto_merge.log"
+    # 리뷰 9차 P1: 성공 확정 전 최종 상태 재검증 — post-check가 HEAD를 움직였거나
+    # 브랜치를 바꿨거나 산출물(untracked 포함)을 남겼으면 EXECUTED가 아니다.
+    _final_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+    _final_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+    if ! _final_status="$(git status --porcelain)"; then _final_status="__STATUS_FAILED__"; fi
+    if [ "$_final_head" != "$MERGE_COMMIT" ] || [ "$_final_branch" != "$BASE_BRANCH" ] || [ -n "$_final_status" ]; then
+      AM_PHASE="done"; _am_log "$_final_head" "RECOVERY_REQUIRED"
+      echo "[FAIL] post-check 후 최종 상태 불일치 (HEAD=${_final_head} expected=${MERGE_COMMIT}, branch=${_final_branch}, dirty=$([ -n "$_final_status" ] && echo yes || echo no)) — RECOVERY_REQUIRED, 자동 복구하지 않음"
+      exit 1
+    fi
+    AM_PHASE="done"; _am_log "$MERGE_COMMIT" "EXECUTED"
     echo "[PASS] auto-merge executed: ${MERGE_COMMIT}"
     exit 0
   else
-    # 리뷰 8차 P1: 가변 ORIG_HEAD가 아니라 고정 BASE_OID로 복구 — post-check가
-    # ORIG_HEAD를 오염시켜도(예: 내부 reset) 원래 base로 정확히 돌아간다.
-    git reset --hard "$BASE_OID"
-    printf '%s\t%s\t%s\t%s\tROLLED_BACK\n' \
-      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TICKET_ID" "$BRANCH_ARG" "$MERGE_COMMIT" \
-      >> "$STATE_DIR/auto_merge.log"
-    echo "[FAIL] post-merge run_checks 실패 — rollback"
+    # 리뷰 8차 P1: 가변 ORIG_HEAD가 아니라 고정 BASE_OID로 복구.
+    # 리뷰 9차 P1: HEAD가 여전히 우리의 병합 커밋일 때만 reset — 그 사이 다른
+    # 프로세스가 커밋을 얹었으면 소유권 상실 → reset 금지, RECOVERY_REQUIRED.
+    _cur_head="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+    if [ "$_cur_head" = "$MERGE_COMMIT" ] && git reset --hard "$BASE_OID" >/dev/null 2>&1; then
+      AM_PHASE="done"; _am_log "$MERGE_COMMIT" "ROLLED_BACK"
+      echo "[FAIL] post-merge run_checks 실패 — rollback"
+      _leftover="$(git status --porcelain 2>/dev/null || true)"
+      if [ -n "$_leftover" ]; then
+        echo "[WARN] rollback 후 미추적/변경 산출물이 남아 있습니다 (수동 정리 필요):"
+        printf '%s\n' "$_leftover"
+      fi
+    else
+      AM_PHASE="done"; _am_log "$_cur_head" "RECOVERY_REQUIRED"
+      echo "[FAIL] post-merge run_checks 실패 + HEAD 소유권 상실 또는 reset 실패 — RECOVERY_REQUIRED (자동 reset 안 함)"
+    fi
     exit 1
   fi
 else
