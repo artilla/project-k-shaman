@@ -1013,3 +1013,154 @@ EOF
   [[ "$output" != *"MUST-NOT-DISPATCH"* ]]
   [[ "$output" == *"실행 전제조건 미충족"* ]]
 }
+
+# ── 리뷰 12차 P1 회귀 ─────────────────────────────────────────────────────────
+
+@test "T45: specific-ticket invocation still enforces depends_on (rc=11)" {
+  cat > "$TEST_HOME/docs/tickets/T450-test.md" <<'EOF'
+---
+id: T450
+title: t
+status: open
+priority: P2
+safe: true
+persona: implementer
+depends_on: [T999]
+---
+# T450
+EOF
+  _commit_all "add T450 with unmet dep"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T450' _ "$TEST_HOME"
+  [ "$status" -eq 11 ]
+  [[ "$output" == *"depends_on 미충족"* ]]
+}
+
+@test "T46: fake DONE evidence (id mismatch) does not satisfy deps; real evidence does" {
+  cat > "$TEST_HOME/docs/tickets/T460-test.md" <<'EOF'
+---
+id: T460
+title: t
+status: open
+priority: P2
+safe: true
+persona: implementer
+depends_on: [T001]
+---
+# T460
+EOF
+  # 파일명은 T001이지만 frontmatter id/status가 다른 가짜 증거 (tracked)
+  printf -- '---\nid: T777\nstatus: open\nsafe: true\n---\n' > "$TEST_HOME/docs/tickets/DONE/T001-fake.md"
+  _commit_all "add T460 + fake done evidence"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T460' _ "$TEST_HOME"
+  [ "$status" -eq 11 ]
+
+  # 진짜 증거로 교체하면 충족된다
+  printf -- '---\nid: T001\nstatus: done\nsafe: true\n---\n' > "$TEST_HOME/docs/tickets/DONE/T001-fake.md"
+  _commit_all "fix done evidence"
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T460 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+}
+
+@test "T47: whitespace-broken dep id is not normalized into a valid id" {
+  _make_ticket T001 true done
+  git -C "$TEST_HOME" mv docs/tickets/T001-test.md docs/tickets/DONE/T001-test.md 2>/dev/null || \
+    mv "$TEST_HOME/docs/tickets/T001-test.md" "$TEST_HOME/docs/tickets/DONE/T001-test.md"
+  cat > "$TEST_HOME/docs/tickets/T470-test.md" <<'EOF'
+---
+id: T470
+title: t
+status: open
+priority: P2
+safe: true
+persona: implementer
+depends_on: [T 0 0 1]
+---
+# T470
+EOF
+  _commit_all "add T470 with whitespace dep"
+
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"T470-test.md"* ]]
+}
+
+@test "T48: lock token replaced mid-cycle -> rc=16 and the foreign lock is preserved" {
+  _make_ticket T480 true open
+  # run_headless가 사이클 도중 state/lock을 탈취(토큰 교체)한다
+  cat > "$TEST_HOME/scripts/run_headless.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "stolen-token" > state/lock
+exit 0
+EOF
+  chmod +x "$TEST_HOME/scripts/run_headless.sh"
+  _commit_all "add T480 + token-stealing fake"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T480' _ "$TEST_HOME"
+  [ "$status" -eq 16 ]
+  [[ "$output" == *"토큰이 교체"* ]]
+  # 남의 lock을 지우지 않는다
+  [ "$(cat "$TEST_HOME/state/lock")" = "stolen-token" ]
+}
+
+@test "T49: approve --reject publishes status+Rejection atomically; malformed frontmatter leaves file untouched" {
+  _make_ticket T490 false awaiting-approval
+  _commit_all "add T490"
+
+  run bash -c 'cd "$1" && ./scripts/approve.sh --reject "nope" T490' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  # 단일 publish 결과: status와 Rejection이 함께 반영
+  grep -q '^status: skipped' "$TEST_HOME/docs/tickets/T490-test.md"
+  grep -q '## Rejection' "$TEST_HOME/docs/tickets/T490-test.md"
+  # stage/temp 잔여물 없음
+  [ -z "$(ls "$TEST_HOME/docs/tickets/".stage.* 2>/dev/null)" ]
+
+  # CRLF opener(malformed) 티켓은 아무것도 바뀌지 않은 채 실패한다
+  printf -- '---\r\nid: T491\nstatus: open\nsafe: false\n---\n# T491\n' > "$TEST_HOME/docs/tickets/T491-test.md"
+  _commit_all "add malformed T491"
+  local before
+  before="$(cksum "$TEST_HOME/docs/tickets/T491-test.md")"
+  run bash -c 'cd "$1" && ./scripts/approve.sh --reject "nope" T491' _ "$TEST_HOME"
+  [ "$status" -ne 0 ]
+  [ "$before" = "$(cksum "$TEST_HOME/docs/tickets/T491-test.md")" ]
+}
+
+@test "T50: concurrent approval race -> existing marker is preserved, not overwritten" {
+  _make_ticket T500 false awaiting-approval
+  printf -- '---\nid: T500\ndecision: reject\n---\nprior decision\n' > "$TEST_HOME/docs/approvals/T500.md"
+  _commit_all "add T500 + prior marker"
+
+  local before
+  before="$(cksum "$TEST_HOME/docs/approvals/T500.md")"
+  run bash -c 'cd "$1" && ./scripts/approve.sh T500' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  # 먼저 도착한 결정이 보존된다 (덮어쓰기 없음)
+  [ "$before" = "$(cksum "$TEST_HOME/docs/approvals/T500.md")" ]
+  grep -q 'prior decision' "$TEST_HOME/docs/approvals/T500.md"
+  [ -z "$(ls "$TEST_HOME/docs/approvals/".marker.* 2>/dev/null)" ]
+}
+
+@test "T51: CR-contaminated persona line -> shell rc=12 and server flags persona_malformed" {
+  printf -- '---\nid: T510\ntitle: t\nstatus: open\npriority: P2\nsafe: true\npersona: implementer\r\n---\n# T510\n' \
+    > "$TEST_HOME/docs/tickets/T510-test.md"
+  _commit_all "add T510 CR persona"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T510' _ "$TEST_HOME"
+  [ "$status" -eq 12 ]
+
+  command -v node >/dev/null 2>&1 || skip "node not available"
+  run node --input-type=module -e "
+import { readFileSync } from 'node:fs';
+const src = readFileSync(process.argv[1], 'utf8');
+const fnStart = src.indexOf('function parseFrontmatter');
+const fnEnd = src.indexOf('// ── Read model');
+const parseFrontmatter = new Function(src.slice(fnStart, fnEnd) + '; return parseFrontmatter;')();
+const fm = parseFrontmatter(readFileSync(process.argv[2], 'utf8'));
+const crKeys = (fm && fm._crKeys) || [];
+if (!crKeys.includes('persona')) { console.error('server missed CR persona', fm); process.exit(1); }
+console.log('cr-persona-flagged');
+" "$REPO_ROOT/mission-control/server.mjs" "$TEST_HOME/docs/tickets/T510-test.md"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"cr-persona-flagged"* ]]
+}

@@ -220,7 +220,9 @@ deps_satisfied() {
   [ "$done_real" = "$(pwd -P)/docs/tickets/DONE" ] || return 1
 
   for dep in "${arr[@]}"; do
-    dep=$(echo "$dep" | tr -d '" '"'"' ')
+    # 리뷰 12차 P1: 앞뒤 공백/따옴표만 제거 — 전체 삭제(tr -d)는 'T 0 0 1'을
+    # T001로 압축해 형식 검사를 우회시켰다.
+    dep="$(printf '%s' "$dep" | sed "s/^[[:space:]\"']*//; s/[[:space:]\"']*\$//")"
     [ -z "$dep" ] && continue
     # 리뷰 11차 P1: dependency ID 형식 강제 — 비정상 ID(글롭 문자 등)가 DONE 밖
     # 파일을 완료 증거로 만들던 우회 차단.
@@ -228,9 +230,17 @@ deps_satisfied() {
       return 1
     fi
     # 리뷰 10차 P1: DONE 파일 자체가 symlink(외부 파일)면 의존성 충족으로 치지 않는다.
+    # 리뷰 12차 P1: 완료 증거는 파일명이 아니라 실제 frontmatter(id 일치 + status done)
+    # + git tracked 파일이어야 한다.
     local dep_ok=0 dep_f
     for dep_f in docs/tickets/DONE/"${dep}"-*.md docs/tickets/DONE/"${dep}".md; do
-      [ -f "$dep_f" ] && [ ! -h "$dep_f" ] && dep_ok=1 && break
+      [ -f "$dep_f" ] && [ ! -h "$dep_f" ] || continue
+      [ "$(field_of "$dep_f" id || true)" = "$dep" ] || continue
+      [ "$(field_of "$dep_f" status || true)" = "done" ] || continue
+      if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git ls-files --error-unmatch "$dep_f" >/dev/null 2>&1 || continue
+      fi
+      dep_ok=1; break
     done
     [ "$dep_ok" = "1" ] || return 1
   done

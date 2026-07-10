@@ -718,3 +718,97 @@ EOF
   [[ "$output" == *"auto-merge executed"* ]]
   grep -q "EXECUTED" "$d/state2/auto_merge.log"
 }
+
+# ── 리뷰 12차 P1 회귀 ─────────────────────────────────────────────────────────
+
+@test "execute: post-check failure with clean worktree rolls back fully (not REF_ONLY)" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  local base
+  base="$(git -C "$d" rev-parse main)"
+
+  cat > "$TEST_HOME/mock_checks_fail2nd.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/f2.flag" ]; then touch "$TEST_HOME/f2.flag"; exit 0; fi
+exit 1
+EOF
+  chmod +x "$TEST_HOME/mock_checks_fail2nd.sh"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_fail2nd.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  # 정상 경로(사전 clean worktree)는 REF_ONLY로 격하되지 않는다
+  grep -q $'\tROLLED_BACK$' "$TEST_HOME/state/auto_merge.log"
+  ! grep -q 'REF_ONLY' "$TEST_HOME/state/auto_merge.log"
+  # ref와 worktree 모두 base로 복귀 + clean
+  [ "$(git -C "$d" rev-parse main)" = "$base" ]
+  [ -z "$(git -C "$d" status --porcelain)" ]
+}
+
+@test "execute: TERM during post-checks reaps descendants, audits INTERRUPTED, releases lock" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_slow.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/slow.flag" ]; then touch "$TEST_HOME/slow.flag"; exit 0; fi
+sleep 271830
+EOF
+  chmod +x "$TEST_HOME/mock_checks_slow.sh"
+
+  ( cd "$d" && \
+    LINT_EXTERNAL_DOCS_CMD="$MOCK_LINT" \
+    RUN_CHECKS_CMD="$TEST_HOME/mock_checks_slow.sh" \
+    CHECK_SCOPE_OMISSION_CMD="$MOCK_SCOPE" \
+    STATE_DIR="$TEST_HOME/state" \
+    exec "$SCRIPT_PATH" "$TEST_HOME/T999-test.md" --execute --branch ralph/T999 --base main ) \
+    > "$TEST_HOME/term.log" 2>&1 & local ap=$!
+  # post-check(sleep) 단계 진입 대기
+  local i=0
+  while [ ! -f "$TEST_HOME/slow.flag" ] && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i+1)); done
+  sleep 1
+  kill -TERM "$ap" 2>/dev/null || true
+  wait "$ap" 2>/dev/null || true
+  sleep 1
+
+  # 자손(sleep)까지 회수됐다
+  [ -z "$(ps -eo args | awk '$1=="sleep" && $2=="271830"')" ]
+  grep -q 'INTERRUPTED' "$TEST_HOME/state/auto_merge.log"
+  # lock이 해제됐다
+  [ ! -d "$TEST_HOME/state/auto_merge.lock.d" ]
+}
+
+@test "execute: post-check leaving background descendants is refused (no EXECUTED)" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_bg.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/bg.flag" ]; then touch "$TEST_HOME/bg.flag"; exit 0; fi
+( sleep 271831; echo late > "$d/late.txt" ) &
+exit 0
+EOF
+  chmod +x "$TEST_HOME/mock_checks_bg.sh"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_bg.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  pkill -f 'sleep 271831' 2>/dev/null || true
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"auto-merge executed"* ]]
+  [[ "$output" == *"잔존 프로세스"* ]]
+  ! grep -q $'\tEXECUTED$' "$TEST_HOME/state/auto_merge.log"
+}

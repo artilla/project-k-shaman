@@ -181,6 +181,9 @@ function parseFrontmatter(content) {
   // fail-closed 판정에 쓸 수 있게 한다.
   const seenKeys = new Set();
   const duplicateKeys = new Set();
+  // 리뷰 12차 P1: CR로 값이 무효화된 키 목록 — 권위/persona 키가 CR에 오염되면
+  // "값 누락 → 기본값"으로 승격하지 않고 malformed로 취급해야 셸과 일치한다.
+  const crKeys = new Set();
   for (const line of match[1].split('\n')) {
     // 리뷰 10차 P1: LF 문서 속 CR 잔재(`safe: true\r`)를 trim으로 승격하지 않는다.
     // 리뷰 11차 P1: 단, key/중복 "집계"에는 포함한다 — CR safe + 정상 safe 조합에서
@@ -190,6 +193,7 @@ function parseFrontmatter(content) {
       if (mr) {
         if (seenKeys.has(mr[1])) duplicateKeys.add(mr[1]);
         seenKeys.add(mr[1]);
+        crKeys.add(mr[1]);
       }
       continue;
     }
@@ -224,6 +228,7 @@ function parseFrontmatter(content) {
   }
   if (Object.keys(fm).length === 0) return null;
   if (duplicateKeys.size > 0) fm._duplicateKeys = Array.from(duplicateKeys);
+  if (crKeys.size > 0) fm._crKeys = Array.from(crKeys);
   return fm;
 }
 
@@ -278,6 +283,9 @@ function statFingerprint(path) {
 // 내부 파일 stat까지 포함하도록 확장할 것.
 function readModelFingerprint() {
   const parts = [];
+  // 리뷰 12차 P2: skills/ 변경(생성 포함)이 모델(skill_unavailable)에 반영되도록
+  // fingerprint에 포함 — 시작 시 skills/가 없어 watcher 미등록이어도 다음 요청에서 재스캔.
+  parts.push(`skills:${statFingerprint(join(ROOT, 'skills'))}`);
   try {
     for (const entry of listTicketFiles()) {
       parts.push(`ticket:${entry.file}:${entry.stat.mtimeMs}:${entry.stat.ctimeMs}:${entry.stat.size}`);
@@ -344,10 +352,14 @@ function buildModel() {
             // 리뷰 5차 P2: 실행기는 status 정확히 1회 + id/persona 중복 금지를 요구한다 —
             // status 누락(기본화된 'open')이나 권위 필드 중복 티켓에 Run을 노출하지 않는다.
             status_missing: !entry.doneDir && !fm.status,
-            authority_malformed: (fm._duplicateKeys || []).some(k => ['id', 'status', 'persona', 'safe'].includes(k)),
+            authority_malformed: (fm._duplicateKeys || []).some(k => ['id', 'status', 'persona', 'safe'].includes(k))
+              || (fm._crKeys || []).some(k => ['id', 'status', 'safe'].includes(k)),
             // 리뷰 9차 P1: 실행기(run_loop)는 persona를 [A-Za-z0-9_-]+로 제한한다 —
             // 경로 조작형 persona는 UI/writer에서도 malformed로 취급.
-            persona_malformed: !/^[A-Za-z0-9_-]*$/.test(String(fm.persona || '')),
+            // 리뷰 12차 P1: CR로 오염된 persona는 "값 누락 → 기본 implementer"가 아니라
+            // malformed — 셸(rc=12)과 정합.
+            persona_malformed: !/^[A-Za-z0-9_-]*$/.test(String(fm.persona || ''))
+              || (fm._crKeys || []).includes('persona'),
             // 리뷰 10차 P2: skill 파일이 없거나 symlink면 run_loop rc=12 — writable 카드로
             // 표시하지 않는다 (persona 기본값 implementer).
             skill_unavailable: (() => {

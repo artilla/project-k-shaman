@@ -539,27 +539,47 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   # 리뷰 11차 P1: TERM/INT/HUP 시 실행 중인 post-check 자식 그룹을 먼저 종료·reap한
   # 뒤에야 EXIT trap이 lock을 해제한다 (자식이 lock 해제 후에도 실행되던 문제).
   AM_CHECK_PID=""
+  # 리뷰 12차 P1: 그룹 기준 생존 판정 — leader가 먼저 죽어도 그룹의 잔존 자손을
+  # 회수한다 (kill -0 -- -PGID). 신호 시 진행 중이던 merge 잔여도 abort 시도.
   _am_on_signal() {
     if [ -n "${AM_CHECK_PID:-}" ]; then
       kill -TERM -- "-${AM_CHECK_PID}" 2>/dev/null || kill -TERM "${AM_CHECK_PID}" 2>/dev/null || true
       local _i=0
-      while kill -0 "${AM_CHECK_PID}" 2>/dev/null && [ "$_i" -lt 10 ]; do sleep 0.5; _i=$((_i+1)); done
+      while kill -0 -- "-${AM_CHECK_PID}" 2>/dev/null && [ "$_i" -lt 10 ]; do sleep 0.5; _i=$((_i+1)); done
       kill -KILL -- "-${AM_CHECK_PID}" 2>/dev/null || true
       wait "${AM_CHECK_PID}" 2>/dev/null || true
     fi
+    # 리뷰 12차 P1: merge 도중 신호였다면 반쯤 남은 merge 상태를 정리 시도 (실패는 무해 —
+    # EXIT trap의 INTERRUPTED 감사가 잔존을 알린다).
+    [ "${AM_PHASE:-}" = "merging" ] && git merge --abort >/dev/null 2>&1 || true
     exit 143
   }
   trap _am_on_signal TERM INT HUP
-  # post-check를 자체 프로세스 그룹으로 실행해 신호 시 회수 가능하게.
-  _run_post_checks() {
-    local rc=0
+  # 자식(merge/post-check)을 자체 프로세스 그룹으로 실행 — 신호 회수 가능 + 그룹
+  # 잔존 자손 검출.
+  # 리뷰 12차 P1: leader가 rc=0으로 끝나도 백그라운드 자손이 그룹에 남아 있으면
+  # 신뢰 불가(rc=97) — 이후 자손이 파일을 바꾸는 시나리오 차단.
+  _run_in_group() {
+    local rc=0 _i
     set -m
-    "$RUN_CHECKS_CMD" >/dev/null 2>&1 &
+    "$@" &
     AM_CHECK_PID=$!
     set +m
     wait "$AM_CHECK_PID" || rc=$?
+    if kill -0 -- "-${AM_CHECK_PID}" 2>/dev/null; then
+      echo "[WARN] 자식 그룹에 잔존 프로세스 감지 — 회수 후 실패 처리"
+      kill -TERM -- "-${AM_CHECK_PID}" 2>/dev/null || true
+      _i=0
+      while kill -0 -- "-${AM_CHECK_PID}" 2>/dev/null && [ "$_i" -lt 10 ]; do sleep 0.5; _i=$((_i+1)); done
+      kill -KILL -- "-${AM_CHECK_PID}" 2>/dev/null || true
+      AM_CHECK_PID=""
+      return 97
+    fi
     AM_CHECK_PID=""
     return "$rc"
+  }
+  _run_post_checks() {
+    _run_in_group bash -c '"$1" >/dev/null 2>&1' _ "$RUN_CHECKS_CMD"
   }
 
   # 리뷰 7차 P1: 병합 직전 base 재검증 — 검사(조건 3·4) 중 현재 브랜치 HEAD가
@@ -578,14 +598,25 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     AM_PHASE="done"; _am_log "$PRE_MERGE_HEAD" "REFUSED:toctou"
     exit 1
   fi
-  if ! git merge --no-ff "$BRANCH_OID" -m "auto-merge: ${TICKET_ID} (ELIGIBLE)"; then
+  # 리뷰 12차 P1: merge 자체도 신호 handler 관리 하에 실행 — merge 중 TERM 시
+  # 자식이 회수되고 잔여 merge 상태는 abort된다 (감사 없는 2-parent 잔존 방지).
+  AM_PHASE="merging"
+  if ! _run_in_group git merge --no-ff "$BRANCH_OID" -m "auto-merge: ${TICKET_ID} (ELIGIBLE)"; then
     AM_PHASE="merge-failed"
     # 리뷰 9차 P1: 복구 실패를 성공(ROLLED_BACK)으로 위장하지 않는다.
     # 리뷰 11차 P1: 비-CAS reset fallback 제거 — abort 실패면 워크트리 상태를
     # 추정으로 덮지 않고 RECOVERY_REQUIRED로 중단한다.
     if git merge --abort >/dev/null 2>&1; then
-      AM_PHASE="done"; _am_log "$BASE_OID" "ROLLED_BACK"
-      echo "[FAIL] git merge failed — aborted cleanly"
+      # 리뷰 12차 P1: abort 후 산출물이 남았으면 ROLLED_BACK으로 위장하지 않는다.
+      _ab_left="$(_wt_status_or_fail 2>/dev/null || echo '__STATUS_FAILED__')"
+      if [ -z "$_ab_left" ]; then
+        AM_PHASE="done"; _am_log "$BASE_OID" "ROLLED_BACK"
+        echo "[FAIL] git merge failed — aborted cleanly"
+      else
+        AM_PHASE="done"; _am_log "$BASE_OID" "ROLLED_BACK_DIRTY"
+        echo "[FAIL] git merge failed — aborted, 그러나 산출물이 남음 (수동 정리 필요):"
+        printf '%s\n' "$_ab_left"
+      fi
     else
       AM_PHASE="done"; _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED"
       echo "[FAIL] git merge failed AND abort failed — RECOVERY_REQUIRED (수동 확인 필요)"
@@ -635,22 +666,24 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     # 수행한다 — HEAD/현재 브랜치가 post-check에 의해 바뀌었어도 base ref가 여전히
     # 우리의 MERGE_COMMIT일 때만 원자적으로 BASE_OID로 되돌리고, 아니면(다른 프로세스
     # 커밋) 건드리지 않고 RECOVERY_REQUIRED. HEAD-확인-후-reset 경합도 CAS가 제거한다.
+    # 리뷰 12차 P1: 워크트리 판정을 CAS "이전"에 스냅샷 — CAS로 ref를 먼저 되감으면
+    # index/worktree가 merge 결과로 남아 status가 반드시 dirty가 되어 정상 경로가
+    # 항상 REF_ONLY로 고착되던 버그 수정. CAS 직전 clean(=post-check 산출물 없음)이면
+    # CAS 후 `git reset --hard HEAD`(ref 불변, worktree/index만 동기화)로 완전 복구.
+    _wt_pre_rb="$(_wt_status_or_fail 2>/dev/null || echo '__STATUS_FAILED__')"
     if git update-ref -m "auto-merge rollback ${TICKET_ID}" \
          "refs/heads/${BASE_BRANCH}" "$BASE_OID" "$MERGE_COMMIT" 2>/dev/null; then
-      # 리뷰 11차 P1: CAS 이후의 reset --hard는 그 사이 생긴 새 변경을 제거할 수 있다 —
-      # HEAD가 base 브랜치이고 워킹트리에 새 변경이 없을 때만 동기화하고, 그 외에는
-      # reset을 생략하고 ROLLED_BACK_REF_ONLY로 정직하게 기록한다.
       _ref_only=1
       if [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$BASE_BRANCH" ]; then
-        _wt_now=""
-        if _wt_now="$(_wt_status_or_fail)" && [ -z "$_wt_now" ]; then
-          if git reset --hard "$BASE_OID" >/dev/null 2>&1; then
+        if [ -z "$_wt_pre_rb" ]; then
+          # CAS 직전 clean → 현재 worktree/index 내용은 merge 잔상뿐. HEAD(=base)로 동기화.
+          if git reset --hard HEAD >/dev/null 2>&1; then
             _ref_only=0
           else
             echo "[WARN] base ref는 복구됐으나 워킹트리 동기화 실패 — git reset --hard ${BASE_OID} 를 수동 실행하세요"
           fi
         else
-          echo "[WARN] 워킹트리에 새 변경/판정 불가 — reset 생략 (수동으로 git reset --hard ${BASE_OID} 검토)"
+          echo "[WARN] post-check 산출물/변경 감지 — reset 생략, 보존 (수동으로 git reset --hard ${BASE_OID} 검토)"
         fi
       else
         echo "[WARN] base ref는 복구됐으나 HEAD가 '${BASE_BRANCH}'가 아닙니다 — 워킹트리를 확인하세요"

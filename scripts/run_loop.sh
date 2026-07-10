@@ -142,11 +142,13 @@ HEADLESS_PID=""
 on_signal() {
   local hp="${HEADLESS_PID:-}"
   [ -z "$hp" ] && hp="${!:-}"
-  if [ -n "$hp" ] && kill -0 "$hp" 2>/dev/null; then
+  # 리뷰 12차 P1: 생존 판정을 leader가 아니라 프로세스 "그룹"(kill -0 -- -pgid)으로 —
+  # leader가 먼저 죽고 TERM을 무시하는 자손만 남은 경우에도 회수한다.
+  if [ -n "$hp" ]; then
     kill -TERM -- "-${hp}" 2>/dev/null || kill -TERM "${hp}" 2>/dev/null || true
     local i=0
-    while kill -0 "$hp" 2>/dev/null && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i+1)); done
-    if kill -0 "$hp" 2>/dev/null; then
+    while kill -0 -- "-${hp}" 2>/dev/null && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i+1)); done
+    if kill -0 -- "-${hp}" 2>/dev/null; then
       kill -KILL -- "-${hp}" 2>/dev/null || kill -KILL "$hp" 2>/dev/null || true
     fi
     wait "$hp" 2>/dev/null || true
@@ -587,6 +589,45 @@ _wip_fingerprint() {
   printf 'files:%s\n' "$part"
 }
 
+# 리뷰 12차 P1: 특정 티켓 실행(run_loop.sh TXXX / 서버 Run 디스패치)도 dependency를
+# 검사한다 — picker와 동일 계약. dep 증거는 파일명이 아니라 실제 frontmatter
+# (id 일치 + status done) + git tracked + 비-symlink로 판정하고, dep ID는 앞뒤
+# 공백/따옴표만 벗겨 내부 공백('T 0 0 1')이 승격되지 않게 한다.
+deps_satisfied_strict() {
+  local file="$1" deps dep dep_ok dep_f done_real
+  deps=$(awk '
+    NR == 1 { if ($0 != "---") exit; next }
+    $0 == "---" { exit }
+    substr($0, 1, 11) == "depends_on:" {
+      sub(/^[^:]+:[ \t]*/, ""); gsub(/[][]/, ""); print; exit
+    }
+  ' "$file")
+  [ -z "$deps" ] && return 0
+
+  done_real="$(cd docs/tickets/DONE 2>/dev/null && pwd -P)" || return 1
+  [ "$done_real" = "$(pwd -P)/docs/tickets/DONE" ] || return 1
+
+  local arr
+  IFS=',' read -ra arr <<< "$deps"
+  for dep in "${arr[@]}"; do
+    dep="$(printf '%s' "$dep" | sed "s/^[[:space:]\"']*//; s/[[:space:]\"']*\$//")"
+    [ -z "$dep" ] && continue
+    [[ "$dep" =~ ^T[0-9]+$ ]] || return 1
+    dep_ok=0
+    for dep_f in docs/tickets/DONE/"${dep}"-*.md docs/tickets/DONE/"${dep}".md; do
+      [ -f "$dep_f" ] && [ ! -h "$dep_f" ] || continue
+      [ "$(field_of "$dep_f" id || true)" = "$dep" ] || continue
+      [ "$(field_of "$dep_f" status || true)" = "done" ] || continue
+      if [ "$GIT_REPO" = "1" ]; then
+        git ls-files --error-unmatch "$dep_f" >/dev/null 2>&1 || continue
+      fi
+      dep_ok=1; break
+    done
+    [ "$dep_ok" = "1" ] || return 1
+  done
+  return 0
+}
+
 # 리뷰 10차 P1: picker의 실패 rc를 그대로 전달한다 — 과거에는 rc가 삼켜져 오류
 # (symlink 구성, 내부 실패 등)가 "후보 없음(정상 idle)"으로 위장됐다.
 pick_next_ticket_path() {
@@ -709,12 +750,15 @@ apply_loop_mode() {
     *) return 0 ;;   # unknown/empty token → keep current flags (fail-safe)
   esac
   if [ "$new_dry" = "0" ] && [ "$DRY_RUN" = "1" ]; then
-    # 리뷰 11차 P1: 실행 모드 전환은 시작 시 전제조건을 다시 통과해야 한다 —
-    # 비-Git 디렉터리에서 dry-run으로 시작한 뒤 전환해 실제 디스패치되던 우회 차단.
-    if [ "$GIT_REPO" != "1" ]; then
+    # 리뷰 11차 P1 + 12차 P2: 실행 모드 전환은 전제조건을 "그 시점에" 다시 검사한다 —
+    # 시작 시 저장한 boolean이 아니라 git rev-parse를 실시간 실행 (전환 사이에 저장소
+    # 상태가 바뀌었을 수 있다).
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      GIT_REPO=0
       echo "⚠️  loop_mode='${mode}' 요청이나 git 저장소가 아님 — dry-run 유지 (실행 전제조건 미충족)." >&2
       return 0
     fi
+    GIT_REPO=1
   fi
   if [ "$new_dry" = "0" ] && [ "$LOCK_OWNED" = "0" ]; then
     # 리뷰 10차 P1: 시작 경로와 동일한 원자적 lock primitive 사용 (존재검사→쓰기 경합 제거).
@@ -800,6 +844,13 @@ cycle_one() {
       return 11
     fi
     ticket="${specific_matches[0]}"
+
+    # 리뷰 12차 P1: 특정 티켓 실행도 dependency 게이트를 통과해야 한다 —
+    # picker 경로에만 있던 검사가 우회되던 문제 (서버 Run 디스패치 포함).
+    if ! deps_satisfied_strict "$ticket"; then
+      echo "❌ ${SPECIFIC_TICKET} — depends_on 미충족(또는 dep 증거 비정상: id/status/tracked 불일치). 선행 티켓을 먼저 완료하세요."
+      return 11
+    fi
   else
     local picker_rc=0
     ticket=$(pick_next_ticket_path) || picker_rc=$?
@@ -1149,6 +1200,17 @@ EOF
   # 커밋 의무(§2 절차 7–8) 전에 끝나는 패턴(runbook §3.7 분기 1 operator 회수)을
   # 줄이기 위함. idle-exit(125)·timeout(124)은 이미 그 이전(§7)에서 반환되므로
   # 이 블록에 도달하지 않는다 — 재프롬프트는 "정상 종료 후 마무리 누락"에만 적용.
+  # 리뷰 12차 P1: 디스패치 후·결과 확정 전 lock 토큰 재확인 — 사이클 "중간"에
+  # 토큰이 교체됐다면 이 세션의 결과(완료 판정·telemetry)를 확정하지 않는다.
+  if [ "$DRY_RUN" = "0" ] && [ "${LOCK_OWNED:-0}" = "1" ]; then
+    if [ "$(cat state/lock 2>/dev/null)" != "$LOCK_TOKEN" ]; then
+      echo "❌ 사이클 중 state/lock 토큰이 교체됨 — 결과를 확정하지 않고 중단합니다 (fail-closed)."
+      add_failure "$id" "lock-ownership-lost" "${i:-0}" "$ticket"
+      LOCK_OWNED=0
+      return 16
+    fi
+  fi
+
   # 리뷰 2차 P1-8 + 3차 P1: 완료 계약 — "op 경로 clean + 티켓 파일 이동"만으로는 미완
   # 세션이 성공으로 집계됐다. 완료로 인정하려면 아래를 모두 만족해야 한다:
   #   (1) op 경로 clean (기존)
@@ -1343,6 +1405,12 @@ for ((i=1; i<=CYCLES; i++)); do
   else
     rc=$?
     if [ "$rc" = "10" ]; then break; fi   # 처리할 티켓 없음 → 정상 종료
+    # 리뷰 12차 P1: lock 소유권 상실(rc=16)은 세션 종료 조건 — 이후 사이클을
+    # lock 없이 계속 디스패치하지 않는다.
+    if [ "$rc" = "16" ]; then
+      echo "🛑 lock 소유권 상실 — 세션을 즉시 종료합니다 (남은 사이클 실행 안 함)."
+      exit 16
+    fi
     any_failure_rc=$rc
     fails_in_a_row=$((fails_in_a_row+1))
     if [ "$fails_in_a_row" -ge 3 ]; then
