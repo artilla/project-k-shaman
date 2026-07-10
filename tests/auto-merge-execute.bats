@@ -74,6 +74,9 @@ setup() {
   MOCK_CHECKS="$TEST_HOME/mock_checks.sh"
   MOCK_SCOPE="$TEST_HOME/mock_scope.sh"
 
+  # 리뷰 7차 P1: canonical tickets 디렉터리 검사 오버라이드
+  export TICKETS_DIR="$TEST_HOME"
+
   # 기본 티켓 (safe:true, repo 외부)
   make_ticket "$TEST_HOME/T999-test.md"
 }
@@ -453,8 +456,87 @@ EOF
     STATE_DIR='$TEST_HOME/state' \
     '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
 
-  # 병합이 실행되든(고정 OID) 거부되든, 이동된 src/bad.js가 base에 들어가면 안 된다
-  [ ! -f "$d/src/bad.js" ] || ! git -C "$d" ls-tree -r main --name-only | grep -qx "src/bad.js"
+  # 리뷰 7차 P2: "거부돼도 통과"하던 검증 강화 — 고정 OID가 "실제로" 병합돼야 한다
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"auto-merge executed"* ]]
+  local parent_count
+  parent_count="$(git -C "$d" log --format='%P' -1 | wc -w | tr -d ' ')"
+  [ "$parent_count" -eq 2 ]
   run git -C "$d" ls-tree -r main --name-only
   [[ "$output" != *"src/bad.js"* ]]
+}
+
+# ── 리뷰 7차 P1: ref 정확성 + base 측 TOCTOU ──────────────────────────────────
+
+@test "execute: tag named like ticket branch -> refused (refs/heads only)" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  # 브랜치를 지우고 같은 이름의 tag만 남긴다
+  local tip
+  tip="$(git -C "$d" rev-parse ralph/T999)"
+  git -C "$d" branch -D ralph/T999 >/dev/null
+  git -C "$d" tag "ralph/T999" "$tip"
+
+  local base_sha
+  base_sha="$(git -C "$d" rev-parse HEAD)"
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not a local branch"* ]]
+  [ "$(git -C "$d" rev-parse HEAD)" = "$base_sha" ]
+}
+
+@test "execute: arbitrary namespace (attacker/T999) -> refused" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  git -C "$d" branch -m ralph/T999 attacker/T999
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch attacker/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not linked to ticket T999"* ]]
+}
+
+@test "execute: base HEAD moved during checks -> merge refused (base TOCTOU)" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+
+  # 검사(조건 4) 중 main에 새 커밋을 추가하는 훅 — 병합 직전 재검증이 거부해야 한다
+  cat > "$TEST_HOME/mock_checks_movebase.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/movedbase.flag" ]; then
+  touch "$TEST_HOME/movedbase.flag"
+  cd '$d'
+  mkdir -p src
+  echo "malicious" > src/bad.js
+  git add src/bad.js
+  git commit -q -m "sneak base change"
+fi
+exit 0
+EOF
+  chmod +x "$TEST_HOME/mock_checks_movebase.sh"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_movebase.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"TOCTOU"* ]]
+  # 병합 커밋(2-parent)이 생기지 않았어야 한다
+  local parent_count
+  parent_count="$(git -C "$d" log --format='%P' -1 | wc -w | tr -d ' ')"
+  [ "$parent_count" -le 1 ]
 }

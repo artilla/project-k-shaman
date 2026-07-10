@@ -367,8 +367,8 @@ field_of() {
       sub(/^[^:]+:[ \t]*/, "", line)
       sub(/[ \t]+#.*$/, "", line)
       gsub(/^[ \t]+|[ \t]+$/, "", line)
-      # 리뷰 6차 P2: quoted scalar("open", "implementer") 허용 — 서버 파서와 동일 계약.
-      if (line ~ /^".*"$/) line = substr(line, 2, length(line) - 2)
+      # 리뷰 6차/7차 P2: quoted scalar("open", \047implementer\047) 허용 — 서버 파서와 동일 계약.
+      if (line ~ /^".*"$/ || line ~ /^\047.*\047$/) line = substr(line, 2, length(line) - 2)
       val = line
       found = 1
     }
@@ -484,33 +484,42 @@ _op_dirty_lines() {
 # files 스트림은 별도 함수로 분리한다 — bash 3.2(macOS)의 $() 파서는 명령 치환 안의
 # case 패턴 `)` 를 오해석해 syntax error를 내고, 그 결과 files 해시가 깨진 리터럴로
 # 고정돼 내용 변경을 전부 놓쳤다(6차 검증 중 발견).
+# 리뷰 7차 P1: 수집 실패는 fail-closed — 어떤 producer든 실패하면 sentinel 문자열을
+# 비교값으로 쓰지 않고 함수 자체가 비0으로 끝난다. 호출부는 디스패치 중단(rc=13)
+# 또는 no-commit 실패로 처리한다.
 _wip_files_stream() {
   local f entry
-  { git diff --name-only -z
-    git diff --cached --name-only -z
-    git ls-files --others --exclude-standard -z
-    git ls-files -v -z | while IFS= read -r -d '' entry; do
-      case "$entry" in
-        [a-z]" "*|"S "*) printf '%s\0' "${entry#* }" ;;
-      esac
-    done
+  { git diff --name-only -z \
+      && git diff --cached --name-only -z \
+      && git ls-files --others --exclude-standard -z \
+      && git ls-files -v -z | while IFS= read -r -d '' entry; do
+           case "$entry" in
+             [a-z]" "*|"S "*) printf '%s\0' "${entry#* }" ;;
+           esac
+         done
   } | while IFS= read -r -d '' f; do
     case "$f" in .ralph/*|state/*) continue ;; esac
     if [ -h "$f" ]; then
-      printf '%s\0symlink:%s\0' "$f" "$(readlink "./$f" 2>/dev/null || echo unreadable)"
+      entry="$(readlink "./$f")" || exit 9
+      printf '%s\0symlink:%s\0' "$f" "$entry"
     elif [ -f "$f" ]; then
-      printf '%s\0blob:%s\0' "$f" "$(git hash-object -- "$f" 2>/dev/null || echo unhashable)"
+      entry="$(git hash-object -- "$f")" || exit 9
+      printf '%s\0blob:%s\0' "$f" "$entry"
     else
-      printf '%s\0absent\0' "$f"
+      printf '%s\0absent\0' "$f"   # 삭제/특수 파일 — 정상 상태로 기록
     fi
   done
 }
 
 _wip_fingerprint() {
+  local part
   # grep은 매치 0건이면 rc=1 — pipefail이 이를 실패로 오인하지 않게 || true로 감싼다.
-  printf 'status:%s\n' "$({ git status --porcelain | grep -vE '^.{3}(\.ralph/|state/)' || true; } | LC_ALL=C sort | git hash-object --stdin || echo GITFAIL)"
-  printf 'raw:%s\n' "$({ git diff --raw -z; git diff --cached --raw -z; } | git hash-object --stdin || echo GITFAIL)"
-  printf 'files:%s\n' "$(_wip_files_stream | git hash-object --stdin || echo GITFAIL)"
+  part="$({ git status --porcelain | grep -vE '^.{3}(\.ralph/|state/)' || true; } | LC_ALL=C sort | git hash-object --stdin)" || return 1
+  printf 'status:%s\n' "$part"
+  part="$({ git diff --raw -z && git diff --cached --raw -z; } | git hash-object --stdin)" || return 1
+  printf 'raw:%s\n' "$part"
+  part="$(_wip_files_stream | git hash-object --stdin)" || return 1
+  printf 'files:%s\n' "$part"
 }
 
 pick_next_ticket_path() {
@@ -682,7 +691,22 @@ cycle_one() {
   # ────────── 2. Pick next ticket ──────────
   local ticket
   if [ -n "$SPECIFIC_TICKET" ]; then
-    ticket=$(ls docs/tickets/${SPECIFIC_TICKET}*.md 2>/dev/null | head -1 || true)
+    # 리뷰 7차 P1: prefix 검색은 T999가 T9990을 선택했다 — 정확 ID 매치만 허용
+    # (TID.md 또는 TID-*.md), 0개·복수 매치는 거부.
+    local m specific_matches=()
+    for m in "docs/tickets/${SPECIFIC_TICKET}.md" docs/tickets/"${SPECIFIC_TICKET}"-*.md; do
+      [ -f "$m" ] && specific_matches+=("$m")
+    done
+    if [ "${#specific_matches[@]}" -eq 0 ]; then
+      echo "❌ '${SPECIFIC_TICKET}'에 정확히 대응하는 티켓이 없습니다 (docs/tickets/${SPECIFIC_TICKET}.md 또는 ${SPECIFIC_TICKET}-*.md)."
+      return 11
+    fi
+    if [ "${#specific_matches[@]}" -gt 1 ]; then
+      echo "❌ '${SPECIFIC_TICKET}' 매치가 ${#specific_matches[@]}개 — 모호하여 거부합니다:"
+      printf '   %s\n' "${specific_matches[@]}"
+      return 11
+    fi
+    ticket="${specific_matches[0]}"
   elif [ "$SAFE_ONLY" = "1" ]; then
     ticket=$(pick_next_ticket_path)
   else
@@ -809,6 +833,13 @@ EOF
     add_failure "${id:-unknown}" "unknown-persona" "${i:-0}" "persona='$persona'"
     return 12
   fi
+  # 리뷰 7차 P1: 문자 화이트리스트는 symlink 우회(skills/linked.md → 외부 파일)를 못
+  # 막는다 — skill 파일이 symlink면 거부해 skills/ 경계를 실제로 강제한다.
+  if [ -h "$skill_file" ]; then
+    echo "❌ $skill_file 은 symlink입니다 — skills/ 경계 밖 파일을 페르소나로 로드할 수 없습니다 (fail-closed)."
+    add_failure "${id:-unknown}" "unknown-persona" "${i:-0}" "persona='$persona' (symlink)"
+    return 12
+  fi
 
   echo "🎭 persona: $persona  skill: $skill_file"
 
@@ -912,8 +943,15 @@ EOF
 
   # ────────── 7. Act (delegate to headless) ──────────
   # 리뷰 3차/4차 P1: 완료 판정 기준점 — 디스패치 직전 WIP fingerprint (동일성 비교).
+  # 리뷰 7차 P1: 수집 실패 시 디스패치 자체를 중단 (fail-closed, rc=13).
   local pre_wip=""
-  [ "$GIT_REPO" = "1" ] && pre_wip=$(_wip_fingerprint)
+  if [ "$GIT_REPO" = "1" ]; then
+    if ! pre_wip=$(_wip_fingerprint); then
+      echo "❌ WIP fingerprint 수집 실패 — 완료 판정을 보증할 수 없어 사이클을 중단합니다 (fail-closed)."
+      add_failure "$id" "fingerprint-failed" "${i:-0}" "$ticket"
+      return 13
+    fi
+  fi
 
   echo "🤖 헤드리스 세션 디스패치..."
   local headless_log=".ralph/logs/${id}.log"
@@ -991,14 +1029,15 @@ EOF
   #       WIP는 "건드리지 않는 한" 보호되고, 페르소나가 그것을 수정/삭제/커밋하면 실패.
   #   (3) 티켓 파일이 DONE/(status: done) 또는 ARCHIVE/(status: blocked|skipped)로 이동
   #   (4) HEAD가 사이클 시작 시점(pre_head)에서 전진 (커밋 0개 금지)
-  local wip_stage reprompted=0 done_file archive_file final_file final_status
+  local wip_stage reprompted=0 done_file archive_file final_file final_status post_wip
   done_file="docs/tickets/DONE/$(basename "$ticket")"
   archive_file="docs/tickets/ARCHIVE/$(basename "$ticket")"
   while :; do
     wip_stage=""
     if [ -n "$(_op_dirty_lines)" ]; then
       wip_stage="no-commit"
-    elif [ "$GIT_REPO" = "1" ] && [ "$(_wip_fingerprint)" != "$pre_wip" ]; then
+    elif [ "$GIT_REPO" = "1" ] && { ! post_wip=$(_wip_fingerprint) || [ "$post_wip" != "$pre_wip" ]; }; then
+      # 수집 실패(fail-closed)도 불일치도 no-commit — 완료를 보증할 수 없다.
       wip_stage="no-commit"
     elif [ -f "$ticket" ]; then
       wip_stage="no-done-move"

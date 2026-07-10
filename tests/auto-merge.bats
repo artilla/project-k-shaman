@@ -16,8 +16,11 @@ setup() {
   printf '#!/bin/sh\nexit 0\n' > "$TEST_DIR/mock_scope.sh"
   chmod +x "$TEST_DIR/mock_lint.sh" "$TEST_DIR/mock_checks.sh" "$TEST_DIR/mock_scope.sh"
 
-  # 기본 티켓: safe:true, id:T999
-  cat > "$TEST_DIR/ticket.md" <<'EOF'
+  # 리뷰 7차 P1: 티켓 경로는 canonical tickets 디렉터리 검사 대상 — 테스트는 오버라이드.
+  export TICKETS_DIR="$TEST_DIR"
+
+  # 기본 티켓: safe:true, id:T999 (파일명은 T<id>-*.md 계약)
+  cat > "$TEST_DIR/T999-test.md" <<'EOF'
 ---
 id: T999
 title: Test ticket
@@ -39,14 +42,14 @@ teardown() {
     LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: ELIGIBLE"* ]]
 }
 
 # ── 2. safe:false → NOT ELIGIBLE (조건 1) ─────────────────────────────────────
 @test "auto_merge: safe:false -> NOT ELIGIBLE exit 1 (condition 1)" {
-  cat > "$TEST_DIR/unsafe_ticket.md" <<'EOF'
+  cat > "$TEST_DIR/T999-unsafe.md" <<'EOF'
 ---
 id: T999
 safe: false
@@ -57,7 +60,7 @@ EOF
     LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/unsafe_ticket.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-unsafe.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 1 ]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
 }
@@ -69,7 +72,7 @@ EOF
     LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 1 ]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
 }
@@ -81,7 +84,7 @@ EOF
     LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 1 ]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
 }
@@ -93,7 +96,7 @@ EOF
     LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 1 ]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
 }
@@ -106,7 +109,7 @@ EOF
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
     REVIEWS_DIR="$TEST_DIR/reviews" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 1 ]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
 }
@@ -121,7 +124,7 @@ EOF
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
     REVIEWS_DIR="$TEST_DIR/reviews" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: ELIGIBLE"* ]]
 }
@@ -136,7 +139,7 @@ EOF
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
     REVIEWS_DIR="$TEST_DIR/reviews" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 1 ]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
 }
@@ -148,7 +151,7 @@ EOF
     LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: ELIGIBLE"* ]]
 }
@@ -162,7 +165,7 @@ EOF
     LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope_fail.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: ELIGIBLE"* ]]
   [[ "$output" == *"ADVISORY:"* ]]
@@ -234,7 +237,7 @@ EOF
     LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 1 ]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
 }
@@ -246,7 +249,7 @@ EOF
     LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 1 ]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
 }
@@ -258,7 +261,7 @@ EOF
     LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 1 ]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
 }
@@ -282,12 +285,13 @@ EOF
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
     REVIEWS_DIR="$TEST_DIR/reviews" \
     "$SCRIPT_PATH" "$TEST_DIR/T999-spoof.md" --changed-files "$TEST_DIR/changed.txt"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
+  # 리뷰 7차 P1: id 계약 위반은 평가 전에 즉시 거부(exit 2)
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"id contract"* ]]
 }
 
 # ── 18. Fix 3: no frontmatter id, filename T999, T999 review PASS → ELIGIBLE ──
-@test "auto_merge: no frontmatter id filename T999 with T999 review PASS -> ELIGIBLE (Fix 3 regression guard)" {
+@test "auto_merge: missing frontmatter id -> refused exit 2 (id contract)" {
   cat > "$TEST_DIR/T999-noid.md" <<'EOF'
 ---
 safe: true
@@ -302,8 +306,9 @@ EOF
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
     REVIEWS_DIR="$TEST_DIR/reviews" \
     "$SCRIPT_PATH" "$TEST_DIR/T999-noid.md" --changed-files "$TEST_DIR/changed.txt"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"VERDICT: ELIGIBLE"* ]]
+  # 리뷰 7차 P1: id 누락 하위 호환 제거 — 정확히 1회 선언 필수
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"id contract"* ]]
 }
 
 # ── 리뷰 2차 P1-11: rename 소스 경로 검사 (--name-status) ─────────────────────
@@ -339,7 +344,7 @@ _make_rename_repo() {
       LINT_EXTERNAL_DOCS_CMD="$2" RUN_CHECKS_CMD="$3" CHECK_SCOPE_OMISSION_CMD="$4" \
       "$5" "$6" --base main
   ' _ "$repo" "$TEST_DIR/mock_lint.sh" "$TEST_DIR/mock_checks.sh" "$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md"
   [ "$status" -eq 1 ]
   [[ "$output" == *"src/app.js"* ]]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
@@ -357,7 +362,7 @@ _make_rename_repo() {
       LINT_EXTERNAL_DOCS_CMD="$2" RUN_CHECKS_CMD="$3" CHECK_SCOPE_OMISSION_CMD="$4" \
       "$5" "$6" --base main
   ' _ "$repo" "$TEST_DIR/mock_lint.sh" "$TEST_DIR/mock_checks.sh" "$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md"
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: ELIGIBLE"* ]]
 }
@@ -377,7 +382,7 @@ _make_rename_repo() {
       LINT_EXTERNAL_DOCS_CMD="$2" RUN_CHECKS_CMD="$3" CHECK_SCOPE_OMISSION_CMD="$4" \
       "$5" "$6" --base no-such-branch
   ' _ "$repo" "$TEST_DIR/mock_lint.sh" "$TEST_DIR/mock_checks.sh" "$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md"
   [ "$status" -eq 1 ]
   [[ "$output" == *"condition 2: git diff failed"* ]]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
@@ -398,7 +403,7 @@ _make_rename_repo() {
       LINT_EXTERNAL_DOCS_CMD="$2" RUN_CHECKS_CMD="$3" CHECK_SCOPE_OMISSION_CMD="$4" \
       "$5" "$6" --base main
   ' _ "$repo" "$TEST_DIR/mock_lint.sh" "$TEST_DIR/mock_checks.sh" "$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md"
   [ "$status" -eq 1 ]
   [[ "$output" == *"src/app.js"* ]]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
@@ -417,7 +422,7 @@ _make_rename_repo() {
       LINT_EXTERNAL_DOCS_CMD="$2" RUN_CHECKS_CMD="$3" CHECK_SCOPE_OMISSION_CMD="$4" \
       "$5" "$6" --base main
   ' _ "$repo" "$TEST_DIR/mock_lint.sh" "$TEST_DIR/mock_checks.sh" "$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md"
   [ "$status" -eq 0 ]
   [[ "$output" == *"VERDICT: ELIGIBLE"* ]]
 }
@@ -425,7 +430,7 @@ _make_rename_repo() {
 # ── 리뷰 5차 P1/P2: 중복 safe·renameLimit fail-open ───────────────────────────
 
 @test "auto_merge: duplicate safe (false then true) -> NOT ELIGIBLE (condition 1)" {
-  cat > "$TEST_DIR/dup1.md" <<'EOF'
+  cat > "$TEST_DIR/T999-dup1.md" <<'EOF'
 ---
 id: T999
 title: dup
@@ -440,14 +445,14 @@ EOF
     LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/dup1.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-dup1.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 1 ]
   [[ "$output" == *"duplicate safe"* ]]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
 }
 
 @test "auto_merge: duplicate safe (true then false) -> NOT ELIGIBLE (condition 1)" {
-  cat > "$TEST_DIR/dup2.md" <<'EOF'
+  cat > "$TEST_DIR/T999-dup2.md" <<'EOF'
 ---
 id: T999
 title: dup
@@ -462,7 +467,7 @@ EOF
     LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
     RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
     CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/dup2.md" --changed-files "$TEST_DIR/changed.txt"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-dup2.md" --changed-files "$TEST_DIR/changed.txt"
   [ "$status" -eq 1 ]
   [[ "$output" == *"duplicate safe"* ]]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
@@ -482,8 +487,70 @@ EOF
       LINT_EXTERNAL_DOCS_CMD="$2" RUN_CHECKS_CMD="$3" CHECK_SCOPE_OMISSION_CMD="$4" \
       "$5" "$6" --base main
   ' _ "$repo" "$TEST_DIR/mock_lint.sh" "$TEST_DIR/mock_checks.sh" "$TEST_DIR/mock_scope.sh" \
-    "$SCRIPT_PATH" "$TEST_DIR/ticket.md"
+    "$SCRIPT_PATH" "$TEST_DIR/T999-test.md"
   [ "$status" -eq 1 ]
   [[ "$output" == *"src/app.js"* ]]
   [[ "$output" == *"VERDICT: NOT ELIGIBLE"* ]]
+}
+
+# ── 리뷰 7차 P1: 티켓 경로·id 계약 강화 ───────────────────────────────────────
+
+@test "auto_merge: ticket outside canonical tickets dir -> refused exit 2" {
+  mkdir -p "$TEST_DIR/elsewhere"
+  cp "$TEST_DIR/T999-test.md" "$TEST_DIR/elsewhere/T999-test.md"
+  printf 'docs/guide.md\n' > "$TEST_DIR/changed.txt"
+  run env \
+    LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
+    RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
+    CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/elsewhere/T999-test.md" --changed-files "$TEST_DIR/changed.txt"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"outside canonical"* ]]
+}
+
+@test "auto_merge: filename T999evil.md -> refused exit 2 (full basename contract)" {
+  cp "$TEST_DIR/T999-test.md" "$TEST_DIR/T999evil.md"
+  printf 'docs/guide.md\n' > "$TEST_DIR/changed.txt"
+  run env \
+    LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
+    RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
+    CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/T999evil.md" --changed-files "$TEST_DIR/changed.txt"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"does not match"* ]]
+}
+
+@test "auto_merge: duplicate id declarations -> refused exit 2" {
+  cat > "$TEST_DIR/T999-dupid.md" <<'EOF'
+---
+id: T999
+id: T045
+safe: true
+---
+EOF
+  printf 'docs/guide.md\n' > "$TEST_DIR/changed.txt"
+  run env \
+    LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
+    RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
+    CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/T999-dupid.md" --changed-files "$TEST_DIR/changed.txt"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"id contract"* ]]
+}
+
+@test "auto_merge: whitespace-forged id (T 9 9 9) -> refused exit 2" {
+  cat > "$TEST_DIR/T999-wsid.md" <<'EOF'
+---
+id: T 9 9 9
+safe: true
+---
+EOF
+  printf 'docs/guide.md\n' > "$TEST_DIR/changed.txt"
+  run env \
+    LINT_EXTERNAL_DOCS_CMD="$TEST_DIR/mock_lint.sh" \
+    RUN_CHECKS_CMD="$TEST_DIR/mock_checks.sh" \
+    CHECK_SCOPE_OMISSION_CMD="$TEST_DIR/mock_scope.sh" \
+    "$SCRIPT_PATH" "$TEST_DIR/T999-wsid.md" --changed-files "$TEST_DIR/changed.txt"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"id contract"* ]]
 }

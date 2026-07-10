@@ -642,3 +642,65 @@ EOF
   [ "$status" -eq 0 ]
   [ -f "$TEST_HOME/docs/tickets/DONE/T026-test.md" ]
 }
+
+# ── 리뷰 7차 P1 회귀 ──────────────────────────────────────────────────────────
+
+@test "T27: specific ticket lookup is exact (prefix T999 must not select T9990)" {
+  _make_ticket T9990 true
+  _commit_all "add T9990"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T999 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 11 ]
+  [[ "$output" == *"정확히 대응하는 티켓이 없습니다"* ]]
+
+  # 복수 매치도 거부
+  _make_ticket T999 true
+  cp "$TEST_HOME/docs/tickets/T999-test.md" "$TEST_HOME/docs/tickets/T999-second.md"
+  sed -i.bak 's/^id: T999$/id: T999/' "$TEST_HOME/docs/tickets/T999-second.md" && rm -f "$TEST_HOME/docs/tickets/T999-second.md.bak"
+  _commit_all "add ambiguous T999"
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T999 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 11 ]
+  [[ "$output" == *"모호"* ]]
+}
+
+@test "T28: persona resolved through symlinked skill file -> refused rc=12" {
+  ln -s ../docs/master-spec.md "$TEST_HOME/skills/linked.md"
+  cat > "$TEST_HOME/docs/tickets/T028-test.md" <<'EOF'
+---
+id: T028
+title: Symlinked persona
+status: open
+priority: P2
+safe: true
+persona: linked
+---
+# T028
+EOF
+  _commit_all "add T028 and symlinked skill"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T028 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 12 ]
+  [[ "$output" == *"symlink"* ]]
+  [ ! -f "$TEST_HOME/docs/tickets/DONE/T028-test.md" ]
+}
+
+@test "T29: server parser agrees with shell on quoted scalars and strict delimiters" {
+  command -v node >/dev/null 2>&1 || skip "node not available"
+  run node --input-type=module -e "
+import { readFileSync } from 'node:fs';
+const src = readFileSync(process.argv[1], 'utf8');
+const fnStart = src.indexOf('function parseFrontmatter');
+const fnEnd = src.indexOf('// ── Read model');
+const parseFrontmatter = new Function(src.slice(fnStart, fnEnd) + '; return parseFrontmatter;')();
+const quoted = parseFrontmatter('---\nid: T1\nstatus: \"open\"\nsafe: \"true\"\npersona: \"implementer\"\n---\nbody');
+if (!quoted || quoted.safe !== true || quoted.status !== 'open' || quoted.persona !== 'implementer') { console.error('quoted mismatch', quoted); process.exit(1); }
+const single = parseFrontmatter('---\nid: T1\nstatus: open\nsafe: \'true\'\n---\nbody');
+if (!single || single.safe !== true) { console.error('single-quote mismatch', single); process.exit(1); }
+const crlf = parseFrontmatter('---\r\nid: T1\r\nstatus: open\r\n---\r\nbody');
+const trailing = parseFrontmatter('---\nid: T1\nstatus: open\n---trailing\nbody');
+if (crlf !== null || trailing !== null) { console.error('delimiter mismatch', crlf, trailing); process.exit(1); }
+console.log('server-shell-parser-consistent');
+" "$REPO_ROOT/mission-control/server.mjs"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"server-shell-parser-consistent"* ]]
+}

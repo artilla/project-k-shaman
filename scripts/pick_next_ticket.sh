@@ -38,8 +38,8 @@ field_of() {
       sub(/^[^:]+:[ \t]*/, "", line)
       sub(/[ \t]+#.*$/, "", line)
       gsub(/^[ \t]+|[ \t]+$/, "", line)
-      # 리뷰 6차 P2: quoted scalar 허용 — 서버 파서와 동일 계약.
-      if (line ~ /^".*"$/) line = substr(line, 2, length(line) - 2)
+      # 리뷰 6차/7차 P2: quoted scalar(쌍·홑따옴표) 허용 — 서버 파서와 동일 계약.
+      if (line ~ /^".*"$/ || line ~ /^\047.*\047$/) line = substr(line, 2, length(line) - 2)
       val = line
       found = 1
     }

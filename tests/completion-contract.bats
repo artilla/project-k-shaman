@@ -448,3 +448,30 @@ EOF
   [ "$status" -eq 7 ]
   [[ "$output" == *"no-commit"* ]]
 }
+
+# ── 리뷰 7차 P1: fingerprint 수집 실패 fail-closed ────────────────────────────
+
+@test "C17: unreadable dirty file -> fingerprint collection fails closed rc=13" {
+  local main_home="$TEST_BASE/main-home"
+  _make_home "$main_home"
+  echo "secret" > "$main_home/src/locked.txt"
+  chmod 000 "$main_home/src/locked.txt"
+
+  cat > "$main_home/scripts/run_headless.sh" <<EOF
+${_fake_headless_prologue}
+tmp=\$(mktemp)
+awk '/^---\$/ { fm = !fm; print; next } fm && \$1 == "status:" { print "status: done"; next } { print }' "\$ticket" > "\$tmp"
+mv "\$tmp" "\$ticket"
+git add "\$ticket"
+git mv "\$ticket" "docs/tickets/DONE/\$(basename "\$ticket")"
+git commit -q -m "\${id}: done" -- docs
+EOF
+  chmod +x "$main_home/scripts/run_headless.sh"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T100' _ "$main_home"
+  chmod 644 "$main_home/src/locked.txt" 2>/dev/null || true
+  [ "$status" -eq 13 ]
+  [[ "$output" == *"fingerprint 수집 실패"* ]]
+  # 디스패치 자체가 중단됐어야 한다 — DONE 이동 없음
+  [ ! -f "$main_home/docs/tickets/DONE/T100-contract.md" ]
+}

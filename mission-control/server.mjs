@@ -193,12 +193,17 @@ function parseFrontmatter(content) {
     if (!raw) continue;
     if (raw.startsWith('[')) {
       try { fm[key] = JSON.parse(raw); } catch { fm[key] = []; }
-    } else if (raw === 'true') {
+      continue;
+    }
+    // 리뷰 7차 P2: unquote를 boolean 판정보다 먼저 — `safe: "true"`가 문자열로 남아
+    // 셸(실행 허용)과 어긋나던 split-brain 해소. 셸 field_of도 쌍·홑따옴표를 벗긴다.
+    const unquoted = raw.replace(/^["'](.*)["']$/, '$1');
+    if (unquoted === 'true') {
       fm[key] = true;
-    } else if (raw === 'false') {
+    } else if (unquoted === 'false') {
       fm[key] = false;
     } else {
-      fm[key] = raw.replace(/^["'](.*)["']$/, '$1');
+      fm[key] = unquoted;
     }
   }
   if (Object.keys(fm).length === 0) return null;
@@ -314,6 +319,15 @@ function buildModel() {
             // status 누락(기본화된 'open')이나 권위 필드 중복 티켓에 Run을 노출하지 않는다.
             status_missing: !entry.doneDir && !fm.status,
             authority_malformed: (fm._duplicateKeys || []).some(k => ['id', 'status', 'persona', 'safe'].includes(k)),
+            // 리뷰 7차 P1: 실행기는 frontmatter id == 파일명 ID(T<숫자>, 전체 basename
+            // 형식 포함)를 요구한다 — 불일치 카드(T301 파일 + id:T999)에 Run 미노출.
+            id_malformed: (() => {
+              const fnBase = entry.file.replace(/^DONE\//, '').replace(/\.md$/, '');
+              const fnId = (fnBase.match(/^T\d+/) || [''])[0];
+              return !/^T\d+$/.test(String(fm.id))
+                || String(fm.id) !== fnId
+                || !(fnBase === fnId || fnBase.startsWith(fnId + '-'));
+            })(),
             persona: String(fm.persona || ''),
             estimate: String(fm.estimate || ''),
             depends_on: Array.isArray(fm.depends_on) ? fm.depends_on : [],
@@ -956,6 +970,7 @@ function renderTicketCard(ticket, doneIds, nowMs, isLocalhost = true, failCount 
   // 리뷰 5차 P2: status 누락·권위 필드 중복도 실행기가 거부하므로 동일하게 미노출.
   const runButton = isLocalhost && status === 'open' && !blocked
       && !ticket.safe_malformed && !ticket.status_missing && !ticket.authority_malformed
+      && !ticket.id_malformed
     ? renderWriteButton({
         label: 'Run',
         cliCommand: `./scripts/run_loop.sh ${ticket.id}`,

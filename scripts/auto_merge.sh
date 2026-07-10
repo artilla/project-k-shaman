@@ -78,6 +78,17 @@ if [ ! -f "$TICKET_PATH" ]; then
   exit 2
 fi
 
+# ── 리뷰 7차 P1: 티켓 경로는 canonical tickets 디렉터리 하위만 허용 ────────────────
+# 외부 경로(/tmp/T999-*.md)의 위조 티켓으로 병합 자격을 얻는 우회 차단.
+# TICKETS_DIR은 테스트 격리용 오버라이드(기존 REVIEWS_DIR/STATE_DIR과 동일 패턴).
+TICKETS_DIR="${TICKETS_DIR:-$ROOT/docs/tickets}"
+_ticket_dir_real="$(cd "$(dirname "$TICKET_PATH")" 2>/dev/null && pwd -P || true)"
+_tickets_real="$(cd "$TICKETS_DIR" 2>/dev/null && pwd -P || true)"
+if [ -z "$_tickets_real" ] || { [ "$_ticket_dir_real" != "$_tickets_real" ] && [ "$_ticket_dir_real" != "$_tickets_real/DONE" ]; }; then
+  echo "[FAIL] ticket path '${TICKET_PATH}' is outside canonical ${TICKETS_DIR} (or DONE/) — refusing" >&2
+  exit 2
+fi
+
 # ── --execute 유효성 검사 ──────────────────────────────────────────────────────
 if [ "$EXECUTE" -eq 1 ] && [ -n "$CHANGED_FILES_ARG" ]; then
   echo "[FAIL] --execute and --changed-files are mutually exclusive" >&2
@@ -90,10 +101,16 @@ if [ "$EXECUTE" -eq 1 ] && [ -z "$BRANCH_ARG" ]; then
 fi
 
 # ── ticket ID・frontmatter 파싱 (Fix 1: safe 경계, Fix 3: 파일명 앵커) ──────────
-# Fix 3: 파일명 T-prefix → 권위 있는 ID 소스
-_fn_id="$(basename "$TICKET_PATH" | grep -oE '^T[0-9]+' || true)"
+# 리뷰 7차 P1: 파일명은 정확히 `T<숫자>.md` 또는 `T<숫자>-*.md` — 과거 T-prefix
+# grep은 'T999evil.md'에서 T999를 추출해 통과시켰다.
+_ticket_bn="$(basename "$TICKET_PATH")"
+_fn_id=""
+if printf '%s\n' "$_ticket_bn" | grep -qE '^T[0-9]+(-[^/]*)?\.md$'; then
+  _fn_id="$(printf '%s' "$_ticket_bn" | grep -oE '^T[0-9]+')"
+fi
 
 _fm_id=""
+_fm_id_count=0
 _fm_safe=0
 _fm_safe_count=0
 _fm_found=0
@@ -116,7 +133,11 @@ while IFS= read -r _fmline; do
       fi
       case "$_fmline" in
         id:*)
-          _fm_id="$(printf '%s' "$_fmline" | sed 's/^id:[[:space:]]*//' | tr -d '[:space:]')"
+          _fm_id_count=$((_fm_id_count + 1))
+          # 리뷰 7차 P2: inline 주석 제거 + quoted scalar 허용 — field_of와 동일 계약.
+          # 앞뒤 공백만 제거(내부 공백은 보존) — 'T 9 9 9'가 압축돼 T999로 통과하는 위조 차단.
+          _fm_id="$(printf '%s' "$_fmline" | sed 's/^id:[[:space:]]*//; s/[[:space:]][[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//')"
+          _fm_id="${_fm_id%\"}"; _fm_id="${_fm_id#\"}"
           ;;
       esac
       # 리뷰 5차 P1: safe 선언 횟수 집계 — 중복(false→true, true→false 어느 순서든)은
@@ -124,21 +145,25 @@ while IFS= read -r _fmline; do
       case "$_fmline" in
         safe:*) _fm_safe_count=$((_fm_safe_count + 1)) ;;
       esac
-      # 리뷰 6차 P2: quoted scalar("true") 허용 — 셸 field_of·서버 파서와 동일 계약.
-      if printf '%s\n' "$_fmline" | grep -qE '^safe:[[:space:]]*("true"|true)[[:space:]]*$'; then
+      # 리뷰 6차 P2: quoted scalar("true"/'true') 허용 — 셸 field_of·서버 파서와 동일 계약.
+      if printf '%s\n' "$_fmline" | grep -qE "^safe:[[:space:]]*(\"true\"|'true'|true)[[:space:]]*(#.*)?$"; then
         _fm_safe=1
       fi
       ;;
   esac
 done < "$TICKET_PATH"
 
-# Fix 3: 파일명에 T-prefix가 있으면 권위 ID; frontmatter id 불일치 시 즉시 FAIL
-if [ -n "$_fn_id" ]; then
-  TICKET_ID="$_fn_id"
-else
-  # 파일명 T-prefix 없음 → frontmatter id: 사용 (하위 호환)
-  TICKET_ID="$_fm_id"
+# 리뷰 7차 P1: id 계약 — 파일명 형식 유효 + frontmatter id 정확히 1회 + 형식 + 일치.
+# (과거: id 누락 허용·중복 last-wins·공백 낀 'T 9 9 9'가 tr -d로 T999로 압축돼 통과)
+if [ -z "$_fn_id" ]; then
+  echo "[FAIL] ticket filename '${_ticket_bn}' does not match ^T<digits>(-…)?.md — refusing" >&2
+  exit 2
 fi
+if [ "$_fm_id_count" -ne 1 ] || ! printf '%s\n' "$_fm_id" | grep -qE '^T[0-9]+$' || [ "$_fm_id" != "$_fn_id" ]; then
+  echo "[FAIL] id contract violated (frontmatter id='${_fm_id}' count=${_fm_id_count}, filename id='${_fn_id}') — refusing" >&2
+  exit 2
+fi
+TICKET_ID="$_fn_id"
 
 # ── base 브랜치 결정 ──────────────────────────────────────────────────────────
 # --changed-files가 제공되면 base branch를 검출하지 않는다 (T050 §2.1 패턴 계승).
@@ -163,16 +188,20 @@ if [ "$EXECUTE" -eq 1 ]; then
     exit 1
   fi
 
-  # 리뷰 6차 P1: 티켓-브랜치 연결 — 승인된 티켓 ID로 무관한 브랜치를 병합하는 우회 차단.
-  # 브랜치 basename이 정확히 TICKET_ID이거나 TICKET_ID- 접두여야 한다 (예: ralph/T999).
-  _branch_base="${BRANCH_ARG##*/}"
-  case "$_branch_base" in
-    "$TICKET_ID"|"$TICKET_ID"-*) ;;
+  # 리뷰 6차 P1 + 7차 P1: 티켓-브랜치 연결 — basename 매치만으로는 refs/tags/T999나
+  # attacker/T999 같은 임의 namespace도 통과했다. 정확히 ralph/<TICKET_ID>[-*] 이름의
+  # "브랜치"(refs/heads/ 하위)만 허용한다.
+  case "$BRANCH_ARG" in
+    ralph/"$TICKET_ID"|ralph/"$TICKET_ID"-*) ;;
     *)
-      echo "[FAIL] branch '${BRANCH_ARG}' is not linked to ticket ${TICKET_ID} (expected .../${TICKET_ID} or .../${TICKET_ID}-*)"
+      echo "[FAIL] branch '${BRANCH_ARG}' is not linked to ticket ${TICKET_ID} (expected ralph/${TICKET_ID} or ralph/${TICKET_ID}-*)"
       exit 1
       ;;
   esac
+  if ! git show-ref --verify --quiet "refs/heads/${BRANCH_ARG}"; then
+    echo "[FAIL] '${BRANCH_ARG}' is not a local branch (refs/heads/) — tags/remote refs are not mergeable"
+    exit 1
+  fi
 fi
 
 # ── 리뷰 6차 P1: base/branch commit OID 고정 (TOCTOU 차단) ────────────────────────
@@ -183,7 +212,8 @@ BRANCH_OID=""
 if [ -z "$CHANGED_FILES_ARG" ]; then
   BASE_OID="$(git rev-parse --verify "${BASE_BRANCH}^{commit}" 2>/dev/null || true)"
   if [ "$EXECUTE" -eq 1 ]; then
-    BRANCH_OID="$(git rev-parse --verify "${BRANCH_ARG}^{commit}" 2>/dev/null || true)"
+    # 리뷰 7차 P1: refs/heads/ 정확 경로로만 해석 — 같은 이름의 tag가 브랜치를 가리는 것 방지.
+    BRANCH_OID="$(git rev-parse --verify "refs/heads/${BRANCH_ARG}^{commit}" 2>/dev/null || true)"
   else
     BRANCH_OID="$(git rev-parse --verify "HEAD^{commit}" 2>/dev/null || true)"
   fi
@@ -370,7 +400,15 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   fi
 
   mkdir -p "$STATE_DIR"
+  # 리뷰 7차 P1: 병합 직전 base 재검증 — 검사(조건 3·4) 중 현재 브랜치 HEAD가
+  # 움직였거나(dirty 포함) 브랜치가 바뀌었으면 병합을 거부한다 (base 측 TOCTOU).
   PRE_MERGE_HEAD="$(git rev-parse HEAD)"
+  if [ "$PRE_MERGE_HEAD" != "$BASE_OID" ] \
+     || [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != "$BASE_BRANCH" ] \
+     || [ -n "$(git status --porcelain)" ]; then
+    echo "[FAIL] base '${BASE_BRANCH}' moved or dirtied since checks (HEAD=${PRE_MERGE_HEAD} expected=${BASE_OID}) — merge refused (TOCTOU)"
+    exit 1
+  fi
   if ! git merge --no-ff "$BRANCH_OID" -m "auto-merge: ${TICKET_ID} (ELIGIBLE)"; then
     git merge --abort >/dev/null 2>&1 || git reset --hard "$PRE_MERGE_HEAD" >/dev/null 2>&1 || true
     printf '%s\t%s\t%s\t%s\tROLLED_BACK\n' \
