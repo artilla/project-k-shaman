@@ -533,24 +533,61 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   fi
   # 리뷰 13차 P1: 이전 실행이 RECOVERY_REQUIRED로 끝났으면(미검증 merge/불명 상태
   # 잔존 가능) 새 auto-merge를 시작하지 않는다 — 수동 복구 후 marker를 제거해야 한다.
+  # (검사 자체는 리뷰 14차 P2에 따라 EXIT trap 설치 "이후"로 이동 — 거부 경로가
+  # trap 설치 전에 종료해 auto_merge.lock.d를 남기던 문제 수정.)
   AM_RECOVERY="$STATE_DIR/auto_merge.recovery"
   _am_mark_recovery() {
     : > "$AM_RECOVERY" 2>/dev/null || echo "[WARN] recovery marker 기록 실패: ${AM_RECOVERY}" >&2
   }
-  if [ -e "$AM_RECOVERY" ]; then
-    _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "REFUSED:recovery-pending"
-    echo "[FAIL] 이전 auto-merge가 RECOVERY_REQUIRED 상태입니다 — 수동 복구 후 ${AM_RECOVERY} 를 제거하세요. 새 병합을 거부합니다 (fail-closed)."
-    exit 1
-  fi
 
-  # 리뷰 13차 P1: CAS 후 워크트리 동기화 — status의 모든 항목이 "정확히 merge 잔상"
-  # (내용이 MERGE_COMMIT의 해당 blob과 일치)일 때만 reset --hard 한다. 스냅샷과
-  # reset 사이에 끼어든 동시 변경(다른 파일 수정 ' M'/'MM', untracked '??', rename 등)
-  # 이 하나라도 있으면 파괴적 reset을 포기하고 보존한다 (fail-closed).
-  # 반환: 0=완전 복구(reset), 1=ref-only(worktree 보존).
+  # 리뷰 14차 P1: 워크트리 writer들과 동일한 write lock — 복원 창 동안 시스템
+  # writer(rename-publish)의 개입을 배제한다 (arbitrary in-place 변경은 아래
+  # hardlink 백업 결속이 잡는다). 실패는 복원 포기(REF_ONLY, 보존)로 이어진다.
+  _TW_LOCK="state/ticket_write.lock.d"
+  _am_tw_acquire() {
+    local _i=0 _p _mp
+    mkdir -p state 2>/dev/null || true
+    while :; do
+      if mkdir "$_TW_LOCK" 2>/dev/null; then
+        if echo "$$" > "$_TW_LOCK/pid" 2>/dev/null; then return 0; fi
+        rm -rf "$_TW_LOCK" 2>/dev/null || true
+        return 1
+      fi
+      _p="$(cat "$_TW_LOCK/pid" 2>/dev/null || true)"
+      if [ -n "$_p" ] && ! kill -0 "$_p" 2>/dev/null; then
+        if mv "$_TW_LOCK" "$_TW_LOCK.reclaim.$$" 2>/dev/null; then
+          _mp="$(cat "$_TW_LOCK.reclaim.$$/pid" 2>/dev/null || true)"
+          if [ "$_mp" = "$_p" ]; then
+            rm -rf "$_TW_LOCK.reclaim.$$" 2>/dev/null || true
+            continue
+          fi
+          mv "$_TW_LOCK.reclaim.$$" "$_TW_LOCK" 2>/dev/null || return 1
+        fi
+      fi
+      _i=$((_i+1))
+      [ "$_i" -ge 100 ] && return 1
+      sleep 0.1
+    done
+  }
+  _am_tw_release() {
+    if [ "$(cat "$_TW_LOCK/pid" 2>/dev/null)" = "$$" ]; then
+      rm -rf "$_TW_LOCK" 2>/dev/null || true
+    fi
+  }
+
+  # 리뷰 13차 P1 + 14차 P1: CAS 후 워크트리 동기화. 모든 dirty 항목이 "정확히 merge
+  # 잔상"(내용이 MERGE_COMMIT blob과 일치)인지 검증한 뒤, 전역 `reset --hard` 대신
+  # 검증된 경로만 개별 복원한다. 검증~복원 TOCTOU는 복원 시점에 파괴를 내용에
+  # 결속해 제거한다:
+  #   - 수정/추가 항목: 기존 inode를 hardlink 백업 → rename 교체 → 백업 내용이
+  #     여전히 merge blob인지 재확인. 다르면(그 사이 in-place 동시 변경) 백업을
+  #     되돌려 보존하고 REF_ONLY로 격하.
+  #   - 삭제 항목 복원: ln(no-clobber, 원자적)으로만 생성 — 그 사이 생긴 파일을
+  #     덮지 않는다.
+  # 반환: 0=완전 복구(최종 clean), 1=ref-only(잔여 변경 보존).
   _sync_worktree_after_cas() {
     [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$BASE_BRANCH" ] || return 1
-    local _now _line _st _p _want _have
+    local _now _line _st _p _want _have _tmp _bak _mode _perm _rc=0
     _now="$(_wt_status_or_fail 2>/dev/null)" || return 1
     [ -z "$_now" ] && return 0
     case "$_now" in *'"'*) return 1 ;; esac
@@ -573,7 +610,67 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     done <<EOF
 $_now
 EOF
-    git reset --hard HEAD >/dev/null 2>&1
+    _am_tw_acquire || return 1
+    # index만 base(HEAD)로 동기화 — worktree는 아래에서 경로별로 결속 복원.
+    if ! git read-tree --reset HEAD >/dev/null 2>&1; then _am_tw_release; return 1; fi
+    while IFS= read -r _line; do
+      [ -z "$_line" ] && continue
+      _st="${_line%"${_line#??}"}"
+      _p="${_line#???}"
+      case "$_st" in
+        'M ')
+          # base에도 존재 — base blob으로 복원 (hardlink 백업으로 파괴를 내용에 결속)
+          _want="$(git rev-parse -q --verify "${MERGE_COMMIT}:${_p}" 2>/dev/null)" || { _rc=1; continue; }
+          _tmp="$(mktemp "$(dirname "$_p")/.amrb.XXXXXX" 2>/dev/null)" || { _rc=1; continue; }
+          if ! git cat-file blob "HEAD:${_p}" > "$_tmp" 2>/dev/null; then rm -f "$_tmp"; _rc=1; continue; fi
+          _perm="$(stat -c '%a' "$_p" 2>/dev/null || stat -f '%Lp' "$_p" 2>/dev/null || true)"
+          if [ -z "$_perm" ] || ! chmod "$_perm" "$_tmp" 2>/dev/null; then rm -f "$_tmp"; _rc=1; continue; fi
+          _bak="$(dirname "$_p")/.amrb-bak.$$"
+          if ! ln "$_p" "$_bak" 2>/dev/null; then rm -f "$_tmp"; _rc=1; continue; fi
+          if ! mv -f "$_tmp" "$_p" 2>/dev/null; then rm -f "$_tmp" "$_bak"; _rc=1; continue; fi
+          if [ "$(git hash-object -- "$_bak" 2>/dev/null)" != "$_want" ]; then
+            mv -f "$_bak" "$_p" 2>/dev/null || true   # 동시 변경 감지 — 복원 취소, 보존
+            _rc=1
+          else
+            rm -f "$_bak"
+          fi
+          ;;
+        'A ')
+          # merge가 추가한 파일 — 삭제하되 파괴를 내용에 결속
+          _want="$(git rev-parse -q --verify "${MERGE_COMMIT}:${_p}" 2>/dev/null)" || { _rc=1; continue; }
+          _bak="$(dirname "$_p")/.amrb-bak.$$"
+          if ! ln "$_p" "$_bak" 2>/dev/null; then _rc=1; continue; fi
+          rm -f "$_p" 2>/dev/null || true
+          if [ "$(git hash-object -- "$_bak" 2>/dev/null)" != "$_want" ]; then
+            mv -f "$_bak" "$_p" 2>/dev/null || true
+            _rc=1
+          else
+            rm -f "$_bak"
+          fi
+          ;;
+        'D ')
+          # merge가 삭제한 파일 — base 내용으로 복원 (ln no-clobber: 그 사이 생긴 파일 보호)
+          _mode="$(git ls-tree "HEAD" -- "$_p" 2>/dev/null | awk '{print $1; exit}')"
+          case "$_mode" in
+            100755) _perm=755 ;;
+            100644) _perm=644 ;;
+            *) _rc=1; continue ;;   # symlink 등은 자동 복원하지 않음 (보존적)
+          esac
+          _tmp="$(mktemp "$(dirname "$_p")/.amrb.XXXXXX" 2>/dev/null)" || { _rc=1; continue; }
+          if ! git cat-file blob "HEAD:${_p}" > "$_tmp" 2>/dev/null; then rm -f "$_tmp"; _rc=1; continue; fi
+          chmod "$_perm" "$_tmp" 2>/dev/null || { rm -f "$_tmp"; _rc=1; continue; }
+          if ! ln "$_tmp" "$_p" 2>/dev/null; then _rc=1; fi
+          rm -f "$_tmp"
+          ;;
+      esac
+    done <<EOF
+$_now
+EOF
+    _am_tw_release
+    # 최종 판정: clean일 때만 완전 복구 — 잔여(보존된 동시 변경 포함)는 REF_ONLY.
+    [ "$_rc" -eq 0 ] || return 1
+    _now="$(_wt_status_or_fail 2>/dev/null)" || return 1
+    [ -z "$_now" ]
   }
 
   # 리뷰 13차 P1: 신호 시점에 이미 merge 커밋이 존재하면(merged, 또는 merging 중
@@ -612,17 +709,23 @@ EOF
       kill -KILL -- "-${AM_CHECK_PID}" 2>/dev/null || true
       wait "${AM_CHECK_PID}" 2>/dev/null || true
     fi
-    # 리뷰 12차 P1 + 13차 P1: merge 도중 신호면 abort 시도. abort가 안 되고 이미
-    # merge 커밋이 만들어졌다면(훅 단계 등) CAS 롤백 — 미검증 merge를 base에 남긴 채
-    # lock만 풀리는 창을 닫는다.
+    # 리뷰 12차 P1 + 13차 P1 + 14차 P1: merge 도중 신호면 abort 시도. abort의 rc는
+    # 믿지 않는다 — 커밋이 이미 만들어진 뒤 MERGE_HEAD만 남은 창에서는 abort가
+    # '성공'(rc=0, git reset --merge)해도 HEAD를 옮기지 않아 2-parent merge가 base에
+    # 남는다. 판정은 항상 "최종 HEAD 상태"로 한다.
     if [ "${AM_PHASE:-}" = "merging" ]; then
-      if ! git merge --abort >/dev/null 2>&1; then
-        local _h
-        _h="$(git rev-parse HEAD 2>/dev/null || true)"
-        if [ -n "$_h" ] && [ "$_h" != "$BASE_OID" ] \
-           && [ "$(git rev-parse -q --verify "${_h}^1" 2>/dev/null)" = "$BASE_OID" ] \
+      git merge --abort >/dev/null 2>&1 || true
+      local _h
+      _h="$(git rev-parse HEAD 2>/dev/null || true)"
+      if [ -z "$_h" ]; then
+        _am_mark_recovery
+      elif [ "$_h" != "$BASE_OID" ]; then
+        if [ "$(git rev-parse -q --verify "${_h}^1" 2>/dev/null)" = "$BASE_OID" ] \
            && [ "$(git rev-parse -q --verify "${_h}^2" 2>/dev/null)" = "$BRANCH_OID" ]; then
           _am_signal_rollback "$_h"
+        else
+          _am_log "$_h" "RECOVERY_REQUIRED:signal"
+          _am_mark_recovery
         fi
       fi
       if [ -e "$(git rev-parse --git-dir 2>/dev/null)/MERGE_HEAD" ]; then
@@ -637,6 +740,16 @@ EOF
     exit 143
   }
   trap _am_on_signal TERM INT HUP
+
+  # 리뷰 13차 P1(검사) + 14차 P2(위치): recovery marker 거부는 EXIT trap 설치 "이후"에
+  # 수행 — 과거에는 trap 설치 전에 exit해 획득한 auto_merge.lock.d가 잔존했다.
+  if [ -e "$AM_RECOVERY" ]; then
+    AM_PHASE="done"
+    _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "REFUSED:recovery-pending"
+    echo "[FAIL] 이전 auto-merge가 RECOVERY_REQUIRED 상태입니다 — 수동 복구 후 ${AM_RECOVERY} 를 제거하세요. 새 병합을 거부합니다 (fail-closed)."
+    exit 1
+  fi
+
   # 자식(merge/post-check)을 자체 프로세스 그룹으로 실행 — 신호 회수 가능 + 그룹
   # 잔존 자손 검출.
   # 리뷰 12차 P1: leader가 rc=0으로 끝나도 백그라운드 자손이 그룹에 남아 있으면

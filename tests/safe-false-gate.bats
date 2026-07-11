@@ -1337,3 +1337,156 @@ EOF
   # write lock 잔존 없음
   [ ! -d "$TEST_HOME/state/ticket_write.lock.d" ]
 }
+
+# ── 리뷰 14차 P1/P2 회귀 ──────────────────────────────────────────────────────
+
+@test "T59: empty-element dependency lists ([,] / [T001,]) are malformed, not dependency-free" {
+  printf -- '---\nid: T001\ntitle: t\nstatus: done\nsafe: true\n---\n# T001\n' > "$TEST_HOME/docs/tickets/DONE/T001-dep.md"
+  printf -- '---\nid: T595\ntitle: t\nstatus: open\npriority: P2\nsafe: true\npersona: implementer\ndepends_on: [,]\n---\n# T595\n' > "$TEST_HOME/docs/tickets/T595-test.md"
+  printf -- '---\nid: T596\ntitle: t\nstatus: open\npriority: P2\nsafe: true\npersona: implementer\ndepends_on: [T001,]\n---\n# T596\n' > "$TEST_HOME/docs/tickets/T596-test.md"
+  _commit_all "add T59x empty-element dep cases"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T595 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 11 ]
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T596 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 11 ]
+
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"T595-test.md"* ]]
+  [[ "$output" != *"T596-test.md"* ]]
+}
+
+@test "T60: DONE evidence with duplicate id/status declarations is not accepted" {
+  # 중복 id (첫 값만 읽혀 우회 가능) — 증거 불인정
+  printf -- '---\nid: T601\nid: T999\ntitle: t\nstatus: done\nsafe: true\n---\n# T601\n' > "$TEST_HOME/docs/tickets/DONE/T601-dep.md"
+  # 중복 status — 증거 불인정
+  printf -- '---\nid: T602\ntitle: t\nstatus: done\nstatus: open\nsafe: true\n---\n# T602\n' > "$TEST_HOME/docs/tickets/DONE/T602-dep.md"
+  printf -- '---\nid: T605\ntitle: t\nstatus: open\npriority: P2\nsafe: true\npersona: implementer\ndepends_on: [T601]\n---\n# T605\n' > "$TEST_HOME/docs/tickets/T605-test.md"
+  printf -- '---\nid: T606\ntitle: t\nstatus: open\npriority: P2\nsafe: true\npersona: implementer\ndepends_on: [T602]\n---\n# T606\n' > "$TEST_HOME/docs/tickets/T606-test.md"
+  _commit_all "add T60x duplicate-field evidence cases"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T605 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 11 ]
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T606 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 11 ]
+
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"T605-test.md"* ]]
+  [[ "$output" != *"T606-test.md"* ]]
+}
+
+@test "T61: fake frontmatter block in ticket body does not change picker vs direct-run verdicts" {
+  # 실제 frontmatter에는 depends_on이 없고, 본문의 가짜 --- 블록에 미충족 dep이 있다.
+  cat > "$TEST_HOME/docs/tickets/T610-test.md" <<'TKT'
+---
+id: T610
+title: fake block test
+status: open
+priority: P2
+safe: true
+persona: implementer
+---
+
+# T610
+
+## 예시 (frontmatter가 아님)
+
+---
+depends_on: [T999]
+---
+
+본문 끝.
+TKT
+  _commit_all "add T610 fake-block ticket"
+
+  # direct-run: 첫 블록만 읽으므로 dep 없음 → 실행 가능
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T610 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  # picker도 동일 판정 — 본문 가짜 블록의 [T999]를 dep으로 읽지 않는다
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"T610-test.md"* ]]
+}
+
+@test "T62: approve and reject are mutually serialized - no skipped ticket with a valid approval marker" {
+  _make_ticket T620 false awaiting-approval
+  _commit_all "add T620"
+
+  # approve의 임계구역(마커 heredoc의 date 호출) 한가운데서 reject를 발사 —
+  # 결정적 상호 직렬화 재현. reject는 lock에서 대기한 뒤 마커를 보고 거부해야 한다.
+  local realdate
+  realdate="$(command -v date)"
+  mkdir -p "$TEST_HOME/racebin2"
+  cat > "$TEST_HOME/racebin2/date" <<WRAP
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/rej.launched" ]; then
+  touch "$TEST_HOME/rej.launched"
+  # 주의: bg 서브셸이 command substitution(\$(date ...))의 pipe fd를 물고 있으면
+  # approve가 EOF를 기다리며 lock을 오래 쥔다 — fd를 완전히 분리한다.
+  ( cd "$TEST_HOME" && ./scripts/approve.sh --reject "concurrent" T620 > "$TEST_HOME/rej.log" 2>&1; echo \$? > "$TEST_HOME/rej.rc" ) > /dev/null 2>&1 < /dev/null &
+  sleep 1
+fi
+exec "$realdate" "\$@"
+WRAP
+  chmod +x "$TEST_HOME/racebin2/date"
+
+  run bash -c 'cd "$1" && PATH="$1/racebin2:$PATH" EDITOR=true ./scripts/approve.sh T620' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_HOME/docs/approvals/T620.md" ]
+
+  # 백그라운드 reject 완료 대기
+  local i=0
+  while [ ! -f "$TEST_HOME/rej.rc" ] && [ "$i" -lt 100 ]; do sleep 0.2; i=$((i+1)); done
+  [ -f "$TEST_HOME/rej.rc" ]
+  [ "$(cat "$TEST_HOME/rej.rc")" -eq 3 ]
+  grep -q '승인 마커' "$TEST_HOME/rej.log"
+
+  # 불변식: skipped 상태와 유효 approval marker는 공존하지 않는다
+  grep -q '^status: awaiting-approval' "$TEST_HOME/docs/tickets/T620-test.md"
+  ! grep -q '## Rejection' "$TEST_HOME/docs/tickets/T620-test.md"
+  # write lock 잔존 없음
+  [ ! -d "$TEST_HOME/state/ticket_write.lock.d" ]
+}
+
+@test "T63: stale write-lock reclaim re-verifies the moved lock's owner - live lock is never deleted" {
+  _make_ticket T630 true open
+  _commit_all "add T630"
+
+  # 관찰 시점의 dead pid, 그리고 reclaim mv 직전에 끼어드는 live owner를 시뮬레이션
+  local deadpid livepid
+  sh -c 'exit 0' & deadpid=$!
+  wait "$deadpid" 2>/dev/null || true
+  sleep 60 & livepid=$!
+
+  mkdir -p "$TEST_HOME/state/ticket_write.lock.d"
+  echo "$deadpid" > "$TEST_HOME/state/ticket_write.lock.d/pid"
+
+  local realmv
+  realmv="$(command -v mv)"
+  mkdir -p "$TEST_HOME/racebin3"
+  cat > "$TEST_HOME/racebin3/mv" <<WRAP
+#!/usr/bin/env bash
+case "\$2" in
+  *ticket_write.lock.d.reclaim.*)
+    # reclaim 직전, 새 live owner가 lock을 차지한 상황을 주입
+    echo "$livepid" > "\$1/pid" 2>/dev/null
+    ;;
+esac
+exec "$realmv" "\$@"
+WRAP
+  chmod +x "$TEST_HOME/racebin3/mv"
+
+  run bash -c 'cd "$1" && PATH="$1/racebin3:$PATH" ./scripts/ticket_edit.sh set-priority T630 P1' _ "$TEST_HOME"
+  # live owner를 만나 대기하다 명시적으로 실패한다 — 조용한 성공(rc=0) 금지
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"경합 지속"* ]]
+  # live lock은 삭제되지 않고 보존된다
+  [ -d "$TEST_HOME/state/ticket_write.lock.d" ]
+  [ "$(cat "$TEST_HOME/state/ticket_write.lock.d/pid")" = "$livepid" ]
+  # 티켓은 무변조
+  grep -q '^priority: P2' "$TEST_HOME/docs/tickets/T630-test.md"
+
+  kill "$livepid" 2>/dev/null || true
+}

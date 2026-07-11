@@ -286,6 +286,12 @@ function readModelFingerprint() {
   // 리뷰 12차 P2: skills/ 변경(생성 포함)이 모델(skill_unavailable)에 반영되도록
   // fingerprint에 포함 — 시작 시 skills/가 없어 watcher 미등록이어도 다음 요청에서 재스캔.
   parts.push(`skills:${statFingerprint(join(ROOT, 'skills'))}`);
+  // 리뷰 14차 P2: done 증거의 tracked 판정(git ls-files)은 Git index에 의존한다 —
+  // index만 바뀌는 변경(git rm --cached 등)이 fingerprint에 없어 서버 재시작 전까지
+  // done_evidence_invalid가 갱신되지 않았다. .git/index를 포함한다. (비-git이면
+  // 'missing' 고정값이라 무해. .git이 파일인 linked worktree는 여전히 'missing'
+  // 고정 — 서버는 메인 워크트리에서 구동되므로 현 운영 범위에서는 충분하다.)
+  parts.push(`gitindex:${statFingerprint(join(ROOT, '.git', 'index'))}`);
   try {
     for (const entry of listTicketFiles()) {
       parts.push(`ticket:${entry.file}:${entry.stat.mtimeMs}:${entry.stat.ctimeMs}:${entry.stat.size}`);

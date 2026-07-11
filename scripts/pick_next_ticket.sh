@@ -205,9 +205,13 @@ fi
 deps_satisfied() {
   local file="$1"
   local deps
+  # 리뷰 14차 P2: "최초 frontmatter 블록"만 읽는다 — 토글(fm = !fm) 방식은 본문의
+  # 가짜 `---` 블록을 다시 frontmatter로 읽어 direct-run(run_loop)과 선택 결과가
+  # 달라졌다. run_loop.deps_satisfied_strict와 동일한 첫-블록 시맨틱.
   deps=$(awk '
-    /^---$/ { fm = !fm; next }
-    fm && $1 == "depends_on:" {
+    NR == 1 { if ($0 != "---") exit; next }
+    $0 == "---" { exit }
+    substr($0, 1, 11) == "depends_on:" {
       sub(/^[^:]+:[ \t]*/, ""); print; exit
     }
   ' "$file")
@@ -221,6 +225,9 @@ deps_satisfied() {
   esac
   deps="$(printf '%s' "$deps" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
   [ -z "$deps" ] && return 0
+  # 리뷰 14차 P1: 빈 원소([,]·[T001,]·[,T001])는 malformed — "의존성 없음"으로
+  # 승격하지 않는다. read -ra는 후행 빈 필드를 버리므로 분리 전에 원문으로 검사.
+  case ",${deps}," in *,,*) return 1 ;; esac
   IFS=',' read -ra arr <<< "$deps"
   # 리뷰 11차 P1: 사용 시점에 DONE 물리 경로를 재검증 — 초기 검사 후 디렉터리가
   # 교체되는 경합 차단.
@@ -236,7 +243,9 @@ deps_satisfied() {
       '"'*'"') dep="${dep#\"}"; dep="${dep%\"}" ;;
       "'"*"'") dep="${dep#?}"; dep="${dep%?}" ;;
     esac
-    [ -z "$dep" ] && continue
+    # 리뷰 14차 P1: 빈 원소([,]·[T001,] 등)는 malformed — "의존성 없음"으로 승격하지
+    # 않는다 (fail-closed). 빈 목록은 위의 [ -z "$deps" ] 단계에서 이미 처리됐다.
+    [ -z "$dep" ] && return 1
     # 리뷰 11차 P1: dependency ID 형식 강제 — 비정상 ID(글롭 문자 등)가 DONE 밖
     # 파일을 완료 증거로 만들던 우회 차단.
     if ! [[ "$dep" =~ ^T[0-9]+$ ]]; then
@@ -248,6 +257,10 @@ deps_satisfied() {
     local dep_ok=0 dep_f
     for dep_f in docs/tickets/DONE/"${dep}"-*.md docs/tickets/DONE/"${dep}".md; do
       [ -f "$dep_f" ] && [ ! -h "$dep_f" ] || continue
+      # 리뷰 14차 P1: 증거 frontmatter의 id/status는 정확히 1회 선언이어야 한다 —
+      # 중복 선언 파일(첫 값만 읽혀 우회 가능)은 완료 증거로 인정하지 않는다.
+      [ "$(frontmatter_field_count "$dep_f" id)" = "1" ] || continue
+      [ "$(frontmatter_field_count "$dep_f" status)" = "1" ] || continue
       [ "$(field_of "$dep_f" id || true)" = "$dep" ] || continue
       [ "$(field_of "$dep_f" status || true)" = "done" ] || continue
       if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then

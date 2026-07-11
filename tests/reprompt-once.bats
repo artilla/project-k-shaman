@@ -259,3 +259,120 @@ _events_archive() {
     [ "$status" -ne 0 ]
   fi
 }
+
+# ── 리뷰 14차 P1 회귀 ─────────────────────────────────────────────────────────
+
+# P1: 재프롬프트 세션이 background 자손을 남기면 회수하고 결과를 신뢰하지 않는다.
+@test "reprompt leaving detached background descendants -> reaped, result not trusted" {
+  local counter="$WORKSPACE_ROOT/invocation-count"
+  rm -f "$counter"
+  cat > "$TEST_HOME/scripts/run_headless.sh" <<EOF2
+#!/usr/bin/env bash
+cd "\${2:-\$(pwd)}"
+n=0
+[ -f "$counter" ] && n=\$(cat "$counter")
+n=\$((n+1))
+echo "\$n" > "$counter"
+if [ "\$n" = "1" ]; then
+  echo "uncommitted change" >> docs/tickets/T103-reprompt-test.md
+  exit 0
+fi
+sed -i.bak 's/^status: .*/status: done/' docs/tickets/T103-reprompt-test.md && rm -f docs/tickets/T103-reprompt-test.md.bak
+git add docs/tickets/T103-reprompt-test.md
+git mv docs/tickets/T103-reprompt-test.md docs/tickets/DONE/
+git commit -q -m "T103: finish via reprompt"
+( sleep 6; echo late > "$WORKSPACE_ROOT/late.txt" ) >/dev/null 2>&1 &
+exit 0
+EOF2
+  chmod +x "$TEST_HOME/scripts/run_headless.sh"
+  git -C "$TEST_HOME" add .
+  git -C "$TEST_HOME" commit -q -m "install leftover-descendant reprompt headless"
+
+  _run_loop
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"잔존 자손"* ]]
+  sleep 7
+  # 지연 writer는 회수되어 lock 해제 후 late-write가 발생하지 않는다
+  [ ! -f "$WORKSPACE_ROOT/late.txt" ]
+}
+
+# P1: 재프롬프트 세션 중 lock token이 교체되면 DONE 결과를 rc=0으로 수락하지 않는다.
+@test "reprompt session replacing lock token -> rc=16, DONE result not accepted" {
+  local counter="$WORKSPACE_ROOT/invocation-count"
+  rm -f "$counter"
+  cat > "$TEST_HOME/scripts/run_headless.sh" <<EOF2
+#!/usr/bin/env bash
+cd "\${2:-\$(pwd)}"
+n=0
+[ -f "$counter" ] && n=\$(cat "$counter")
+n=\$((n+1))
+echo "\$n" > "$counter"
+if [ "\$n" = "1" ]; then
+  echo "uncommitted change" >> docs/tickets/T103-reprompt-test.md
+  exit 0
+fi
+sed -i.bak 's/^status: .*/status: done/' docs/tickets/T103-reprompt-test.md && rm -f docs/tickets/T103-reprompt-test.md.bak
+git add docs/tickets/T103-reprompt-test.md
+git mv docs/tickets/T103-reprompt-test.md docs/tickets/DONE/
+git commit -q -m "T103: finish via reprompt"
+echo stolen > state/lock
+exit 0
+EOF2
+  chmod +x "$TEST_HOME/scripts/run_headless.sh"
+  git -C "$TEST_HOME" add .
+  git -C "$TEST_HOME" commit -q -m "install token-stealing reprompt headless"
+
+  _run_loop
+
+  [ "$status" -eq 16 ]
+  [[ "$output" == *"재프롬프트 종료 직후"* ]]
+  # 남의 lock은 보존된다
+  [ "$(cat "$TEST_HOME/state/lock")" = "stolen" ]
+}
+
+# P1: post-fingerprint 이후(완료 판정·telemetry 구간)의 token 교체도 성공(rc=0)으로
+# 위장되지 않는다 — 성공 확정 직전 최종 재검증.
+@test "token stolen during telemetry window -> final assert fails cycle with rc=16" {
+  local counter="$WORKSPACE_ROOT/invocation-count"
+  rm -f "$counter"
+  cat > "$TEST_HOME/scripts/run_headless.sh" <<EOF2
+#!/usr/bin/env bash
+cd "\${2:-\$(pwd)}"
+echo "1" > "$counter"
+sed -i.bak 's/^status: .*/status: done/' docs/tickets/T103-reprompt-test.md && rm -f docs/tickets/T103-reprompt-test.md.bak
+git add docs/tickets/T103-reprompt-test.md
+git mv docs/tickets/T103-reprompt-test.md docs/tickets/DONE/
+git commit -q -m "T103: complete in one pass"
+exit 0
+EOF2
+  chmod +x "$TEST_HOME/scripts/run_headless.sh"
+  git -C "$TEST_HOME" add .
+  git -C "$TEST_HOME" commit -q -m "install one-pass headless"
+
+  # telemetry 커밋 시점(git commit -m "telemetry(...)")에 lock token을 탈취하는 wrapper
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$WORKSPACE_ROOT/bin"
+  cat > "$WORKSPACE_ROOT/bin/git" <<EOF2
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in telemetry*)
+    echo stolen > "$TEST_HOME/state/lock"
+    break ;;
+  esac
+done
+exec "$realgit" "\$@"
+EOF2
+  chmod +x "$WORKSPACE_ROOT/bin/git"
+
+  run env \
+    PATH="$WORKSPACE_ROOT/bin:$PATH" \
+    RALPH_ROOT="$TEST_HOME" \
+    RALPH_STATE_ROOT="$STATE_ROOT" \
+    /bin/bash "$TEST_HOME/scripts/run_loop.sh" T103-reprompt-test
+
+  [ "$status" -eq 16 ]
+  [[ "$output" == *"완료 확정 직전"* ]]
+  [ "$(cat "$TEST_HOME/state/lock")" = "stolen" ]
+}

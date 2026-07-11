@@ -100,21 +100,34 @@ _sha_of() { git hash-object -- "$1" 2>/dev/null || shasum "$1" 2>/dev/null | awk
 # CAS가 아니다. 모든 writer가 같은 lock 아래에서 guard→publish를 수행해야 동시
 # 편집의 한쪽이 조용히 유실되지 않는다 (패자는 SHA 불일치로 명시 거부됨).
 _TW_LOCK="state/ticket_write.lock.d"
+_TW_HELD=0
 _acquire_write_lock() {
-  local _i=0 _p
+  local _i=0 _p _mp
+  # 리뷰 14차 P1: 재진입 지원 — 결정(critical section)이 lock을 쥔 채 _safe_write를
+  # 부를 수 있어야 approve/reject 상호 직렬화가 단일 임계구역으로 성립한다.
+  if [ "${_TW_HELD:-0}" -gt 0 ]; then _TW_HELD=$((_TW_HELD+1)); return 0; fi
   mkdir -p state 2>/dev/null || true
   while :; do
     if mkdir "$_TW_LOCK" 2>/dev/null; then
-      if echo "$$" > "$_TW_LOCK/pid" 2>/dev/null; then return 0; fi
+      if echo "$$" > "$_TW_LOCK/pid" 2>/dev/null; then _TW_HELD=1; return 0; fi
       rm -rf "$_TW_LOCK" 2>/dev/null || true
       return 1
     fi
     _p="$(cat "$_TW_LOCK/pid" 2>/dev/null || true)"
     if [ -n "$_p" ] && ! kill -0 "$_p" 2>/dev/null; then
-      # stale lock — 원자적 rename으로 회수 (확인-후-삭제 경합 제거)
+      # stale lock — 원자적 rename으로 회수. 리뷰 14차 P1: 회수를 "관찰한 그 lock"에
+      # 결속 — 이동한 디렉터리의 pid가 관찰한 dead pid와 다르면(그 사이 새 live
+      # owner로 교체) 원복하고 대기한다. live lock 삭제 → 상호배제 붕괴 방지.
       if mv "$_TW_LOCK" "$_TW_LOCK.reclaim.$$" 2>/dev/null; then
-        rm -rf "$_TW_LOCK.reclaim.$$" 2>/dev/null || true
-        continue
+        _mp="$(cat "$_TW_LOCK.reclaim.$$/pid" 2>/dev/null || true)"
+        if [ "$_mp" = "$_p" ]; then
+          rm -rf "$_TW_LOCK.reclaim.$$" 2>/dev/null || true
+          continue
+        fi
+        if ! mv "$_TW_LOCK.reclaim.$$" "$_TW_LOCK" 2>/dev/null; then
+          echo "❌ live write lock 원복 실패 — fail-closed로 중단합니다: ${_TW_LOCK}.reclaim.$$ 확인" >&2
+          return 1
+        fi
       fi
     fi
     _i=$((_i+1))
@@ -126,9 +139,11 @@ _acquire_write_lock() {
   done
 }
 _release_write_lock() {
+  if [ "${_TW_HELD:-0}" -gt 1 ]; then _TW_HELD=$((_TW_HELD-1)); return 0; fi
   if [ "$(cat "$_TW_LOCK/pid" 2>/dev/null)" = "$$" ]; then
     rm -rf "$_TW_LOCK" 2>/dev/null || true
   fi
+  _TW_HELD=0
 }
 _safe_write() {  # stdin → $1 (same-dir temp + rename), $2=canonical 상대 디렉터리
   local f="$1" want_dir="$2" tmp perm
@@ -226,6 +241,34 @@ if [ -n "$REJECT_REASON" ]; then
     echo "❌ $TICKET: frontmatter가 유효하지 않아 reject할 수 없습니다 (opener/closer/단일 status 필요)." >&2
     exit 2
   fi
+  # 리뷰 14차 P1: approve/reject 상호 직렬화 — 결정은 write lock 임계구역 안에서
+  # "상태 재확인 + 승인 마커 부재 확인 + publish"를 원자적으로 수행한다. 초기 status
+  # 게이트만으로는 게이트 통과 후 상대 결정이 끼어들 수 있어, skipped 티켓과 유효
+  # approval marker가 공존했다 (둘 다 rc=0).
+  if ! _acquire_write_lock; then
+    echo "❌ 결정 직렬화 lock 획득 실패 — reject를 수행하지 않습니다." >&2
+    exit 2
+  fi
+  _TSTATUS_NOW="$(awk '
+    NR == 1 { if ($0 != "---") exit; next }
+    $0 == "---" { exit }
+    substr($0, 1, 7) == "status:" {
+      sub(/^[^:]+:[ \t]*/, ""); sub(/[ \t]+#.*$/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); print; exit
+    }
+  ' "$TICKET")"
+  case "$_TSTATUS_NOW" in
+    open|awaiting-approval) : ;;
+    *)
+      _release_write_lock
+      echo "❌ ${ID} status='${_TSTATUS_NOW}' — 임계구역 재확인에서 reject 대상이 아님 (동시 결정 감지)." >&2
+      exit 3
+      ;;
+  esac
+  if [ -e "docs/approvals/${ID}.md" ]; then
+    _release_write_lock
+    echo "❌ ${ID}: 승인 마커(docs/approvals/${ID}.md)가 이미 존재합니다 — 승인된 티켓은 reject할 수 없습니다. 결정을 뒤집으려면 마커를 명시적으로 삭제한 뒤 재시도하세요." >&2
+    exit 3
+  fi
   _stage=$(mktemp "docs/tickets/.stage.XXXXXX")
   # 리뷰 13차 P1: producer를 단계별로 검증 — `{ awk; printf; }` 그룹은 마지막 printf의
   # 성공이 awk의 중간 실패(부분 출력)를 덮어 부분 문서가 rc=0으로 게시됐다.
@@ -235,13 +278,13 @@ if [ -n "$REJECT_REASON" ]; then
       fm == 1 && substr($0, 1, 7) == "status:" { print "status: skipped"; next }
       { print }
     ' "$TICKET" > "$_stage"; then
-    rm -f "$_stage"
+    rm -f "$_stage"; _release_write_lock
     echo "❌ reject 내용 생성 실패(status 교체 단계) — 원본 무변조 유지" >&2
     exit 2
   fi
   # 본문이 통째로 유실되지 않았는지 확인 — stage는 원본과 같은 줄 수여야 한다.
   if [ "$(wc -l < "$_stage")" -ne "$(wc -l < "$TICKET")" ]; then
-    rm -f "$_stage"
+    rm -f "$_stage"; _release_write_lock
     echo "❌ reject stage 검증 실패(줄 수 불일치 — 부분 출력?) — 원본 무변조 유지" >&2
     exit 2
   fi
@@ -250,12 +293,13 @@ if [ -n "$REJECT_REASON" ]; then
     printf -- '- rejected_at: "%s"\n' "$(date -Iseconds)"
     printf -- '- reason: "%s"\n' "$REJECT_REASON"
   } >> "$_stage"; then
-    rm -f "$_stage"
+    rm -f "$_stage"; _release_write_lock
     echo "❌ reject 내용 생성 실패(Rejection 기록 단계) — 원본 무변조 유지" >&2
     exit 2
   fi
-  _safe_write "$TICKET" "docs/tickets" < "$_stage" || { rm -f "$_stage"; exit 2; }
+  _safe_write "$TICKET" "docs/tickets" < "$_stage" || { rm -f "$_stage"; _release_write_lock; exit 2; }
   rm -f "$_stage"
+  _release_write_lock
   echo "rejected $ID: $REJECT_REASON"
   exit 0
 fi
@@ -307,6 +351,28 @@ ROLLBACK_DRAFT="$(section_oneline "$TICKET" '롤백')"
 [ -n "$ROLLBACK_DRAFT" ] || ROLLBACK_DRAFT="$(section_oneline "$TICKET" 'Reversibility')"
 [ -n "$ROLLBACK_DRAFT" ] || ROLLBACK_DRAFT="git revert <commit>"
 
+# 리뷰 14차 P1: approve/reject 상호 직렬화 — 마커 생성은 write lock 임계구역 안에서
+# "상태 재확인 + 원자적 생성"으로 수행한다. 초기 status 게이트 통과 후 reject가
+# 끼어들면 skipped 티켓에 유효 approval marker가 공존할 수 있었다 (둘 다 rc=0).
+if ! _acquire_write_lock; then
+  echo "❌ 결정 직렬화 lock 획득 실패 — 승인을 수행하지 않습니다." >&2
+  exit 2
+fi
+_TSTATUS_NOW="$(awk '
+  NR == 1 { if ($0 != "---") exit; next }
+  $0 == "---" { exit }
+  substr($0, 1, 7) == "status:" {
+    sub(/^[^:]+:[ \t]*/, ""); sub(/[ \t]+#.*$/, ""); gsub(/^[ \t]+|[ \t]+$/, ""); print; exit
+  }
+' "$TICKET")"
+case "$_TSTATUS_NOW" in
+  open|awaiting-approval) : ;;
+  *)
+    _release_write_lock
+    echo "❌ ${ID} status='${_TSTATUS_NOW}' — 임계구역 재확인에서 approve 대상이 아님 (동시 결정 감지)." >&2
+    exit 3
+    ;;
+esac
 if [ ! -f "$MARKER" ]; then
   # 리뷰 10차 P1: 마커도 same-dir temp + rename — 생성 창에서의 symlink 교체 차단.
   _mtmp=$(mktemp "docs/approvals/.marker.XXXXXX")
@@ -319,12 +385,12 @@ EOF
   # 리뷰 11차 P1: 생성 직전 approvals 디렉터리 물리 경로를 재검증 — 초기 검사 후
   # 디렉터리가 symlink로 교체되면 mv가 cross-device copy로 저장소 밖에 쓸 수 있다.
   if [ -h "docs/approvals" ] || [ "$(cd docs/approvals 2>/dev/null && pwd -P)" != "$(pwd -P)/docs/approvals" ]; then
-    rm -f "$_mtmp"
+    rm -f "$_mtmp"; _release_write_lock
     echo "❌ docs/approvals 가 생성 직전 canonical이 아님(교체 감지) — 거부 (fail-closed)." >&2
     exit 2
   fi
   if [ -h "$MARKER" ]; then
-    rm -f "$_mtmp"
+    rm -f "$_mtmp"; _release_write_lock
     echo "❌ ${MARKER} 가 symlink로 교체됨 — 거부 (fail-closed)." >&2
     exit 2
   fi
@@ -333,13 +399,14 @@ EOF
   if ln "$_mtmp" "$MARKER" 2>/dev/null; then
     rm -f "$_mtmp"
   else
-    rm -f "$_mtmp"
+    rm -f "$_mtmp"; _release_write_lock
     # 리뷰 13차 P1: 경쟁 패자는 남의 결정을 편집/검증 대상으로 삼지 않는다 —
     # 기존 마커를 안내만 하고 "승인 미수행"으로 종료.
     echo "⚠️  ${MARKER} 가 그 사이 생성됨(동시 승인 경합) — 기존 마커를 유지하고 이 승인 시도는 중단합니다. 기존 결정을 확인하세요."
     exit 3
   fi
 fi
+_release_write_lock
 
 echo "approval marker ready: $MARKER"
 if [ -n "${EDITOR:-}" ]; then

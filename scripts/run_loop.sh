@@ -620,6 +620,9 @@ deps_satisfied_strict() {
   esac
   deps="$(printf '%s' "$deps" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
   [ -z "$deps" ] && return 0
+  # 리뷰 14차 P1: 빈 원소([,]·[T001,]·[,T001])는 malformed — "의존성 없음"으로
+  # 승격하지 않는다. read -ra는 후행 빈 필드를 버리므로 분리 전에 원문으로 검사.
+  case ",${deps}," in *,,*) return 1 ;; esac
 
   done_real="$(cd docs/tickets/DONE 2>/dev/null && pwd -P)" || return 1
   [ "$done_real" = "$(pwd -P)/docs/tickets/DONE" ] || return 1
@@ -634,11 +637,17 @@ deps_satisfied_strict() {
       '"'*'"') dep="${dep#\"}"; dep="${dep%\"}" ;;
       "'"*"'") dep="${dep#?}"; dep="${dep%?}" ;;
     esac
-    [ -z "$dep" ] && continue
+    # 리뷰 14차 P1: 빈 원소([,]·[T001,] 등)는 malformed — "의존성 없음"으로 승격하지
+    # 않는다 (fail-closed). 빈 목록은 위의 [ -z "$deps" ] 단계에서 이미 처리됐다.
+    [ -z "$dep" ] && return 1
     [[ "$dep" =~ ^T[0-9]+$ ]] || return 1
     dep_ok=0
     for dep_f in docs/tickets/DONE/"${dep}"-*.md docs/tickets/DONE/"${dep}".md; do
       [ -f "$dep_f" ] && [ ! -h "$dep_f" ] || continue
+      # 리뷰 14차 P1: 증거 frontmatter의 id/status는 정확히 1회 선언이어야 한다 —
+      # 중복 선언 파일(첫 값만 읽혀 우회 가능)은 완료 증거로 인정하지 않는다.
+      [ "$(frontmatter_field_count "$dep_f" id)" = "1" ] || continue
+      [ "$(frontmatter_field_count "$dep_f" status)" = "1" ] || continue
       [ "$(field_of "$dep_f" id || true)" = "$dep" ] || continue
       [ "$(field_of "$dep_f" status || true)" = "done" ] || continue
       if [ "$GIT_REPO" = "1" ]; then
@@ -1358,8 +1367,16 @@ EOF
 EOF
 )
 
+    # 리뷰 14차 P1: 재프롬프트도 본 디스패치와 동일 계약 — 디스패치 직전 토큰 재확인.
+    # 탈취된 lock 상태로 새 headless를 실행하지 않는다 (fail-closed).
+    if [ "$DRY_RUN" = "0" ] && ! _assert_token; then
+      echo "❌ 재프롬프트 직전 state/lock 토큰이 교체됨 — 디스패치하지 않습니다 (fail-closed)."
+      LOCK_OWNED=0
+      return 16
+    fi
+
     echo "🤖 마무리 세션(재프롬프트) 디스패치... (stage=$wip_stage)" | tee -a "$headless_log"
-    local reprompt_rc
+    local reprompt_rc _rp_leftover _rp_i
     set +e
     set -m
     (
@@ -1373,8 +1390,32 @@ EOF
     set +m
     wait "$HEADLESS_PID"
     reprompt_rc=$?
+    # 리뷰 14차 P1: 재프롬프트도 본 디스패치와 동일 — 정상 종료 후 프로세스 그룹에
+    # 잔존 자손이 있으면 회수(TERM→KILL bounded)하고 결과를 신뢰하지 않는다.
+    _rp_leftover=0
+    if kill -0 -- "-${HEADLESS_PID}" 2>/dev/null; then
+      _rp_leftover=1
+      echo "⚠️  재프롬프트 종료 후 프로세스 그룹에 잔존 자손 감지 — 정리합니다 (TERM→KILL)."
+      kill -TERM -- "-${HEADLESS_PID}" 2>/dev/null || true
+      _rp_i=0
+      while kill -0 -- "-${HEADLESS_PID}" 2>/dev/null && [ "$_rp_i" -lt 20 ]; do sleep 0.25; _rp_i=$((_rp_i+1)); done
+      kill -KILL -- "-${HEADLESS_PID}" 2>/dev/null || true
+    fi
     HEADLESS_PID=""
     set -e
+    # 리뷰 14차 P1: 재프롬프트 종료 직후 토큰 재확인 — 재프롬프트 세션 중 탈취가
+    # DONE 수락(rc=0)으로 위장되지 않는다.
+    if [ "$DRY_RUN" = "0" ] && [ "${LOCK_OWNED:-0}" = "1" ] && ! _assert_token; then
+      echo "❌ 재프롬프트 종료 직후 state/lock 토큰이 교체됨 — 결과를 확정하지 않고 중단합니다 (fail-closed)."
+      LOCK_OWNED=0
+      return 16
+    fi
+    if [ "$_rp_leftover" = "1" ]; then
+      echo "❌ 재프롬프트가 백그라운드 자손을 남긴 채 종료 — 완료 계약 위반, 결과를 신뢰하지 않습니다."
+      add_failure "$id" "leftover-descendants" "${i:-0}" "$ticket"
+      save_headless_diagnostics "$id" "leftover-descendants" "$timeout_seconds" "$reprompt_rc"
+      return 5
+    fi
 
     if [ "$reprompt_rc" -ne 0 ]; then
       echo "❌ 재프롬프트 헤드리스 세션 실패(rc=$reprompt_rc)."
@@ -1440,6 +1481,15 @@ EOF
         git checkout -- "$done_file" 2>/dev/null || true   # 실패 시 트리 clean 복원
       fi
     fi
+  fi
+
+  # 리뷰 14차 P1: 성공 확정 "직전" 최종 토큰 재확인 — post-fingerprint 이후
+  # (완료 판정·telemetry 구간)의 탈취도 rc=0으로 위장되지 않는다 (fail-closed).
+  if [ "$DRY_RUN" = "0" ] && [ "${LOCK_OWNED:-0}" = "1" ] && ! _assert_token; then
+    echo "❌ 완료 확정 직전 state/lock 토큰이 교체됨 — 성공으로 기록하지 않습니다 (fail-closed)."
+    add_failure "$id" "lock-ownership-lost" "${i:-0}" "$ticket"
+    LOCK_OWNED=0
+    return 16
   fi
 
   echo "✅ cycle done — $ticket → DONE/  (lock은 trap에서 정리됨)"

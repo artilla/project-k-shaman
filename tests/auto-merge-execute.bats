@@ -872,6 +872,8 @@ EOF
   [[ "$output" == *"RECOVERY_REQUIRED 상태"* ]]
   [ "$(git -C "$d" rev-parse main)" = "$base" ]
   grep -q 'REFUSED:recovery-pending' "$TEST_HOME/state/auto_merge.log"
+  # 리뷰 14차 P2: 거부 경로가 EXIT trap 설치 전에 종료해 lock을 남기지 않는다
+  [ ! -d "$TEST_HOME/state/auto_merge.lock.d" ]
 }
 
 @test "execute: concurrent tracked change in rollback window is preserved (REF_ONLY, not reset away)" {
@@ -902,4 +904,103 @@ EOF
   # 동시 변경은 reset --hard로 파괴되지 않고 보존된다
   grep -q 'concurrent' "$d/tracked.md"
   grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+}
+
+# ── 리뷰 14차 P1 회귀 ─────────────────────────────────────────────────────────
+
+# P1: 커밋 생성 후 MERGE_HEAD만 남은 창에서의 TERM — `git merge --abort`가 rc=0으로
+# '성공'해도(git reset --merge는 HEAD를 옮기지 않음) 2-parent merge가 base에 남았다.
+# 판정은 abort rc가 아니라 최종 HEAD 상태로 해야 한다.
+@test "execute: TERM in post-merge hook window (abort succeeds) still rolls merge off base" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  local base
+  base="$(git -C "$d" rev-parse main)"
+
+  # post-merge hook: 커밋 완료 직후 MERGE_HEAD를 재생성(불운한 중단 창 시뮬레이션)
+  # 하고 부모 auto_merge에 TERM을 보낸 뒤 대기한다.
+  mkdir -p "$d/.git/hooks"
+  cat > "$d/.git/hooks/post-merge" <<HOOK
+#!/usr/bin/env bash
+i=0; while [ ! -f "$TEST_HOME/am.pid" ] && [ "\$i" -lt 100 ]; do sleep 0.1; i=\$((i+1)); done
+git rev-parse ralph/T999 > "\$(git rev-parse --git-dir)/MERGE_HEAD"
+kill -TERM "\$(cat "$TEST_HOME/am.pid")" 2>/dev/null
+sleep 30
+HOOK
+  chmod +x "$d/.git/hooks/post-merge"
+
+  ( cd "$d" && \
+    LINT_EXTERNAL_DOCS_CMD="$MOCK_LINT" \
+    RUN_CHECKS_CMD="$MOCK_CHECKS" \
+    CHECK_SCOPE_OMISSION_CMD="$MOCK_SCOPE" \
+    STATE_DIR="$TEST_HOME/state" \
+    exec "$SCRIPT_PATH" "$TEST_HOME/T999-test.md" --execute --branch ralph/T999 --base main ) \
+    > "$TEST_HOME/hookterm.log" 2>&1 & local ap=$!
+  echo "$ap" > "$TEST_HOME/am.pid"
+  wait "$ap" 2>/dev/null || true
+  pkill -f 'sleep 30' 2>/dev/null || true
+
+  # 미검증 merge가 base에 남지 않는다 — abort '성공' 후에도 최종 상태로 판정해 CAS 롤백
+  [ "$(git -C "$d" rev-parse main)" = "$base" ]
+  [ -z "$(git -C "$d" status --porcelain)" ]
+  [ ! -e "$d/.git/MERGE_HEAD" ]
+  grep -q 'INTERRUPTED_ROLLED_BACK' "$TEST_HOME/state/auto_merge.log"
+  [ ! -e "$TEST_HOME/state/auto_merge.recovery" ]
+}
+
+# P1: rollback의 blob 검증과 복원 사이에 들어온 tracked 변경은 파괴되지 않는다 —
+# 전역 reset --hard 대신 경로별 내용 결속 복원. 잔여 변경은 REF_ONLY로 정직하게 기록.
+@test "execute: change injected between rollback validation and restore is preserved" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  echo base > "$d/tracked.md"
+  git -C "$d" add tracked.md
+  git -C "$d" commit -q -m "tracked file"
+  local base
+  base="$(git -C "$d" rev-parse main)"
+
+  # 1차 run_checks(eligibility)는 통과, post-merge run_checks는 실패 → rollback 경로
+  cat > "$TEST_HOME/mock_checks_rb.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/rb.flag" ]; then touch "$TEST_HOME/rb.flag"; exit 0; fi
+exit 1
+EOF
+  chmod +x "$TEST_HOME/mock_checks_rb.sh"
+
+  # 검증 루프의 첫 hash-object 호출 시점에 동시 변경을 주입하는 git wrapper —
+  # "blob 검사 통과 후, 복원 전" 창을 결정적으로 재현한다.
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$TEST_HOME/rbbin"
+  cat > "$TEST_HOME/rbbin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "hash-object" ] && [ ! -f "$TEST_HOME/rb.injected" ]; then
+  touch "$TEST_HOME/rb.injected"
+  echo concurrent >> "$d/tracked.md"
+fi
+exec "$realgit" "\$@"
+EOF
+  chmod +x "$TEST_HOME/rbbin/git"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/rbbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_rb.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  # base ref는 복구되고, 주입된 동시 변경은 보존된다
+  [ "$(git -C "$d" rev-parse main)" = "$base" ]
+  grep -q 'concurrent' "$d/tracked.md"
+  # merge 잔상(브랜치가 추가한 docs 파일)은 정리된다
+  [ ! -e "$d/docs/file-1.md" ]
+  # 잔여 변경이 남았으므로 완전 복구가 아니라 REF_ONLY로 기록된다
+  grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+  # 복원용 임시/백업 파일 잔존 없음
+  [ -z "$(find "$d" -name '.amrb*' 2>/dev/null)" ]
 }
