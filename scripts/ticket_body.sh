@@ -181,7 +181,8 @@ fm_end="$(awk '/^---$/{c++; if(c==2){print NR; exit}}' "$file")"
 
 # stdin → temp (바이트 보존). temp은 일반 tmpfs(마운트 제약 무관).
 tmp="$(mktemp "${TMPDIR:-/tmp}/ralph-body.XXXXXX")"
-trap 'rm -f "$tmp"' EXIT
+# 리뷰 15차 P1: 어떤 종료 경로에서도 임시 파일과 자기 소유 write lock을 남기지 않는다.
+trap 'rm -f "$tmp" 2>/dev/null; [ "$(cat "$_TW_LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$_TW_LOCK" 2>/dev/null || true' EXIT
 cat > "$tmp"
 
 sz=$(wc -c < "$tmp" | tr -d ' ')
@@ -210,6 +211,9 @@ if ! printf '\n' >> "$_stage" || ! cat "$tmp" >> "$_stage"; then
   rm -f "$_stage"
   echo "❌ 본문 조립 실패 — 원본 무변조 유지" >&2; exit 4
 fi
+# 리뷰 15차 P1: publish와 감사 커밋을 단일 임계구역으로 — lock이 publish 직후
+# 풀리면 사이에 끼어든 다른 writer의 변경까지 이 커밋에 오귀속됐다.
+if ! _acquire_write_lock; then rm -f "$_stage"; echo "❌ write lock 획득 실패 — 편집하지 않습니다." >&2; exit 4; fi
 _safe_write "$file" "docs/tickets" < "$_stage" || { rm -f "$_stage"; exit 4; }
 rm -f "$_stage"
 
@@ -219,4 +223,5 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git commit -m "ticket_body(${id}): edit body" >/dev/null
   fi
 fi
+_release_write_lock
 echo "✏️  ${id} 본문 교체 (${sz}B, 프론트매터 보존·단일 감사 커밋·git revert 가역)."

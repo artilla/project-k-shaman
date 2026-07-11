@@ -1490,3 +1490,80 @@ WRAP
 
   kill "$livepid" 2>/dev/null || true
 }
+
+# ── 리뷰 15차 P1 회귀 ─────────────────────────────────────────────────────────
+
+@test "T64: writer audit commits are attributed correctly under concurrency" {
+  _make_ticket T640 true open
+  _commit_all "add T640"
+
+  # writer A의 commit을 지연시키는 git wrapper — 과거에는 A의 publish 후 lock이
+  # 풀려 B의 publish가 끼어들고, A의 `git add`가 B의 변경까지 스테이징해 한
+  # 커밋에 두 변경이 오귀속됐다 (B는 diff 없음 → 커밋 생략, 둘 다 rc=0).
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$TEST_HOME/slowgit"
+  cat > "$TEST_HOME/slowgit/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "commit" ]; then sleep 1.5; fi
+exec "$realgit" "\$@"
+EOF
+  chmod +x "$TEST_HOME/slowgit/git"
+
+  ( cd "$TEST_HOME" && rc=0 && PATH="$TEST_HOME/slowgit:$PATH" ./scripts/ticket_edit.sh set-priority T640 P1 > "$TEST_HOME/wa.log" 2>&1 || rc=$?; echo "$rc" > "$TEST_HOME/wa.rc" ) &
+  sleep 0.4   # A가 lock을 쥐고 publish 후 commit sleep에 들어갈 시간
+  ( cd "$TEST_HOME" && rc=0 && ./scripts/ticket_edit.sh set-labels T640 "alpha" > "$TEST_HOME/wb.log" 2>&1 || rc=$?; echo "$rc" > "$TEST_HOME/wb.rc" ) &
+  wait
+
+  [ "$(cat "$TEST_HOME/wa.rc")" -eq 0 ]
+  [ "$(cat "$TEST_HOME/wb.rc")" -eq 0 ]
+  local fpath="docs/tickets/T640-test.md"
+  # 두 변경이 각각 자기 커밋으로 기록된다 (한 커밋에 합쳐지지 않음)
+  run git -C "$TEST_HOME" log -2 --format=%s
+  [[ "$output" == *"priority"* ]]
+  [[ "$output" == *"labels"* ]]
+  # labels 커밋에는 priority 변경이 없어야 하고, 그 역도 성립
+  local labels_c priority_c
+  labels_c="$(git -C "$TEST_HOME" log --format=%H --grep='labels' -1)"
+  priority_c="$(git -C "$TEST_HOME" log --format=%H --grep='priority' -1)"
+  git -C "$TEST_HOME" show "$labels_c" -- "$fpath" | grep -q '^+labels:'
+  ! git -C "$TEST_HOME" show "$labels_c" -- "$fpath" | grep -q '^+priority:'
+  git -C "$TEST_HOME" show "$priority_c" -- "$fpath" | grep -q '^+priority:'
+  ! git -C "$TEST_HOME" show "$priority_c" -- "$fpath" | grep -q '^+labels:'
+  [ ! -d "$TEST_HOME/state/ticket_write.lock.d" ]
+}
+
+@test "T65: DONE file with duplicate status declarations is not accepted as completion" {
+  _make_ticket T650 true open
+  # headless mock: 티켓을 DONE으로 옮기되 status를 중복 선언(done+open)으로 기록
+  cat > "$TEST_HOME/scripts/run_headless.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+f=docs/tickets/T650-test.md
+awk '/^---\$/{fm=!fm;print;next} fm && \$1=="status:"{print "status: done"; print "status: open";next}{print}' \
+  "\$f" > /tmp/t650.\$\$ && mv /tmp/t650.\$\$ "\$f"
+git mv "\$f" docs/tickets/DONE/T650-test.md
+git add -A; git commit -qm "T650: done(dup status)"
+exit 0
+EOF
+  chmod +x "$TEST_HOME/scripts/run_headless.sh"
+  _commit_all "add T650"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T650' _ "$TEST_HOME"
+  [ "$status" -ne 0 ]
+  # 완료로 집계되지 않았으므로 telemetry 커밋도 없다
+  run git -C "$TEST_HOME" log --format=%s -5
+  [[ "$output" != *"telemetry"* ]]
+}
+
+@test "T66: duplicate depends_on declarations are malformed - no bypass via empty first declaration" {
+  printf -- '---\nid: T661\ntitle: t\nstatus: open\npriority: P2\nsafe: true\npersona: implementer\ndepends_on: []\ndepends_on: [T999]\n---\n# T661\n' > "$TEST_HOME/docs/tickets/T661-test.md"
+  _commit_all "add T661"
+
+  # 첫 선언([])만 읽으면 의존성 없음으로 실행됐다 — 중복은 malformed(rc=11)
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T661 --dry-run' _ "$TEST_HOME"
+  [ "$status" -eq 11 ]
+  run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"T661-test.md"* ]]
+}

@@ -611,38 +611,42 @@ if [ "$ELIGIBLE" -eq 0 ]; then
 $_now
 EOF
     _am_tw_acquire || return 1
-    # index만 base(HEAD)로 동기화 — worktree는 아래에서 경로별로 결속 복원.
-    if ! git read-tree --reset HEAD >/dev/null 2>&1; then _am_tw_release; return 1; fi
     while IFS= read -r _line; do
       [ -z "$_line" ] && continue
       _st="${_line%"${_line#??}"}"
       _p="${_line#???}"
+      # 리뷰 15차 P1: index 동기화도 경로 단위(git reset -- <path>) — 전역
+      # read-tree --reset은 rollback과 무관한 동시 index-only staged 변경까지 지웠다.
+      git reset -q "HEAD" -- "$_p" >/dev/null 2>&1 || { _rc=1; continue; }
       case "$_st" in
         'M ')
-          # base에도 존재 — base blob으로 복원 (hardlink 백업으로 파괴를 내용에 결속)
+          # 리뷰 15차 P1: 파괴를 "지금 그 inode"에 원자 결속 — hardlink 후 교체(ln~mv
+          # 창의 atomic replace를 덮음)가 아니라 rename으로 현재 파일을 먼저 캡처하고,
+          # 내용이 merge blob일 때만 폐기한다. 다르면(동시 교체 캡처) 원복·보존.
           _want="$(git rev-parse -q --verify "${MERGE_COMMIT}:${_p}" 2>/dev/null)" || { _rc=1; continue; }
           _tmp="$(mktemp "$(dirname "$_p")/.amrb.XXXXXX" 2>/dev/null)" || { _rc=1; continue; }
           if ! git cat-file blob "HEAD:${_p}" > "$_tmp" 2>/dev/null; then rm -f "$_tmp"; _rc=1; continue; fi
           _perm="$(stat -c '%a' "$_p" 2>/dev/null || stat -f '%Lp' "$_p" 2>/dev/null || true)"
           if [ -z "$_perm" ] || ! chmod "$_perm" "$_tmp" 2>/dev/null; then rm -f "$_tmp"; _rc=1; continue; fi
           _bak="$(dirname "$_p")/.amrb-bak.$$"
-          if ! ln "$_p" "$_bak" 2>/dev/null; then rm -f "$_tmp"; _rc=1; continue; fi
-          if ! mv -f "$_tmp" "$_p" 2>/dev/null; then rm -f "$_tmp" "$_bak"; _rc=1; continue; fi
+          if ! mv "$_p" "$_bak" 2>/dev/null; then rm -f "$_tmp"; _rc=1; continue; fi
           if [ "$(git hash-object -- "$_bak" 2>/dev/null)" != "$_want" ]; then
-            mv -f "$_bak" "$_p" 2>/dev/null || true   # 동시 변경 감지 — 복원 취소, 보존
-            _rc=1
-          else
-            rm -f "$_bak"
+            mv -f "$_bak" "$_p" 2>/dev/null || true   # 동시 교체를 캡처함 — 원복·보존
+            rm -f "$_tmp"; _rc=1; continue
           fi
+          rm -f "$_bak"
+          # 캡처~복원 사이 새로 생긴 파일은 덮지 않는다 (ln no-clobber) — 실패 시 보존.
+          if ! ln "$_tmp" "$_p" 2>/dev/null; then _rc=1; fi
+          rm -f "$_tmp"
           ;;
         'A ')
-          # merge가 추가한 파일 — 삭제하되 파괴를 내용에 결속
+          # merge가 추가한 파일 — rename으로 원자 캡처 후, 내용이 merge blob일 때만
+          # 폐기 (리뷰 15차 P1: ln~rm 창의 동시 atomic replace 삭제 제거).
           _want="$(git rev-parse -q --verify "${MERGE_COMMIT}:${_p}" 2>/dev/null)" || { _rc=1; continue; }
           _bak="$(dirname "$_p")/.amrb-bak.$$"
-          if ! ln "$_p" "$_bak" 2>/dev/null; then _rc=1; continue; fi
-          rm -f "$_p" 2>/dev/null || true
+          if ! mv "$_p" "$_bak" 2>/dev/null; then _rc=1; continue; fi
           if [ "$(git hash-object -- "$_bak" 2>/dev/null)" != "$_want" ]; then
-            mv -f "$_bak" "$_p" 2>/dev/null || true
+            mv -f "$_bak" "$_p" 2>/dev/null || true   # 동시 교체를 캡처함 — 원복·보존
             _rc=1
           else
             rm -f "$_bak"

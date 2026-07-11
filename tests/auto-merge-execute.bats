@@ -1004,3 +1004,102 @@ EOF
   # 복원용 임시/백업 파일 잔존 없음
   [ -z "$(find "$d" -name '.amrb*' 2>/dev/null)" ]
 }
+
+# ── 리뷰 15차 P1 회귀 ─────────────────────────────────────────────────────────
+
+# P1: merge-added 경로의 동시 atomic replacement는 rollback이 삭제하지 않는다 —
+# rename 캡처가 교체본을 잡아 원복·보존하고 REF_ONLY로 격하한다.
+@test "execute: concurrent atomic replacement of merge-added path survives rollback" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  local base
+  base="$(git -C "$d" rev-parse main)"
+
+  cat > "$TEST_HOME/mock_checks_ar.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/ar.flag" ]; then touch "$TEST_HOME/ar.flag"; exit 0; fi
+exit 1
+EOF
+  chmod +x "$TEST_HOME/mock_checks_ar.sh"
+
+  # 검증 루프의 첫 hash-object 시점에 merge-added 파일(docs/file-1.md)을
+  # atomic rename으로 교체 — "검증 통과 후, 폐기 전" 창을 결정적으로 재현.
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$TEST_HOME/arbin"
+  cat > "$TEST_HOME/arbin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "hash-object" ] && [ ! -f "$TEST_HOME/ar.injected" ]; then
+  touch "$TEST_HOME/ar.injected"
+  printf 'replaced-by-writer\n' > "$d/docs/.repl.tmp"
+  mv -f "$d/docs/.repl.tmp" "$d/docs/file-1.md"
+fi
+exec "$realgit" "\$@"
+EOF
+  chmod +x "$TEST_HOME/arbin/git"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/arbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_ar.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [ "$(git -C "$d" rev-parse main)" = "$base" ]
+  # 교체본이 삭제되지 않고 보존된다
+  [ -f "$d/docs/file-1.md" ]
+  grep -q 'replaced-by-writer' "$d/docs/file-1.md"
+  # 완전 복구(ROLLED_BACK)로 위장하지 않는다
+  grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+  ! grep -q $'\tROLLED_BACK$' "$TEST_HOME/state/auto_merge.log"
+  [ -z "$(find "$d" -name '.amrb*' 2>/dev/null)" ]
+}
+
+# P1: rollback 중 동시 index-only staged 변경은 지워지지 않는다 —
+# 전역 read-tree --reset 대신 경로 단위 git reset.
+@test "execute: concurrent index-only staged change survives rollback" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  local base
+  base="$(git -C "$d" rev-parse main)"
+
+  cat > "$TEST_HOME/mock_checks_ix.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/ix.flag" ]; then touch "$TEST_HOME/ix.flag"; exit 0; fi
+exit 1
+EOF
+  chmod +x "$TEST_HOME/mock_checks_ix.sh"
+
+  # 검증 루프의 첫 hash-object 시점에 새 파일을 만들어 stage — index-only 동시 변경.
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$TEST_HOME/ixbin"
+  cat > "$TEST_HOME/ixbin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "hash-object" ] && [ ! -f "$TEST_HOME/ix.injected" ]; then
+  touch "$TEST_HOME/ix.injected"
+  printf 'staged-concurrently\n' > "$d/staged-file.md"
+  "$realgit" -C "$d" add staged-file.md
+fi
+exec "$realgit" "\$@"
+EOF
+  chmod +x "$TEST_HOME/ixbin/git"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/ixbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_ix.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [ "$(git -C "$d" rev-parse main)" = "$base" ]
+  # staged 항목이 살아 있다 (과거: read-tree --reset이 조용히 지움)
+  git -C "$d" diff --cached --name-only | grep -q '^staged-file.md$'
+  [ -f "$d/staged-file.md" ]
+}

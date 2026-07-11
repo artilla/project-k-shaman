@@ -205,6 +205,9 @@ fi
 deps_satisfied() {
   local file="$1"
   local deps
+  # 리뷰 15차 P1: depends_on 선언은 최대 1회 — 첫 선언만 읽는 파서를 겨냥해
+  # `depends_on: []` 뒤에 실제 dep을 숨기는 우회를 차단 (중복은 malformed).
+  [ "$(frontmatter_field_count "$file" depends_on)" -le 1 ] || return 1
   # 리뷰 14차 P2: "최초 frontmatter 블록"만 읽는다 — 토글(fm = !fm) 방식은 본문의
   # 가짜 `---` 블록을 다시 frontmatter로 읽어 direct-run(run_loop)과 선택 결과가
   # 달라졌다. run_loop.deps_satisfied_strict와 동일한 첫-블록 시맨틱.

@@ -3143,7 +3143,9 @@ function autonomyControlScript() {
 
 function renderBoardPage({ isLocalhost = true } = {}) {
   const { byStatus } = getModel();
-  const doneIds = new Set((byStatus.done || []).filter(t => !t.done_evidence_invalid && !t.id_malformed).map(t => String(t.id)));
+  // 리뷰 15차 P2: authority_malformed(중복 id/status/persona/safe 선언)도 제외 —
+  // runner의 dep 증거 계약(권위 필드 정확히 1회)과 정합.
+  const doneIds = new Set((byStatus.done || []).filter(t => !t.done_evidence_invalid && !t.id_malformed && !t.authority_malformed).map(t => String(t.id)));
   const nowMs = Date.now();
   const isBlocked = t => (t.depends_on || []).some(id => !doneIds.has(String(id)));
   // ADR-0190 T284: id→{title,status} 대조 맵(읽기). dep 칩을 blocker 제목·상태로 해소.

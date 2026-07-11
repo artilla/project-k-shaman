@@ -603,6 +603,9 @@ _assert_token() {
 
 deps_satisfied_strict() {
   local file="$1" deps dep dep_ok dep_f done_real
+  # 리뷰 15차 P1: depends_on 선언은 최대 1회 — 첫 선언만 읽는 파서를 겨냥해
+  # `depends_on: []` 뒤에 실제 dep을 숨기는 우회를 차단 (중복은 malformed).
+  [ "$(frontmatter_field_count "$file" depends_on)" -le 1 ] || return 1
   deps=$(awk '
     NR == 1 { if ($0 != "---") exit; next }
     $0 == "---" { exit }
@@ -1317,7 +1320,12 @@ EOF
       final_file="$done_file"
       [ -f "$done_file" ] || final_file="$archive_file"
       final_status=$(field_of "$final_file" status || true)
-      if [ -f "$done_file" ] && [ "$final_status" != "done" ]; then
+      # 리뷰 15차 P1: 완료 판정도 권위 필드 단일성 요구 — field_of는 첫 선언만 읽어
+      # 중복 status(done+open)/id 파일이 완료로 집계되고 telemetry까지 커밋됐다.
+      if [ "$(frontmatter_field_count "$final_file" status)" != "1" ] \
+         || [ "$(frontmatter_field_count "$final_file" id)" != "1" ]; then
+        wip_stage="status-not-done"
+      elif [ -f "$done_file" ] && [ "$final_status" != "done" ]; then
         wip_stage="status-not-done"
       elif [ ! -f "$done_file" ] && [ "$final_status" != "blocked" ] && [ "$final_status" != "skipped" ]; then
         wip_stage="status-not-done"
