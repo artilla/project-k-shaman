@@ -92,6 +92,23 @@ _psql() {
     "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" -tAc "$1"
 }
 
+# _deploy_upto <version…> — "그 시점까지만 배포된 live DB"를 재현한다.
+# 리뷰 16차 P1(8차 2회, #1): 이제 runner는 공개 manifest 전량(001~005)이 커밋에
+# 존재할 것을 요구하므로, 구버전 상태를 "파일 삭제"로 흉내낼 수 없다(그 자체가
+# 거부 대상이다 — DB27 참조). 실제 live DB가 그렇듯 "파일은 전부 있고 ledger만
+# 앞선 version까지"인 상태를 만든다: 해당 SQL을 직접 적용하고 ledger에 기록한다.
+_deploy_upto() {
+  local v
+  "$PGBIN/psql" -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" \
+    -c "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())" >/dev/null
+  for v in "$@"; do
+    PGOPTIONS='-c client_min_messages=warning' \
+      "$PGBIN/psql" -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" \
+      -f "$TROOT/db/migrations/${v}.sql" >/dev/null
+    _psql "insert into schema_migrations (version) values ('${v}') on conflict (version) do nothing" >/dev/null
+  done
+}
+
 @test "DB1: fresh apply installs all migrations, ledger owned by runner" {
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 0 ]
@@ -161,7 +178,7 @@ SQL
   _psql "insert into sessions (user_id) values (1)"
   _psql "insert into fortunes (cache_key, payload) values ('ck','{}')"
   _psql "insert into user_fortunes (user_id, fortune_id) values (1,1)"
-  _psql "update users set deleted_at=now() where id=1"
+  _psql "select app_soft_delete_user(1)"
   [ "$(_psql "select (birth_profile_hash is null and last_topic is null and not consent_personalization) from users where id=1")" = "t" ]
   [ "$(_psql "select count(*) from sessions where user_id=1")" = "0" ]
   [ "$(_psql "select count(*) from user_fortunes where user_id=1")" = "0" ]
@@ -233,7 +250,7 @@ SQL
   # 리뷰 16차 P1-8: custom schema에 설치된 삭제 트리거는 호출자의 search_path가
   # 달라도(기본 public) 동작해야 한다 — 함수가 SET search_path FROM CURRENT로 고정됨.
   _psql "insert into \"AppData\".users (provider, provider_subject, nickname) values ('kakao','sub1','nick')"
-  _psql "update \"AppData\".users set deleted_at=now() where id=1"
+  _psql "select \"AppData\".app_soft_delete_user(1)"
   [ "$(_psql "select (nickname is null and provider_subject like 'deleted:%') from \"AppData\".users where id=1")" = "t" ]
   # 위험 식별자는 거부 (fail-closed)
   echo "DATABASE_URL=postgres://postgres:x@127.0.0.1:${PGT_PORT}/${TEST_DB}?schema=app;drop" > "$ENVF"
@@ -263,7 +280,7 @@ SQL
   _psql "insert into sessions (user_id) values (1)"
   _psql "insert into events (event_type, user_id, payload) values ('visit', 1, '{\"pii\":\"maybe\"}'::jsonb)"
   _psql "insert into purchases (user_id, product_code, amount_krw) values (1, 'p1', 1000)"
-  _psql "update users set deleted_at=now() where id=1"
+  _psql "select app_soft_delete_user(1)"
   # C1: provider_subject 익명화 / C4: last_login_at 스크럽 (+ 기존 스크럽 집합)
   [ "$(_psql "select (provider_subject like 'deleted:%' and last_login_at is null and nickname is null and birth_profile_hash is null and not consent_personalization) from users where id=1")" = "t" ]
   # C2(강화): events는 user_id 절단 + payload 스크럽 — 행(집계 축)은 유지
@@ -385,7 +402,7 @@ SQL
   _psql "insert into users (provider, provider_subject) values ('kakao','u1')"
   # 세션 A: 삭제 UPDATE를 열고 2초간 미커밋 유지
   ( PGOPTIONS='-c client_min_messages=warning' "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" \
-      -c "BEGIN; UPDATE users SET deleted_at=now() WHERE id=1; SELECT pg_sleep(2); COMMIT;" >/dev/null 2>&1 ) &
+      -c "BEGIN; SELECT app_soft_delete_user(1); SELECT pg_sleep(2); COMMIT;" >/dev/null 2>&1 ) &
   local killer=$!
   sleep 0.7
   # 세션 B: 삭제 미커밋 동안 자식 INSERT — FOR SHARE 대기 후 재평가로 거부돼야 한다
@@ -452,7 +469,7 @@ SQL
   _psql "insert into sessions (user_id) values (1)"
   # 리뷰 16차 P1-7(4차): user_id 없이 session으로만 귀속된 event
   _psql "insert into events (event_type, session_id, payload) select 'visit', id, '{\"pii\":\"session\"}'::jsonb from sessions where user_id=1"
-  _psql "update users set deleted_at=now() where id=1"
+  _psql "select app_soft_delete_user(1)"
   # session-only event도 스크럽됐다 (세션 삭제 전에 수행)
   [ "$(_psql "select payload::text from events where event_type='visit'")" = "{}" ]
   [ "$(_psql "select (scrubbed_at is not null) from events where event_type='visit'")" = "t" ]
@@ -479,7 +496,7 @@ SQL
   [ "$status" -eq 0 ]
   _psql "insert into users (provider, provider_subject) values ('kakao','u1')"
   _psql "insert into events (event_type, user_id, payload) values ('visit', 1, '{\"pii\":\"x\"}'::jsonb)"
-  _psql "update users set deleted_at=now() where id=1"
+  _psql "select app_soft_delete_user(1)"
   # 5차 P1-2: scrubbed_at 해제(NULL 전이)로 frozen CHECK를 우회할 수 없다
   run _psql "update events set scrubbed_at=NULL, payload='{\"pii\":\"restored\"}'::jsonb where event_type='visit'"
   [ "$status" -ne 0 ]
@@ -493,7 +510,7 @@ SQL
   # 5차 P1-3: 미커밋 삭제 중 session-only INSERT — 세션 소유자 행 잠금으로 직렬화
   _psql "insert into sessions (user_id) values (2)"
   ( PGOPTIONS='-c client_min_messages=warning' "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" \
-      -c "BEGIN; UPDATE users SET deleted_at=now() WHERE id=2; SELECT pg_sleep(2); COMMIT;" >/dev/null 2>&1 ) &
+      -c "BEGIN; SELECT app_soft_delete_user(2); SELECT pg_sleep(2); COMMIT;" >/dev/null 2>&1 ) &
   local deleter=$!
   sleep 0.7
   run _psql "insert into events (event_type, session_id, payload) select 'raced', id, '{\"pii\":\"raced\"}'::jsonb from sessions where user_id=2 limit 1"
@@ -533,26 +550,23 @@ SQL
   [ "$(_psql "select count(*) from schema_migrations")" = "5" ]
 }
 
-@test "DB20: legacy orphan events (002-era deletes) are scrubbed by 004 backfill - explicit fail-closed policy" {
-  # 002까지만 적용된 시점의 삭제는 sessions를 먼저 지워 session-only event가
-  # orphan으로 남았다 — 004는 소유 증거가 없는 이중 orphan payload를 전부 스크럽.
-  mkdir -p "$TROOT/hold"
-  mv "$TROOT/db/migrations/003_soft_delete_invariant.sql" "$TROOT/db/migrations/004_soft_delete_contract.sql" \
-     "$TROOT/db/migrations/005_ownership_repair_and_lock_contract.sql" "$TROOT/hold/"
-  _commit_migs
-  run env ENV_FILE="$ENVF" "$RUNNER"
-  [ "$status" -eq 0 ]
+@test "DB20: legacy orphan events (002-era deletes) are scrubbed by the 005 backfill - explicit fail-closed policy" {
+  # 002까지만 배포된 live DB의 삭제는 sessions를 먼저 지워 session-only event가
+  # orphan으로 남았다 — 005는 소유 증거가 없는 이중 orphan payload를 전부 스크럽.
+  # (8차 2회 #1: 구버전 상태는 파일 삭제가 아니라 ledger 상태로 재현한다.)
+  _deploy_upto 001_init 002_schema_contract_fixes
   _psql "insert into users (provider, provider_subject) values ('kakao','u1')"
   _psql "insert into sessions (user_id) values (1)"
   _psql "insert into events (event_type, session_id, payload) select 'visit', id, '{\"pii\":\"legacy\"}'::jsonb from sessions where user_id=1"
-  # 002-era 삭제: 트리거가 세션을 지워 event가 orphan(session_id NULL)이 된다
+  # 002-era 삭제: 진입점 계약이 아직 없으므로 직접 UPDATE — 트리거가 세션을 지워
+  # event가 orphan(session_id NULL)이 된다
   _psql "update users set deleted_at=now() where id=1"
   [ "$(_psql "select (session_id is null and payload::text like '%legacy%') from events where event_type='visit'")" = "t" ]
   # 003·004·005 적용 — legacy 정책이 orphan payload를 스크럽한다
-  mv "$TROOT/hold/"*.sql "$TROOT/db/migrations/"
-  _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 0 ]
+  [[ "$output" == *"skip  001_init"* ]]
+  [[ "$output" == *"✓ 005_ownership_repair_and_lock_contract"* ]]
   [ "$(_psql "select payload::text from events where event_type='visit'")" = "{}" ]
   [ "$(_psql "select (scrubbed_at is not null) from events where event_type='visit'")" = "t" ]
 }
@@ -579,7 +593,7 @@ SQL
   [ "$(_psql "select user_id from sessions where id='$SB'")" = "2" ]
   # 삭제된 사용자로의 바인딩은 거부
   _psql "insert into users (provider, provider_subject) values ('kakao','u3')"   # id 3
-  _psql "update users set deleted_at=now() where id=3"
+  _psql "select app_soft_delete_user(3)"
   _psql "insert into sessions (user_id) values (NULL)"
   SD="$(_psql "select id from sessions where user_id is null")"
   run _psql "update sessions set user_id=3 where id='$SD'"
@@ -631,11 +645,8 @@ SQL
   # session.owner=A, event.user_id=B / guest session)은 004 적용 후에도 남았고,
   # guest 세션을 A에 바인딩한 뒤 A를 삭제하면 B 귀속 payload까지 스크럽됐다.
   # 005의 repair는 불일치 행의 session 링크를 절단한다 (귀속·payload 보존).
-  mkdir -p "$TROOT/hold"
-  mv "$TROOT/db/migrations/005_ownership_repair_and_lock_contract.sql" "$TROOT/hold/"
-  _commit_migs
-  run env ENV_FILE="$ENVF" "$RUNNER"
-  [ "$status" -eq 0 ]
+  # 004까지 배포된 live DB (8차 2회 #1: 파일 삭제가 아니라 ledger 상태로 재현)
+  _deploy_upto 001_init 002_schema_contract_fixes 003_soft_delete_invariant 004_soft_delete_contract
   _psql "insert into users (provider, provider_subject) values ('kakao','A')"   # id 1
   _psql "insert into users (provider, provider_subject) values ('kakao','B')"   # id 2
   _psql "insert into sessions (user_id) values (1)"
@@ -647,8 +658,6 @@ SQL
   _psql "insert into events (event_type, user_id, session_id, payload) values ('x', 2, '$SA', '{\"keep\":\"a\"}'::jsonb)"
   _psql "insert into events (event_type, user_id, session_id, payload) values ('y', 2, '$SG', '{\"keep\":\"g\"}'::jsonb)"
   # 005 적용 — repair가 session 링크를 절단한다
-  mv "$TROOT/hold/"*.sql "$TROOT/db/migrations/"
-  _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 0 ]
   [ "$(_psql "select count(*) from events where user_id=2 and session_id is null and event_type in ('x','y')")" = "2" ]
@@ -763,4 +772,133 @@ SHIM
   # temp 정리 + 잔존 backend 없음
   [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
   [ "$(_psql "select count(*) from pg_stat_activity where application_name like 'db_migrate.%'")" = "0" ]
+}
+
+@test "DB27: the manifest is complete - deleting a published migration is refused (fresh DB stays empty)" {
+  # 8차 2회 P1(#1): pin이 "존재하는 파일"만 검사해, 커밋에서 004를 삭제하면
+  # 001·002·003·005만 적용하고 rc=0 / up-to-date로 끝났다 (실측). manifest는
+  # 공개된 전 version의 전량 목록이다 — 하나라도 없으면 아무것도 적용하지 않는다.
+  git -C "$TROOT" rm -q db/migrations/004_soft_delete_contract.sql
+  _commit_migs
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"004_soft_delete_contract.sql 이 커밋"* ]]
+  [[ "$output" != *"up-to-date"* ]]
+  # 부분 적용조차 없다 — ledger 자체가 생기지 않았다
+  [ "$(_psql "select to_regclass('public.schema_migrations') is null")" = "t" ]
+  # --status도 같은 계약으로 거부한다 (apply와 같은 inventory·manifest)
+  run env ENV_FILE="$ENVF" "$RUNNER" --status
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"pending"* ]]
+}
+
+@test "DB28: already-applied published migrations are re-verified - tampering a deployed 003 is refused" {
+  # 8차 2회 P1(#1): 이미 적용된 version은 apply 루프의 skip 분기에서 pin 검사를
+  # 건너뛰어, 배포된 DB에 대해 공개본 변조가 무검증 통과했다. manifest 검증은
+  # 적용 여부와 무관하게 "시작 전"에 수행된다.
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  printf -- '-- tampered after deploy\n' >> "$TROOT/db/migrations/003_soft_delete_invariant.sql"
+  _commit_migs
+  # 전부 applied라 apply 루프는 아무 일도 하지 않지만, manifest 검증이 잡는다
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"공개본 checksum"* ]]
+  [[ "$output" == *"003_soft_delete_invariant"* ]]
+  [[ "$output" != *"up-to-date"* ]]
+}
+
+@test "DB29: executed bytes are exactly the verified blob - a NUL byte is refused, trailing newlines are preserved" {
+  # 8차 2회 P1(#2): _content="$(cat ...)"의 command substitution이 NUL을 버리고
+  # 후행 개행을 제거해, "검증한 blob"과 "실제 실행 SQL"이 달랐다 — <유효 SQL><NUL>
+  # migration이 변형된 채 적용되고 ledger에도 기록됐다 (실측).
+  printf 'CREATE TABLE nul_probe (id INT);\n\000' > "$TROOT/db/migrations/989_nul_zz_test.sql"
+  _commit_migs
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"NUL"* ]]
+  # 변형 실행도, ledger 기록도 없다
+  [ "$(_psql "select to_regclass('nul_probe') is null")" = "t" ]
+  [ "$(_psql "select count(*) from schema_migrations where version like '989%'")" = "0" ]
+  git -C "$TROOT" rm -q db/migrations/989_nul_zz_test.sql
+  # 후행 개행이 여러 개인 SQL은 bytes 그대로 정상 적용된다 (변형 없음)
+  printf 'CREATE TABLE tail_probe (id INT);\n\n\n\n' > "$TROOT/db/migrations/989_tail_zz_test.sql"
+  _commit_migs
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [ "$(_psql "select to_regclass('tail_probe') is not null")" = "t" ]
+}
+
+@test "DB30: soft-delete entrypoint is enforced by the schema - direct UPDATE is refused, no lock-order reversal remains" {
+  # 8차 2회 P1(#9): write contract가 helper 제공에 그쳐 직접 UPDATE를 막지 못했고,
+  # 비준수 writer와 삭제가 경합하면 다른 writer가 deadlock victim이 됐다.
+  # 이제 스크럽 트리거가 진입점 통과 증거를 요구한다 — 직접 UPDATE는 거부되고,
+  # 진입점은 child→users 순서로 잠가 직접 child UPDATE 경로와 순서가 일치한다.
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "insert into users (provider, provider_subject) values ('kakao','u1')"
+  _psql "insert into sessions (user_id) values (1)"
+  _psql "insert into events (event_type, user_id, payload) values ('e', 1, '{\"p\":1}'::jsonb)"
+  # 직접 UPDATE(비준수 writer)는 스키마가 거부한다 — 계약이 규약이 아니다
+  run _psql "update users set deleted_at=now() where id=1"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"app_soft_delete_user"* ]]
+  [ "$(_psql "select (deleted_at is null) from users where id=1")" = "t" ]
+  # GUC를 수동으로 흉내내도 대상 id가 다르면 통과하지 못한다
+  run _psql "begin; select set_config('app.soft_delete_user','999',true); update users set deleted_at=now() where id=1; commit;"
+  [ "$status" -ne 0 ]
+  [ "$(_psql "select (deleted_at is null) from users where id=1")" = "t" ]
+
+  # 역전 경로 재현: child row lock을 먼저 쥔 writer와 삭제가 경합해도 deadlock이
+  # 아니라 직렬화된다 (진입점이 child→users로 잠그므로 순서가 일치한다).
+  ( PGOPTIONS='-c client_min_messages=warning' "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" \
+      -c "BEGIN; UPDATE events SET user_id=user_id WHERE user_id=1; SELECT pg_sleep(1.5); COMMIT;" > "$PGT/w30.log" 2>&1; echo $? > "$PGT/w30.rc" ) &
+  local writer=$!
+  sleep 0.5
+  run _psql "select app_soft_delete_user(1)"
+  [ "$status" -eq 0 ]
+  wait "$writer" 2>/dev/null || true
+  # 어느 쪽도 deadlock victim이 되지 않았다
+  [ "$(cat "$PGT/w30.rc")" -eq 0 ]
+  ! grep -qi "deadlock" "$PGT/w30.log"
+  [ "$(_psql "select (deleted_at is not null) from users where id=1")" = "t" ]
+  [ "$(_psql "select payload::text from events where event_type='e'")" = "{}" ]
+}
+
+@test "DB31: a signal during the final post-apply ledger check is not lost (no rc=0 'up-to-date' lie)" {
+  # 8차 2회 P1(#3): 마지막 migration의 post-apply ledger 재확인 중에 온 TERM이
+  # 루프 상단 검사에 닿지 못하고 사라져, 4초 뒤 rc=0 / migrations up-to-date로
+  # 끝났다 (실측). 이제 매 iteration 끝과 최종 보고 직전에도 신호를 확인한다.
+  mkdir -p "$PGT/lastbin_${BATS_TEST_NUMBER}" "$TROOT/tmp"
+  # 005의 ledger 조회는 두 번 일어난다: (1) 루프 상단 applied? (2) 적용 후 재확인.
+  # 두 번째 호출만 지연시켜 그 창에 TERM을 넣는다.
+  cat > "$PGT/lastbin_${BATS_TEST_NUMBER}/psql" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in
+  *"version = '005_ownership_repair_and_lock_contract'"*)
+    n=0
+    [ -f "$TROOT/tmp/n005" ] && n=\$(cat "$TROOT/tmp/n005")
+    n=\$((n+1)); echo "\$n" > "$TROOT/tmp/n005"
+    if [ "\$n" -ge 2 ]; then touch "$TROOT/tmp/postapply"; sleep 5; fi
+    ;;
+esac
+exec "$PGBIN/psql" "\$@"
+SHIM
+  chmod +x "$PGT/lastbin_${BATS_TEST_NUMBER}/psql"
+  env PATH="$PGT/lastbin_${BATS_TEST_NUMBER}:$PATH" ENV_FILE="$ENVF" TMPDIR="$TROOT/tmp" \
+    "$RUNNER" > "$PGT/sig31.log" 2>&1 &
+  local rpid=$! i=0 rc=0
+  while [ "$i" -lt 150 ]; do
+    [ -f "$TROOT/tmp/postapply" ] && break
+    sleep 0.1; i=$((i+1))
+  done
+  sleep 0.3
+  kill -TERM "$rpid"
+  wait "$rpid" || rc=$?
+  # 신호가 rc=0 성공으로 위장되지 않는다
+  [ "$rc" -eq 143 ]
+  ! grep -q "up-to-date" "$PGT/sig31.log"
+  # 적용된 migration 자체는 유효하다 (transaction은 이미 commit됨)
+  [ "$(_psql "select count(*) from schema_migrations")" = "5" ]
+  [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
 }
