@@ -4,7 +4,11 @@
 - 근거: 리뷰 16차 P1-8 — "provider_subject·last_login_at·events 연결·purchases 연결이
   삭제 후에도 유지된다. 보존 자체는 가능하지만 익명화 여부·보존기간·재가입 처리
   계약을 먼저 확정해야 한다."
-- 구현: `db/migrations/004_soft_delete_contract.sql` (003은 공개본 불변 — 확장분은 004로 분리)
+- 구현: `db/migrations/004_soft_delete_contract.sql`(공개본 불변) +
+  `db/migrations/005_ownership_repair_and_lock_contract.sql` — 이미 공개된
+  003·004는 재작성하지 않는다(같은 version 변경은 기적용 DB에서 skip되어 새
+  계약이 설치되지 않음; 리뷰 16차 7차 P1-1 실측). 4~7차 라운드의 계약 확장·
+  기존 데이터 repair·write contract는 전부 005에 있다.
 - 익명 토큰 판정: `deleted:` 접두사가 아니라 정확 형식(`deleted:` + uuid 36자) 매칭 —
   legacy provider_subject가 우연히 같은 접두사여도 오동작하지 않는다
 
@@ -32,7 +36,7 @@
   거부된다 (4차 P1-8).
 
 - **legacy orphan 정책 (5차 P1-4)**: 002 시절의 삭제는 세션을 먼저 지워
-  session-only event의 소유 증거가 이미 끊겼다. 004는 소유 증거가 없는 이중
+  session-only event의 소유 증거가 이미 끊겼다. 005는 소유 증거가 없는 이중
   orphan(user_id·session_id 모두 NULL)의 payload를 **전부** 스크럽한다 —
   fail-closed. 정당한 익명 orphan payload도 함께 지워지는 트레이드오프를
   감수한다 (1회성 backfill; 이후의 orphan은 삭제 시점 트리거가 처리).
@@ -62,7 +66,7 @@ event_type·created_at 등 집계 축은 보존되어 익명 통계는 유지된
 비가역이며, 돌아오는 사용자는 C1에 따라 새 계정이 된다. 재동의·재개인화도
 새 계정에서 처음부터 시작한다.
 
-## 불변식 (004가 스키마 수준에서 강제)
+## 불변식 (004 공개본 + 005가 스키마 수준에서 강제)
 
 1. `deleted_at IS NOT NULL` ⇒ 모든 개인 필드 NULL + `consent=false` +
    `provider_subject ~ '^deleted:<uuid>$'` — 정확한 UUID 형식 매칭(4차 P1-9;
@@ -79,11 +83,38 @@ event_type·created_at 등 집계 축은 보존되어 익명 통계는 유지된
      동일하게 항상 users → sessions로 통일해 역전 deadlock을 제거했다
      (소유자 무잠금 선독 → users FOR SHARE → sessions FOR SHARE → 소유자
      재검증, 변경 감지 시 거부 fail-closed).
-3. `events.scrubbed_at IS NOT NULL` ⇒ `user_id IS NULL AND payload = '{}'`
-   (CHECK — 스크럽의 영속성)
+3. `events.scrubbed_at IS NOT NULL` ⇒ `user_id IS NULL AND session_id IS NULL
+   AND payload = '{}'` (CHECK — 스크럽의 영속성. `session_id IS NULL`까지가
+   frozen 불변식이다 — 이것이 빠지면 스크럽된 event의 세션 재연결(UPDATE
+   session_id)이 CHECK를 통과한다; 5차 P1-5·7차 P2)
 4. purchases.user_id 재배정 금지 — 거래기록 귀속 불변 (트리거)
 5. 삭제 전이 시점: 개인 필드 스크럽·익명화 + 자식 행 정리 + events(세션 귀속
    포함) 스크럽 (트리거)
+
+## 기존 교차 귀속 데이터 repair (7차 P1-4 — 005)
+
+001~004 시절에는 `event.user_id ≠ session.owner`(guest 세션 포함)인 교차 귀속
+행을 막는 계약이 없었다. 이런 행이 남으면 guest 세션이 이후 다른 사용자에게
+바인딩된 뒤 그 사용자를 삭제할 때, 세션 스캔이 제3자 귀속 payload까지 스크럽
+했다 (실측). 005는 migration 시점에 이를 **repair**한다: 명시적 `user_id`를
+귀속의 근거로 삼아 불일치 행의 `session_id`를 절단한다 — 교차 스크럽의 사각은
+제거되고 원 귀속·payload는 보존된다. 이후의 신규 교차 귀속은 트리거(불변식 2)가
+거부하므로 이 repair는 1회성이다.
+
+## Write contract — UPDATE 경로 잠금 순서·deadlock retry (7차 P1-5 — 005)
+
+PostgreSQL은 child row lock "후" BEFORE UPDATE 트리거를 실행하므로,
+events/sessions의 UPDATE 경로(child→users)와 삭제 경로(users→children)의 잠금
+순서 역전은 트리거 내부 선언만으로 제거할 수 없다 (PG16 실측 deadlock 2경로).
+스키마가 제공하는 계약:
+
+- `app_lock_user_rows(VARIADIC BIGINT[])`: events/sessions 행을 UPDATE(또는
+  FOR UPDATE)하는 모든 writer는 DML **전에** 이 함수로 관련 사용자 행을 먼저
+  잠근다(FOR SHARE, id 오름차순) — 전 경로가 users→children으로 고정된다.
+- `app_soft_delete_user(BIGINT)`: soft delete의 유일한 진입점. 계약을 지키지
+  않은 writer와의 잔여 deadlock은 서버 감지 후 이 함수의 bounded retry
+  (subtransaction rollback → 최대 5회 재시도)가 삭제 쪽에서 흡수한다 —
+  명시적 deadlock retry 계약.
 
 ## 남은 후속 (P2, 별도 티켓)
 

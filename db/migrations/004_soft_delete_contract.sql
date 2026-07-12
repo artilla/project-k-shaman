@@ -3,32 +3,33 @@
 -- 주의: transaction control·ledger 기록·psql meta command를 쓰지 않는다 —
 -- transaction과 version 기록은 runner(scripts/db_migrate.sh)가 소유한다.
 --
--- 리뷰 16차 P1-1(3차): 이미 공개된(remote/master) 003은 재작성하지 않는다 —
+-- 리뷰 16차 P1-1: 이미 공개된(remote/master) 003은 재작성하지 않는다 —
 -- 같은 version의 내용 변경은 구 003을 적용한 DB가 영원히 새 계약을 받지
 -- 못하게 만든다. 003은 공개본 그대로 두고, 계약 확장분은 이 파일(004)로 분리.
 --
 -- 확정된 삭제 계약 (2026-07-12 owner 승인 — docs/decisions/0004):
 --   C1. 재가입 = 새 계정: 삭제 시 provider_subject를 복원 불가능한 익명 토큰
---       ('deleted:<uuid>')으로 대체. 판정은 정확한 UUID 형식 매칭(4차 P1-9).
---   C2. events: user_id 절단 + payload 스크럽('{}') + scrubbed_at 마커.
---       - session으로만 귀속된 event(user_id NULL, session_id=삭제 사용자의
---         세션)도 스크럽한다 — 세션 삭제 "전"에 수행 (4차 P1-7).
---       - 스크럽은 일회성 이벤트가 아니라 영속 불변식: scrubbed_at이 설정된
---         행은 CHECK로 user_id NULL + payload '{}'가 강제되어, 삭제와 동시
---         또는 삭제 후의 payload 재기입이 거부된다 (4차 P1-8).
---   C3. purchases: 보존(거래기록 보존 의무) — 신규 유입 거부 + user_id 재배정
---       금지(거래기록 불변, 4차 P2).
---   C4. last_login_at: 스크럽.
---   C5. 복구(deleted_at 재-NULL) 금지 — 재가입은 새 계정으로만.
+--       ('deleted:<uuid>')으로 대체. 같은 OAuth 계정의 재로그인은
+--       UNIQUE(provider, provider_subject) 충돌 없이 새 사용자 행을 만든다.
+--   C2. events: user_id 절단 + payload 스크럽('{}') — 리뷰 16차 P1-9:
+--       /api/event가 임의 필드를 보존하고 payload schema 검증이 미구현이므로
+--       "payload 무익명정보" 전제가 성립하지 않는다. fail-closed로 payload까지
+--       스크럽한다(event_type·created_at 등 집계 축만 보존). schema 검증이
+--       구현되어 전제가 성립하면 보존 완화는 후속 마이그레이션으로.
+--   C3. purchases: 보존(거래기록 보존 의무) — 단, 삭제된 사용자로의 신규 행 거부.
+--   C4. last_login_at: 개인 행동 흔적이므로 스크럽.
+--   C5. 복구(deleted_at 재-NULL) 금지 — 재가입은 새 계정으로만 (C1과 정합).
 --
--- 리뷰 16차 P1-3(3차): 자식 유입 차단은 부모 행 잠금(FOR SHARE)으로 — 미커밋
--- 삭제 UPDATE(FOR NO KEY UPDATE)와 상호 배타.
--- 리뷰 16차 P1-8(3차): 함수는 SET search_path FROM CURRENT로 고정.
+-- 리뷰 16차 P1-3: 자식 유입 차단은 EXISTS 조회가 아니라 부모 행 잠금(FOR SHARE)
+-- 으로 — 미커밋 삭제 UPDATE(FOR NO KEY UPDATE)와 상호 배타이므로, 삭제와 동시에
+-- 들어온 자식 INSERT는 삭제 커밋을 기다렸다가 재평가되어 거부된다.
+-- 리뷰 16차 P1-8: 함수는 SET search_path FROM CURRENT로 고정 — custom schema에
+-- 적용된 뒤 호출자의 search_path가 달라도(예: public) 대상 테이블을 찾는다.
+-- 리뷰 16차 P2: 익명 토큰 판정은 'deleted:' 접두사가 아니라 정확한 형식
+-- ('deleted:' + uuid 36자) 매칭 — legacy subject가 우연히 같은 접두사여도
+-- backfill·불변식이 오동작하지 않는다.
 
--- ── 0) events 스크럽 마커 (영속 불변식의 근거 컬럼) ─────────────────────────────
-ALTER TABLE events ADD COLUMN IF NOT EXISTS scrubbed_at TIMESTAMPTZ;
-
--- ── 1) 전이 스크럽 확장 — 002/003 이후의 함수 "객체"를 대체한다 (파일들은 불변).
+-- ── 0) 전이 스크럽 확장 — 002/003 이후의 함수 "객체"를 대체한다 (파일들은 불변).
 CREATE OR REPLACE FUNCTION users_scrub_on_delete() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path FROM CURRENT
@@ -44,40 +45,17 @@ BEGIN
     NEW.consented_at := NULL;
     NEW.last_login_at := NULL;
     NEW.provider_subject := 'deleted:' || gen_random_uuid();
-    -- 4차 P1-7: session으로만 귀속된 event까지 — 세션 삭제 "전"에 스크럽한다
-    -- (세션 삭제가 먼저면 events.session_id가 SET NULL로 끊겨 조회 불가).
-    -- 5차 P1-5: session 링크도 스크럽 시점에 명시 절단 — frozen CHECK가
-    -- session_id IS NULL까지 강제할 수 있게 한다 (재연결 UPDATE 거부).
-    UPDATE events SET user_id = NULL, session_id = NULL, payload = '{}'::jsonb, scrubbed_at = now()
-     WHERE user_id = NEW.id
-        OR session_id IN (SELECT id FROM sessions WHERE user_id = NEW.id);
     DELETE FROM sessions WHERE user_id = NEW.id;
     DELETE FROM streaks WHERE user_id = NEW.id;
     DELETE FROM user_fortunes WHERE user_id = NEW.id;
+    UPDATE events SET user_id = NULL, payload = '{}'::jsonb WHERE user_id = NEW.id;
   ELSIF NEW.deleted_at IS NULL AND OLD.deleted_at IS NOT NULL THEN
     RAISE EXCEPTION 'user %: soft-delete 복구는 지원하지 않습니다 — 재가입은 새 계정으로 처리됩니다 (삭제 계약 C5)', OLD.id;
   END IF;
   RETURN NEW;
 END $fn$;
 
--- ── 2) 기존 위반 데이터 정리 (구 003까지의 계약에 없던 필드 포함) ───────────────
---       events 스크럽(세션 경유 포함)을 세션 삭제보다 먼저 수행한다.
-UPDATE events e SET user_id = NULL, session_id = NULL, payload = '{}'::jsonb, scrubbed_at = now()
- WHERE e.user_id IN (SELECT id FROM users WHERE deleted_at IS NOT NULL)
-    OR e.session_id IN (SELECT s.id FROM sessions s JOIN users u ON u.id = s.user_id
-                        WHERE u.deleted_at IS NOT NULL);
-
--- 5차 P1-4(legacy 정책): 002 시절의 삭제는 sessions를 먼저 지워 session-only
--- event의 소유 연결 증거(session_id)가 이미 끊겼다 — 어떤 orphan이 삭제된
--- 사용자의 것이었는지 재구성할 수 없다. fail-closed: 소유 증거가 없는
--- 이중 orphan(user_id·session_id 모두 NULL) event의 payload는 보존 근거가
--- 없으므로 전부 스크럽한다 (집계 축 event_type·created_at은 보존).
--- 부수효과로 정당한 익명 orphan payload도 지워진다 — 문서화된 트레이드오프
--- (docs/decisions/0004). 이후 생성되는 orphan은 위 트리거가 삭제 시점에
--- 스크럽하므로 이 정책은 1회성 backfill이다.
-UPDATE events SET payload = '{}'::jsonb, scrubbed_at = now()
- WHERE user_id IS NULL AND session_id IS NULL AND scrubbed_at IS NULL;
-
+-- ── 1) 기존 위반 데이터 정리 (구 003까지의 스크럽 집합에 없던 필드 포함) ────────
 UPDATE users SET
   nickname                = NULL,
   birth_info_enc          = NULL,
@@ -97,15 +75,16 @@ WHERE deleted_at IS NOT NULL
        OR consent_personalization
        OR consented_at IS NOT NULL
        OR last_login_at IS NOT NULL
-       OR provider_subject !~ '^deleted:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$');
+       OR provider_subject !~ '^deleted:[0-9a-f-]{36}$');
 
 DELETE FROM sessions s      USING users u WHERE s.user_id  = u.id AND u.deleted_at IS NOT NULL;
 DELETE FROM streaks st      USING users u WHERE st.user_id = u.id AND u.deleted_at IS NOT NULL;
 DELETE FROM user_fortunes f USING users u WHERE f.user_id  = u.id AND u.deleted_at IS NOT NULL;
+UPDATE events e SET user_id = NULL, payload = '{}'::jsonb
+  FROM users u WHERE e.user_id = u.id AND u.deleted_at IS NOT NULL;
 
--- ── 3) 행 불변식 확장: 003의 CHECK를 계약 필드까지 포함해 대체 ─────────────────
---       4차 P1-9: 익명 토큰은 정확한 UUID 형식만 인정 — 'deleted:' + 임의 36자
---       (예: 'a' 36개)는 익명화로 간주되지 않는다.
+-- ── 2) 행 불변식 확장: 003의 CHECK를 계약 필드까지 포함해 대체 ─────────────────
+--       검사 집합은 위 트리거의 스크럽 집합과 정확히 동일해야 한다.
 ALTER TABLE users DROP CONSTRAINT IF EXISTS deleted_users_are_scrubbed;
 ALTER TABLE users ADD CONSTRAINT deleted_users_are_scrubbed CHECK (
   deleted_at IS NULL
@@ -118,39 +97,16 @@ ALTER TABLE users ADD CONSTRAINT deleted_users_are_scrubbed CHECK (
     AND NOT consent_personalization
     AND consented_at IS NULL
     AND last_login_at IS NULL
-    AND provider_subject ~ '^deleted:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    AND provider_subject ~ '^deleted:[0-9a-f-]{36}$'
   )
 );
 
--- ── 4) events 스크럽 영속 불변식 (4차 P1-8) ────────────────────────────────────
---       스크럽된 행은 되돌릴 수 없다 — 삭제와 "동시"(행 잠금 대기 후 재평가) 또는
---       삭제 "후"의 payload/user_id 재기입 UPDATE는 CHECK 위반으로 거부된다.
-ALTER TABLE events DROP CONSTRAINT IF EXISTS events_scrubbed_frozen;
-ALTER TABLE events ADD CONSTRAINT events_scrubbed_frozen CHECK (
-  scrubbed_at IS NULL
-  OR (user_id IS NULL AND session_id IS NULL AND payload = '{}'::jsonb)
-);
-
--- 5차 P1-2: marker 자체의 불변성 — scrubbed_at을 NULL로 되돌리면 CHECK가
--- 무력화되므로, non-NULL → NULL 전이를 트리거로 거부한다 (되돌릴 수 없는 마커).
-CREATE OR REPLACE FUNCTION events_scrub_marker_immutable() RETURNS trigger
-LANGUAGE plpgsql
-SET search_path FROM CURRENT
-AS $fn$
-BEGIN
-  IF OLD.scrubbed_at IS NOT NULL AND NEW.scrubbed_at IS NULL THEN
-    RAISE EXCEPTION 'events.id=%: scrubbed_at 해제는 허용되지 않습니다 — 스크럽은 비가역입니다 (삭제 계약 C2)', OLD.id;
-  END IF;
-  RETURN NEW;
-END $fn$;
-
-DROP TRIGGER IF EXISTS trg_events_scrub_marker_immutable ON events;
-CREATE TRIGGER trg_events_scrub_marker_immutable
-  BEFORE UPDATE OF scrubbed_at ON events
-  FOR EACH ROW EXECUTE FUNCTION events_scrub_marker_immutable();
-
--- ── 5) 자식 행 유입 차단: 삭제된 사용자를 가리키는 신규 행 거부 ─────────────────
+-- ── 3) 자식 행 유입 차단: 삭제된 사용자를 가리키는 신규 행 거부 ─────────────────
 --       부모 행을 FOR SHARE로 잠근다 — 삭제 UPDATE(FOR NO KEY UPDATE)와 배타.
+--       미커밋 삭제와 동시 INSERT는 삭제 커밋 후 재평가(EvalPlanQual)로 거부되고,
+--       역순(자식 먼저)이면 삭제 UPDATE가 대기 후 스크럽 트리거가 정리한다.
+--       (events는 C2에 따라 user_id NULL 허용; purchases는 C3에 따라 기존 행
+--       보존 + 신규 유입만 거부.)
 CREATE OR REPLACE FUNCTION reject_rows_for_deleted_user() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path FROM CURRENT
@@ -165,32 +121,10 @@ BEGIN
   RETURN NEW;
 END $fn$;
 
--- sessions: 삭제 사용자 검사에 더해 소유자 "재배정"을 금지한다 (6차 P1).
--- 소유자를 NULL/다른 사용자로 바꾸면 삭제 시 event 스캔(session_id IN ...)이
--- 그 세션의 event를 놓쳐 스크럽이 우회됐다. 허용되는 전이는 익명 세션의
--- 로그인 바인딩(NULL→user, 삭제 사용자 검사 포함)뿐이다.
-CREATE OR REPLACE FUNCTION sessions_guard() RETURNS trigger
-LANGUAGE plpgsql
-SET search_path FROM CURRENT
-AS $fn$
-BEGIN
-  IF TG_OP = 'UPDATE' AND OLD.user_id IS NOT NULL
-     AND NEW.user_id IS DISTINCT FROM OLD.user_id THEN
-    RAISE EXCEPTION 'sessions.id=%: 소유자 재배정(%->%)은 허용되지 않습니다 — 삭제 스크럽 우회 방지 (soft-delete 불변식)', OLD.id, OLD.user_id, NEW.user_id;
-  END IF;
-  IF NEW.user_id IS NOT NULL THEN
-    PERFORM 1 FROM users WHERE id = NEW.user_id AND deleted_at IS NULL FOR SHARE;
-    IF NOT FOUND THEN
-      RAISE EXCEPTION 'sessions.user_id=%: 삭제되었거나 존재하지 않는 사용자입니다 — 신규 연결을 거부합니다 (soft-delete 불변식)', NEW.user_id;
-    END IF;
-  END IF;
-  RETURN NEW;
-END $fn$;
-
 DROP TRIGGER IF EXISTS trg_sessions_no_deleted_user ON sessions;
 CREATE TRIGGER trg_sessions_no_deleted_user
   BEFORE INSERT OR UPDATE OF user_id ON sessions
-  FOR EACH ROW EXECUTE FUNCTION sessions_guard();
+  FOR EACH ROW EXECUTE FUNCTION reject_rows_for_deleted_user();
 
 DROP TRIGGER IF EXISTS trg_streaks_no_deleted_user ON streaks;
 CREATE TRIGGER trg_streaks_no_deleted_user
@@ -202,80 +136,12 @@ CREATE TRIGGER trg_user_fortunes_no_deleted_user
   BEFORE INSERT OR UPDATE OF user_id ON user_fortunes
   FOR EACH ROW EXECUTE FUNCTION reject_rows_for_deleted_user();
 
--- events: user_id뿐 아니라 session_id의 "소유 사용자"도 잠그고 검증한다.
--- 5차 P1-3: session-only INSERT가 미커밋 삭제의 event 스캔 뒤에 끼어들면
--- user_id 검사만으로는 통과했다 — 세션 행(FOR SHARE)과 소유 사용자 행
--- (FOR SHARE)을 잠가 삭제 트랜잭션과 직렬화한다: 삭제가 먼저면 커밋 후
--- 재평가로 거부되고, INSERT가 먼저면 삭제의 스캔이 이를 포함해 스크럽한다.
--- 5차 P1-5: session_id UPDATE(재연결)도 같은 검증 대상이다.
--- 6차 P1: (a) event의 user와 session 소유자가 다르면 거부 — 교차 귀속은 삭제
--- 스캔의 사각을 만든다. (b) 잠금 순서 통일: 항상 users → sessions — 스크럽
--- 트리거(users 행 잠금 후 sessions 삭제)와 같은 순서라 역전 deadlock이 없다.
--- 소유자는 먼저 무잠금으로 읽어 검사 대상 사용자를 정하고, users 잠금 후
--- sessions를 잠그고 소유자가 그 사이 바뀌지 않았는지 재검증한다 (fail-closed).
-CREATE OR REPLACE FUNCTION events_guard() RETURNS trigger
-LANGUAGE plpgsql
-SET search_path FROM CURRENT
-AS $fn$
-DECLARE
-  _owner BIGINT;
-  _owner2 BIGINT;
-  _check_user BIGINT;
-BEGIN
-  IF NEW.session_id IS NOT NULL THEN
-    SELECT s.user_id INTO _owner FROM sessions s WHERE s.id = NEW.session_id;
-    IF NOT FOUND THEN
-      RAISE EXCEPTION 'events.session_id=%: 존재하지 않는 세션입니다 — 연결을 거부합니다', NEW.session_id;
-    END IF;
-    IF NEW.user_id IS NOT NULL AND _owner IS DISTINCT FROM NEW.user_id THEN
-      RAISE EXCEPTION 'events: user_id=%와 session 소유자=%가 다릅니다 — 교차 귀속을 거부합니다 (soft-delete 불변식)', NEW.user_id, _owner;
-    END IF;
-    _check_user := COALESCE(NEW.user_id, _owner);
-  ELSE
-    _check_user := NEW.user_id;
-  END IF;
-  IF _check_user IS NOT NULL THEN
-    PERFORM 1 FROM users WHERE id = _check_user AND deleted_at IS NULL FOR SHARE;
-    IF NOT FOUND THEN
-      RAISE EXCEPTION 'events: user %는 삭제되었거나(삭제 중이거나) 존재하지 않습니다 — 연결을 거부합니다 (soft-delete 불변식)', _check_user;
-    END IF;
-  END IF;
-  IF NEW.session_id IS NOT NULL THEN
-    SELECT s.user_id INTO _owner2 FROM sessions s WHERE s.id = NEW.session_id FOR SHARE OF s;
-    IF NOT FOUND THEN
-      RAISE EXCEPTION 'events.session_id=%: 세션이 사라졌습니다 — 연결을 거부합니다', NEW.session_id;
-    END IF;
-    IF _owner2 IS DISTINCT FROM _owner THEN
-      RAISE EXCEPTION 'events.session_id=%: 검사 중 세션 소유자가 바뀌었습니다(%->%) — 연결을 거부합니다 (fail-closed)', NEW.session_id, _owner, _owner2;
-    END IF;
-  END IF;
-  RETURN NEW;
-END $fn$;
-
 DROP TRIGGER IF EXISTS trg_events_no_deleted_user ON events;
 CREATE TRIGGER trg_events_no_deleted_user
-  BEFORE INSERT OR UPDATE OF user_id, session_id ON events
-  FOR EACH ROW EXECUTE FUNCTION events_guard();
-
--- purchases: 신규 유입 거부(INSERT)는 위와 동일하되, user_id "재배정"은 대상이
--- 활성 사용자라도 금지한다 — 거래기록의 귀속은 불변이다 (4차 P2).
-CREATE OR REPLACE FUNCTION purchases_user_id_immutable() RETURNS trigger
-LANGUAGE plpgsql
-SET search_path FROM CURRENT
-AS $fn$
-BEGIN
-  IF NEW.user_id IS DISTINCT FROM OLD.user_id THEN
-    RAISE EXCEPTION 'purchases.id=%: user_id 재배정(%->%)은 허용되지 않습니다 — 거래기록 귀속 불변 (삭제 계약 C3)', OLD.id, OLD.user_id, NEW.user_id;
-  END IF;
-  RETURN NEW;
-END $fn$;
+  BEFORE INSERT OR UPDATE OF user_id ON events
+  FOR EACH ROW EXECUTE FUNCTION reject_rows_for_deleted_user();
 
 DROP TRIGGER IF EXISTS trg_purchases_no_deleted_user ON purchases;
 CREATE TRIGGER trg_purchases_no_deleted_user
-  BEFORE INSERT ON purchases
+  BEFORE INSERT OR UPDATE OF user_id ON purchases
   FOR EACH ROW EXECUTE FUNCTION reject_rows_for_deleted_user();
-
-DROP TRIGGER IF EXISTS trg_purchases_user_id_immutable ON purchases;
-CREATE TRIGGER trg_purchases_user_id_immutable
-  BEFORE UPDATE OF user_id ON purchases
-  FOR EACH ROW EXECUTE FUNCTION purchases_user_id_immutable();

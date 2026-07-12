@@ -11,8 +11,12 @@
 --
 -- 원칙: 수집 최소화(IP/UA 미저장), 삭제 요청 지원(users.deleted_at), 멱등 적용
 -- (IF NOT EXISTS — 재실행 안전). PostgreSQL 13+ (gen_random_uuid 내장) 가정.
-
-BEGIN;
+--
+-- 리뷰 16차 P1: 역사적 BEGIN/COMMIT 제거 — transaction은 runner(db_migrate.sh)가
+-- 소유하며, 내부 COMMIT은 runner의 single transaction을 중도 종결시켜 부분 commit을
+-- 만들었다. runner는 이제 transaction control을 검출해 거부하므로 이 파일에서
+-- 제거한다. 이 변경은 "새 DB의 fresh apply" 경로에만 영향을 준다 — 이미 적용된
+-- DB(live 포함)는 ledger(version=001_init) 기준으로 skip되어 재실행되지 않는다.
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version     TEXT PRIMARY KEY,
@@ -108,7 +112,6 @@ CREATE TABLE IF NOT EXISTS purchases (
 
 CREATE INDEX IF NOT EXISTS idx_purchases_user ON purchases (user_id);
 
+-- (역사적 잔재) ledger 기록 — 소유권은 runner에 있으나 ON CONFLICT로 무해·멱등.
 INSERT INTO schema_migrations (version) VALUES ('001_init')
 ON CONFLICT (version) DO NOTHING;
-
-COMMIT;
