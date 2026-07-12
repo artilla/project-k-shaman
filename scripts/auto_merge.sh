@@ -585,9 +585,23 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   #   - 삭제 항목 복원: ln(no-clobber, 원자적)으로만 생성 — 그 사이 생긴 파일을
   #     덮지 않는다.
   # 반환: 0=완전 복구(최종 clean), 1=ref-only(잔여 변경 보존).
+  #
+  # 리뷰 16차 P1(open-FD late write): blob 대조를 통과한 캡처본이라도, 그 inode에
+  # 열린 FD가 남아 있으면 폐기(rm) 후의 늦은 write가 orphan inode로 사라진다 —
+  # 폐기 직전 열린 FD를 검사해, 열려 있으면 원복·보존하고 REF_ONLY로 격하한다.
+  # 판별 도구(lsof/fuser)가 없으면 열린 것으로 간주한다 (fail-closed).
+  _fd_busy() {
+    if command -v lsof >/dev/null 2>&1; then
+      lsof -t -- "$1" >/dev/null 2>&1
+    elif command -v fuser >/dev/null 2>&1; then
+      fuser -s -- "$1" 2>/dev/null
+    else
+      return 0
+    fi
+  }
   _sync_worktree_after_cas() {
     [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$BASE_BRANCH" ] || return 1
-    local _now _line _st _p _want _have _tmp _bak _mode _perm _rc=0
+    local _now _line _st _p _want _have _tmp _bak _mode _perm _idx _headb _rc=0
     _now="$(_wt_status_or_fail 2>/dev/null)" || return 1
     [ -z "$_now" ] && return 0
     case "$_now" in *'"'*) return 1 ;; esac
@@ -617,6 +631,26 @@ EOF
       _p="${_line#???}"
       # 리뷰 15차 P1: index 동기화도 경로 단위(git reset -- <path>) — 전역
       # read-tree --reset은 rollback과 무관한 동시 index-only staged 변경까지 지웠다.
+      # 리뷰 16차 P1: "같은 경로"의 동시 index-only staged 변경도 지우지 않는다 —
+      # index 항목이 정확히 merge 잔상(MERGE_COMMIT blob) 또는 이미 HEAD와 일치할
+      # 때만 reset한다. 다른 값이면(그 사이 누가 stage) 보존하고 REF_ONLY로 격하.
+      _want=""
+      case "$_st" in
+        'M '|'A ') _want="$(git rev-parse -q --verify "${MERGE_COMMIT}:${_p}" 2>/dev/null)" || { _rc=1; continue; } ;;
+      esac
+      _idx="$(git ls-files -s -- "$_p" 2>/dev/null | awk '{print $2; exit}')"
+      case "$_st" in
+        'M ')
+          _headb="$(git rev-parse -q --verify "HEAD:${_p}" 2>/dev/null || true)"
+          if [ "$_idx" != "$_want" ] && [ "$_idx" != "$_headb" ]; then _rc=1; continue; fi
+          ;;
+        'A ')
+          if [ -n "$_idx" ] && [ "$_idx" != "$_want" ]; then _rc=1; continue; fi
+          ;;
+        'D ')
+          if [ -n "$_idx" ]; then _rc=1; continue; fi
+          ;;
+      esac
       git reset -q "HEAD" -- "$_p" >/dev/null 2>&1 || { _rc=1; continue; }
       case "$_st" in
         'M ')
@@ -634,6 +668,12 @@ EOF
             mv -f "$_bak" "$_p" 2>/dev/null || true   # 동시 교체를 캡처함 — 원복·보존
             rm -f "$_tmp"; _rc=1; continue
           fi
+          # 리뷰 16차 P1: 폐기 직전 open-FD 검사 — 열린 FD의 늦은 write를 orphan
+          # inode로 잃지 않는다. 열려 있으면 원복·보존 (REF_ONLY 격하).
+          if _fd_busy "$_bak"; then
+            mv -f "$_bak" "$_p" 2>/dev/null || true
+            rm -f "$_tmp"; _rc=1; continue
+          fi
           rm -f "$_bak"
           # 캡처~복원 사이 새로 생긴 파일은 덮지 않는다 (ln no-clobber) — 실패 시 보존.
           if ! ln "$_tmp" "$_p" 2>/dev/null; then _rc=1; fi
@@ -647,6 +687,10 @@ EOF
           if ! mv "$_p" "$_bak" 2>/dev/null; then _rc=1; continue; fi
           if [ "$(git hash-object -- "$_bak" 2>/dev/null)" != "$_want" ]; then
             mv -f "$_bak" "$_p" 2>/dev/null || true   # 동시 교체를 캡처함 — 원복·보존
+            _rc=1
+          elif _fd_busy "$_bak"; then
+            # 리뷰 16차 P1: 열린 FD 감지 — 늦은 write 유실 방지, 원복·보존.
+            mv -f "$_bak" "$_p" 2>/dev/null || true
             _rc=1
           else
             rm -f "$_bak"

@@ -1103,3 +1103,102 @@ EOF
   git -C "$d" diff --cached --name-only | grep -q '^staged-file.md$'
   [ -f "$d/staged-file.md" ]
 }
+
+# ── 리뷰 16차 P1 회귀 ─────────────────────────────────────────────────────────
+
+# P1: blob 대조를 통과한 캡처본이라도 열린 FD가 남아 있으면 폐기하지 않는다 —
+# 폐기(rm) 후 그 FD의 늦은 write는 orphan inode로 사라졌다(silent loss).
+@test "execute: open FD on merge-added path defers discard - late write is not lost" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  local base
+  base="$(git -C "$d" rev-parse main)"
+
+  command -v lsof >/dev/null 2>&1 || command -v fuser >/dev/null 2>&1 \
+    || skip "lsof/fuser 없음 — open-FD 가드는 fail-closed(REF_ONLY)로만 동작"
+
+  # post-merge run_checks: merge-added 파일에 FD를 연 writer를 남겨 두고 실패 →
+  # rollback 창에서 그 파일의 폐기가 시도된다.
+  cat > "$TEST_HOME/mock_checks_fd.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/fd.flag" ]; then touch "$TEST_HOME/fd.flag"; exit 0; fi
+# merge-added 파일에 append FD를 연 채 대기하다 늦게 쓰는 writer.
+# set -m: writer를 독립 프로세스 그룹으로 — post-check 그룹 회수에서 살아남아
+# "외부 프로세스가 FD를 쥔" 실제 시나리오를 재현한다.
+set -m
+bash -c 'exec 3>>"$d/docs/file-1.md"; echo held > "$TEST_HOME/fd.held"; j=0; while [ ! -f "$TEST_HOME/fd.release" ] && [ "\$j" -lt 600 ]; do sleep 0.05; j=\$((j+1)); done; echo LATE-WRITE >&3' &
+echo \$! > "$TEST_HOME/fd.pid"
+i=0; while [ ! -f "$TEST_HOME/fd.held" ] && [ "\$i" -lt 100 ]; do sleep 0.05; i=\$((i+1)); done
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_fd.sh"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_fd.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [ "$(git -C "$d" rev-parse main)" = "$base" ]
+  # 열린 FD가 있으므로 폐기하지 않고 보존 — REF_ONLY로 정직하게 기록
+  grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+  # writer의 늦은 write가 유실되지 않았다 (경로의 inode가 유지됨).
+  # 시간 의존 없음: release 신호 후 write를 관찰한다 (게이트 부하 무관 — 결정적).
+  touch "$TEST_HOME/fd.release"
+  [ -f "$d/docs/file-1.md" ]
+  local k=0
+  while ! grep -q 'LATE-WRITE' "$d/docs/file-1.md" 2>/dev/null && [ "$k" -lt 100 ]; do sleep 0.05; k=$((k+1)); done
+  grep -q 'LATE-WRITE' "$d/docs/file-1.md"
+  [ -z "$(find "$d" -name '.amrb*' 2>/dev/null)" ]
+}
+
+# P1: "같은 경로"의 동시 index-only staged 변경도 rollback의 경로 단위 reset이
+# 지우지 않는다 — index 항목이 merge 잔상이 아닐 때는 보존하고 REF_ONLY 격하.
+@test "execute: same-path index-only staged change survives rollback index sync" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  local base
+  base="$(git -C "$d" rev-parse main)"
+
+  cat > "$TEST_HOME/mock_checks_sp.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/sp.flag" ]; then touch "$TEST_HOME/sp.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_sp.sh"
+
+  # index 동기화 직전 창(ls-files 첫 호출)에 같은 경로(docs/file-1.md)에
+  # foreign 내용을 stage — 과거에는 git reset -- <path>가 조용히 지웠다.
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$TEST_HOME/spbin"
+  cat > "$TEST_HOME/spbin/git" <<MOCK
+#!/usr/bin/env bash
+if [ "\$1" = "ls-files" ] && [ ! -f "$TEST_HOME/sp.injected" ]; then
+  touch "$TEST_HOME/sp.injected"
+  _b="\$(printf 'foreign-staged-content\n' | "$realgit" -C "$d" hash-object -w --stdin)"
+  "$realgit" -C "$d" update-index --add --cacheinfo "100644,\$_b,docs/file-1.md"
+fi
+exec "$realgit" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/spbin/git"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/spbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_sp.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [ "$(git -C "$d" rev-parse main)" = "$base" ]
+  # 같은 경로의 staged 항목이 reset으로 지워지지 않았다
+  git -C "$d" diff --cached --name-only | grep -q '^docs/file-1.md$'
+  [ "$(git -C "$d" show ":docs/file-1.md")" = "foreign-staged-content" ]
+  grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+}
