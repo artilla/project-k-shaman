@@ -378,3 +378,76 @@ SQL
   [ "$(_psql "select count(*) from events where user_id=1")" = "0" ]
   [ "$(_psql "select (deleted_at is not null) from users where id=1")" = "t" ]
 }
+
+@test "DB15: migration-issued SET LOCAL search_path cannot divert the ledger - runner refs are schema-qualified" {
+  # 리뷰 16차 P1(4차): migration이 SET LOCAL search_path=other를 실행하면
+  # unqualified ledger INSERT가 other.schema_migrations로 갔다 — guard·INSERT·
+  # 조회 전부 schema-qualified라 이제 영향받지 않는다.
+  cat > "$TROOT/db/migrations/994_hijack_zz_test.sql" <<'SQL'
+CREATE SCHEMA IF NOT EXISTS sneaky;
+CREATE TABLE IF NOT EXISTS sneaky.schema_migrations (
+  version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+SET LOCAL search_path = sneaky;
+CREATE TABLE hijack_probe (id INT);
+SQL
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  # ledger는 public에 기록됐고, sneaky 쪽 위장 ledger에는 기록되지 않았다
+  [ "$(_psql "select count(*) from public.schema_migrations where version='994_hijack_zz_test'")" = "1" ]
+  [ "$(_psql "select count(*) from sneaky.schema_migrations")" = "0" ]
+  # 재실행도 정확히 skip (조회 역시 qualified)
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"skip  994_hijack_zz_test"* ]]
+}
+
+@test "DB16: pristine 001 applies via checksum-pinned legacy path - tampered 001 is refused" {
+  # 리뷰 16차 P1(4차): 공개 001 bytes는 불변 — 알려진 checksum일 때만 legacy
+  # BEGIN/COMMIT 라인을 실행 시점에 제거한다. bytes가 다르면 그 경로를 타지
+  # 않고 서버가 transaction control을 거부한다.
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"legacy BEGIN/COMMIT"* ]]
+  [ "$(_psql "select count(*) from schema_migrations where version='001_init'")" = "1" ]
+
+  # 변조된 001 (주석 한 줄 추가 → checksum 불일치) → fresh DB에서 거부
+  TEST_DB2="${TEST_DB}b"
+  _as_pg "'$PGBIN/createdb' -h 127.0.0.1 -p $PGT_PORT -U postgres $TEST_DB2"
+  echo "DATABASE_URL=postgres://postgres:x@127.0.0.1:${PGT_PORT}/${TEST_DB2}?schema=public" > "$ENVF"
+  printf -- '-- tampered\n' >> "$TROOT/db/migrations/001_init.sql"
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"legacy BEGIN/COMMIT"* ]]
+  PGOPTIONS='-c client_min_messages=warning' "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB2" -tAc \
+    "select coalesce((select count(*) from schema_migrations),0)" 2>/dev/null | grep -qE '^0?$'
+}
+
+@test "DB17: session-only events are scrubbed, scrub is a frozen invariant, anonymized token is exact-UUID" {
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "insert into users (provider, provider_subject) values ('kakao','u1')"
+  _psql "insert into sessions (user_id) values (1)"
+  # 리뷰 16차 P1-7(4차): user_id 없이 session으로만 귀속된 event
+  _psql "insert into events (event_type, session_id, payload) select 'visit', id, '{\"pii\":\"session\"}'::jsonb from sessions where user_id=1"
+  _psql "update users set deleted_at=now() where id=1"
+  # session-only event도 스크럽됐다 (세션 삭제 전에 수행)
+  [ "$(_psql "select payload::text from events where event_type='visit'")" = "{}" ]
+  [ "$(_psql "select (scrubbed_at is not null) from events where event_type='visit'")" = "t" ]
+  # 리뷰 16차 P1-8(4차): 스크럽은 영속 불변식 — 삭제 후 payload 재기입 거부
+  run _psql "update events set payload='{\"pii\":\"late\"}'::jsonb where event_type='visit'"
+  [ "$status" -ne 0 ]
+  run _psql "update events set user_id=1 where event_type='visit'"
+  [ "$status" -ne 0 ]
+  # 리뷰 16차 P1-9(4차): 'deleted:' + 임의 36자는 익명 토큰으로 인정되지 않는다
+  run _psql "insert into users (provider, provider_subject, deleted_at) values ('kakao', 'deleted:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', now())"
+  [ "$status" -ne 0 ]
+  # 정상 삭제 경로의 토큰은 정확한 UUID 형식이다
+  [ "$(_psql "select provider_subject ~ '^deleted:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\$' from users where id=1")" = "t" ]
+  # 리뷰 16차 P2(4차): purchases.user_id 재배정 금지 (활성 사용자로도)
+  _psql "insert into users (provider, provider_subject) values ('kakao','u2')"
+  _psql "insert into purchases (user_id, product_code, amount_krw) values (3, 'p1', 1000)"
+  _psql "insert into users (provider, provider_subject) values ('kakao','u3')"
+  run _psql "update purchases set user_id=4 where user_id=3"
+  [ "$status" -ne 0 ]
+}

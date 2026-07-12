@@ -17,13 +17,21 @@
 다시 로그인하면 **완전히 새로운 사용자 행**이 생성된다. 이전 데이터와의 연결은
 불가능하다 (§12 "삭제 제공" 취지).
 
-### C2. events — user_id 절단 + payload 스크럽 (리뷰 16차 P1-9 반영)
+### C2. events — user_id 절단 + payload 스크럽 + scrubbed_at 마커 (리뷰 16차 P1-9·4차 P1-7·8 반영)
 
-삭제 시 해당 사용자의 `events.user_id`를 NULL로 절단하고 **payload를 `{}`로
-스크럽**한다. 당초 "payload 무익명정보" 전제로 payload 유지를 승인했으나,
+삭제 시 해당 사용자의 events를 스크럽한다: `user_id` NULL, `payload` `{}`,
+`scrubbed_at` 기록. 당초 "payload 무익명정보" 전제로 payload 유지를 승인했으나,
 현재 `/api/event`는 임의 event 필드를 보존하고 payload schema 검증이 미구현이라
-그 전제가 성립하지 않는다 — fail-closed로 payload까지 지운다. event_type·
-created_at 등 집계 축은 보존되어 익명 통계(리텐션·퍼널 카운트)는 유지된다.
+그 전제가 성립하지 않는다 — fail-closed로 payload까지 지운다.
+
+- 대상은 `user_id` 귀속 events뿐 아니라 **삭제 사용자의 session으로만 귀속된
+  events도 포함**하며, 세션 삭제 "전"에 수행한다 (4차 P1-7).
+- 스크럽은 일회성 이벤트가 아니라 **영속 불변식**: `scrubbed_at`이 설정된 행은
+  CHECK(`events_scrubbed_frozen`)로 `user_id IS NULL AND payload = '{}'`가
+  강제된다 — 삭제와 동시(행 잠금 대기 후 재평가) 또는 삭제 후의 payload 재기입은
+  거부된다 (4차 P1-8).
+
+event_type·created_at 등 집계 축은 보존되어 익명 통계는 유지된다.
 후속: `/api/event` payload schema 검증이 구현되어 "개인정보 미포함"이 스키마
 수준에서 보장되면 별도 마이그레이션으로 payload 보존으로 완화할 수 있다.
 
@@ -45,13 +53,19 @@ created_at 등 집계 축은 보존되어 익명 통계(리텐션·퍼널 카운
 비가역이며, 돌아오는 사용자는 C1에 따라 새 계정이 된다. 재동의·재개인화도
 새 계정에서 처음부터 시작한다.
 
-## 불변식 (003이 스키마 수준에서 강제)
+## 불변식 (004가 스키마 수준에서 강제)
 
 1. `deleted_at IS NOT NULL` ⇒ 모든 개인 필드 NULL + `consent=false` +
-   `provider_subject LIKE 'deleted:%'` (CHECK — 재기입 UPDATE·삭제 상태 INSERT 거부)
+   `provider_subject ~ '^deleted:<uuid>$'` — 정확한 UUID 형식 매칭(4차 P1-9;
+   접두사 매칭은 legacy subject 오인 위험) (CHECK — 재기입 UPDATE·삭제 상태
+   INSERT 거부)
 2. 삭제된 사용자를 가리키는 sessions/streaks/user_fortunes/events/purchases
-   신규 행(INSERT 및 user_id 변경 UPDATE) 거부 (트리거)
-3. 삭제 전이 시점: 개인 필드 스크럽 + 자식 행 정리 + events 절단 (트리거)
+   신규 행 거부 — 부모 행 FOR SHARE 잠금으로 미커밋 삭제와도 직렬화 (트리거)
+3. `events.scrubbed_at IS NOT NULL` ⇒ `user_id IS NULL AND payload = '{}'`
+   (CHECK — 스크럽의 영속성)
+4. purchases.user_id 재배정 금지 — 거래기록 귀속 불변 (트리거)
+5. 삭제 전이 시점: 개인 필드 스크럽·익명화 + 자식 행 정리 + events(세션 귀속
+   포함) 스크럽 (트리거)
 
 ## 남은 후속 (P2, 별도 티켓)
 
