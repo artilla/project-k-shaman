@@ -919,11 +919,13 @@ cycle_one() {
   local id; id=$(ticket_id_from_path "$ticket")
   # 리뷰 16차 P1(5차): 사이클 소유 커밋의 "생성 시점 귀속" — 이 사이클(페르소나
   # 세션·재프롬프트·telemetry)이 만드는 모든 커밋의 committer를 사이클 고유
-  # identity로 고정한다. author는 사용자 identity 그대로 유지된다. 소유 목록은
-  # 시간 창(rev-list 범위)이 아니라 이 committer로 판별하므로, 사이클 도중
-  # 끼어든 외부 sibling 커밋(기본 identity)은 owned에 들어가지 않는다.
+  # identity로 고정한다. author는 사용자 identity 그대로 유지된다.
+  # 리뷰 16차 P1(6차): identity는 "이번 실행" 고유(pid+난수 논스) — 같은 티켓의
+  # 과거/다른 실행과도 겹치지 않는다. 수집은 정규식이 아니라 정확 일치로 한다.
+  local cycle_committer_email
+  cycle_committer_email="ralph-cycle-${id}-$$-${RANDOM}${RANDOM}@local"
   export GIT_COMMITTER_NAME="ralph-cycle"
-  export GIT_COMMITTER_EMAIL="ralph-cycle-${id}@local"
+  export GIT_COMMITTER_EMAIL="$cycle_committer_email"
   local cur_status; cur_status=$(field_of "$ticket" status)
   local safe; safe=$(field_of "$ticket" safe || true)
 
@@ -1467,12 +1469,14 @@ EOF
   if [ "$GIT_REPO" = "1" ] && [ -n "$pre_head" ]; then
     # 리뷰 16차 P1(5차): 범위 전체가 아니라 "이 사이클 committer"의 커밋만 —
     # 외부 sibling 커밋은 committer identity가 달라 제외된다.
-    # 리뷰 16차 P2(5차): rev-list 실패를 빈 목록으로 위장하지 않는다 — 실패 시
+    # 리뷰 16차 P1(6차): --committer 정규식 부분 일치는 우리 토큰을 "포함"하는
+    # foreign committer도 매칭했다 — committer email "정확 일치"로 필터링한다.
+    # 리뷰 16차 P2(5차): 수집 실패를 빈 목록으로 위장하지 않는다 — 실패 시
     # post 태그를 만들지 않아 rollback이 fail-closed로 거부하게 한다.
-    if ! owned_oids="$(git rev-list --committer="ralph-cycle-${id}@local" "${pre_head}..HEAD" 2>/dev/null)"; then
+    if ! owned_oids="$(git log --format='%H %ce' "${pre_head}..HEAD" 2>/dev/null         | awk -v e="$cycle_committer_email" '$2 == e { print $1 }')"; then
       owned_oids=""
       owned_capture_failed=1
-      echo "⚠️  소유 커밋 목록 수집 실패(rev-list) — post 태그를 기록하지 않습니다 (자동 rollback 불가, fail-closed)."
+      echo "⚠️  소유 커밋 목록 수집 실패 — post 태그를 기록하지 않습니다 (자동 rollback 불가, fail-closed)."
     fi
   fi
 
