@@ -328,3 +328,83 @@ WRAP
   # C1 역커밋은 한 번만 존재한다 (중복 revert 없음)
   [ "$(git -C "$repo" log --format=%s | grep -c 'Revert "T200: c1"')" = "1" ]
 }
+
+@test "R15: forged 'This reverts commit' body without matching patch -> refused, not treated as already-reverted" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 6차 P1-6: post 이후에 소유 OID를 본문에 "적기만 한" 커밋 — 실제 역패치가
+  # 아니다. 문자열 매칭만 믿으면 이를 "이미 되돌려짐"으로 오인해 소유 커밋을
+  # 건너뛰고 성공(태그 삭제)까지 보고한다. patch-id 검증은 이를 외부 커밋으로
+  # 판정해 거부해야 한다.
+  local owned
+  owned="$(git -C "$repo" rev-parse HEAD)"
+  echo "not-a-revert" > "$repo/fake.txt"
+  git -C "$repo" add fake.txt
+  git -C "$repo" commit -q -m "chore: misc
+
+This reverts commit ${owned}."
+
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"소유 역커밋이 아닌"* ]]
+  # 아무것도 되돌려지지 않았고(오인 스킵 없음) 위조 커밋 산출물도 보존
+  grep -q "v2" "$repo/file.txt"
+  [ -f "$repo/fake.txt" ]
+  # 종점 기록은 삭제되지 않았다 (성공 오보 없음)
+  git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+}
+
+@test "R16: foreign staged path during revert conflict -> auto --abort refused, staged change preserved" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # R12와 같은 충돌 구성: annotation 역순 → 첫 revert(A: v1→v2)가 최신 v3와 충돌.
+  local A B
+  A="$(git -C "$repo" rev-parse HEAD)"
+  echo "v3" > "$repo/file.txt"
+  git -C "$repo" add file.txt
+  git -C "$repo" commit -q -m "T200: second change"
+  B="$(git -C "$repo" rev-parse HEAD)"
+  git -C "$repo" tag -f -a "cycle/T200-post" -m "owned-commits
+$A
+$B"
+
+  # 충돌 발생 직후(스크립트의 --abort 전에) 무관한 경로를 stage하는 wrapper —
+  # 6차 P1-7: --abort는 index를 통째로 되돌려 이 staged 변경을 파괴한다.
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin3"
+  cat > "$repo/gbin3/git" <<WRAP
+#!/usr/bin/env bash
+if [ "\$1" = "revert" ] && [ "\$2" != "--abort" ]; then
+  "$realgit" "\$@"
+  rc=\$?
+  if [ "\$rc" -ne 0 ] && [ ! -f "$repo/.r16" ]; then
+    touch "$repo/.r16"
+    echo "foreign staged content" > "$repo/foreign-staged.txt"
+    "$realgit" add foreign-staged.txt
+  fi
+  exit \$rc
+fi
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin3/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin3:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"무관한 staged"* ]]
+  [[ "$output" == *"git revert --abort"* ]]
+  # 자동 abort가 실행되지 않았다 — sequencer 상태는 남고, foreign staged는 보존
+  [ -e "$repo/.git/REVERT_HEAD" ]
+  run git -C "$repo" diff --cached --name-only
+  [[ "$output" == *"foreign-staged.txt"* ]]
+  [ -f "$repo/foreign-staged.txt" ]
+  grep -q "foreign staged content" "$repo/foreign-staged.txt"
+
+  # 수동 절차(지시대로): 무관 staged를 치우고 abort → 정상 상태 복귀
+  git -C "$repo" reset -q -- foreign-staged.txt
+  git -C "$repo" revert --abort
+  [ ! -e "$repo/.git/REVERT_HEAD" ]
+  grep -q "v3" "$repo/file.txt"
+  # 무관 파일은 여전히 존재 (untracked로 보존)
+  [ -f "$repo/foreign-staged.txt" ]
+}

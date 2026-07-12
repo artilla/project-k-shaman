@@ -112,8 +112,11 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   fi
 
   if [ "$MODE_ROLLBACK" = "revert" ]; then
-    # 소유 OID 고정 — post 태그(고정 OID) annotation에서 읽는다.
-    OWNED="$(git tag -l --format='%(contents)' "$POST_TAG" 2>/dev/null | grep -E '^[0-9a-f]{40}$' || true)"
+    # 소유 OID 고정 — 태그 "이름" 재조회는 그 사이 태그 이동 시 다른 annotation을
+    # 읽는 TOCTOU (6차 P1-5). 해석 시점에 고정한 tag object OID에서 직접 읽는다.
+    # (annotated tag object의 message에서 OID 추출; lightweight/비태그 객체면
+    # cat-file tag가 실패 → OWNED 빈 값 → 아래 fail-closed 거부)
+    OWNED="$(git cat-file tag "$POST_TAGOBJ" 2>/dev/null | grep -E '^[0-9a-f]{40}$' || true)"
     if [ -z "$OWNED" ]; then
       echo "❌ ${POST_TAG}에 소유 커밋 목록(annotation)이 없습니다 — 자동 롤백 불가 (구 형식/수동 태그, fail-closed). 수동 선별 revert:" >&2
       git log --format='   git revert %h  # %s' "${PRE_OID}..HEAD" >&2
@@ -141,9 +144,20 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     ALREADY=""
     if [ "$POST_OID" != "$HEAD_OID" ]; then
       for c in $(git rev-list "${POST_OID}..HEAD" 2>/dev/null); do
+        # 6차 P1-6: "This reverts commit <oid>" 문자열은 아무 커밋이나 본문에 위조할
+        # 수 있다 — 문자열은 후보 선별로만 쓰고, 실제 역커밋인지는 patch-id로 검증한다:
+        # 소유 커밋의 역방향 diff(o→o^)와 후보 커밋의 diff(c^→c)의 stable patch-id가
+        # 일치해야만 "이미 되돌려짐"으로 인정. 불일치(위조·충돌 수동해소 등)는 외부
+        # 커밋으로 간주해 거부한다 (fail-closed; 우리 스크립트의 revert는 무충돌
+        # 성공만 남기므로 정상 재개 경로에서는 항상 일치한다).
         _rvof=""
+        _cbody="$(git log -1 --format=%B "$c" 2>/dev/null || true)"
         for o in $OWNED; do
-          if git log -1 --format=%B "$c" | grep -q "This reverts commit ${o}"; then _rvof="$o"; break; fi
+          case "$_cbody" in *"This reverts commit ${o}"*) ;; *) continue ;; esac
+          _pid_o="$(git diff "$o" "$o^" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1; exit}' || true)"
+          _pid_c="$(git diff "$c^" "$c" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1; exit}' || true)"
+          if [ -n "$_pid_o" ] && [ "$_pid_o" = "$_pid_c" ]; then _rvof="$o"; fi
+          break
         done
         if [ -z "$_rvof" ]; then
           echo "❌ ${POST_TAG} 이후에 소유 역커밋이 아닌 커밋(${c})이 있습니다 — 자동 롤백을 거부합니다 (fail-closed)." >&2
@@ -159,13 +173,38 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     # 실패·신호 복구: sequencer 상태(REVERT_HEAD·staged 역변경)는 --abort로만
     # 정리한다 — 전역 reset --hard는 초기 clean 검사 이후 들어온 동시 tracked
     # 변경까지 파괴했다 (5차 P1-7). abort로 정리가 안 되면 지시만 남기고 중단.
-    _rb_recover() {
+    # 6차 P1-7: 충돌 후 index에는 revert 자신의 staged 역변경(실패 커밋의 변경
+    # 경로 부분집합)뿐 아니라, 그 사이 다른 프로세스가 올린 무관한 staged 경로가
+    # 있을 수 있다 — --abort는 index를 통째로 되돌려 이를 파괴한다. staged 경로가
+    # 실패 커밋의 변경 경로를 벗어나면 자동 abort를 거부하고 수동 지시만 남긴다.
+    _rb_recover() {  # $1=실패(중단)한 소유 커밋 OID ("": 판단 불가 → abort 시도)
+      _fc="${1:-}"
+      _gd="$(git rev-parse --git-dir 2>/dev/null || true)"
+      if [ -n "$_gd" ] && [ -e "${_gd}/REVERT_HEAD" ] && [ -n "$_fc" ]; then
+        _touched="$(git diff-tree --no-commit-id --name-only -r "$_fc" 2>/dev/null || true)"
+        _staged="$(git diff --cached --name-only 2>/dev/null || true)"
+        _foreign=""
+        while IFS= read -r _p; do
+          [ -n "$_p" ] || continue
+          printf '%s\n' "$_touched" | grep -Fxq -- "$_p" || _foreign="${_foreign}     ${_p}
+"
+        done <<RB_EOF
+$_staged
+RB_EOF
+        if [ -n "$_foreign" ]; then
+          echo "⚠️  revert 충돌 상태의 index에 이 롤백과 무관한 staged 경로가 있습니다 — 자동 'git revert --abort'가 이를 파괴할 수 있어 실행하지 않습니다 (fail-closed):" >&2
+          printf '%s' "$_foreign" >&2
+          echo "   무관한 staged 변경을 commit/stash로 치운 뒤 'git revert --abort'를 수동 실행하고, 스크립트를 재실행하세요 (이미 되돌린 커밋은 건너뜁니다)." >&2
+          return 0
+        fi
+      fi
       git revert --abort >/dev/null 2>&1 || true
-      if [ -e "$(git rev-parse --git-dir 2>/dev/null)/REVERT_HEAD" ]; then
+      if [ -n "$_gd" ] && [ -e "${_gd}/REVERT_HEAD" ]; then
         echo "⚠️  revert 중단 상태 자동 정리 실패 — 'git revert --abort'를 수동 실행하세요." >&2
       fi
     }
-    trap '_rb_recover; echo "❌ 신호로 중단됨 — revert 잔여 상태를 정리했습니다. 재실행하면 이미 되돌린 커밋은 건너뜁니다." >&2; exit 130' INT TERM HUP
+    _rb_current=""
+    trap '_rb_recover "$_rb_current"; echo "❌ 신호로 중단됨 — revert 잔여 상태 정리를 시도했습니다. 재실행하면 이미 되돌린 커밋은 건너뜁니다." >&2; exit 130' INT TERM HUP
 
     _rb_done=""
     _rb_failed=""
@@ -178,19 +217,21 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
           continue
           ;;
       esac
+      _rb_current="$c"
       if git revert --no-edit "$c" >/dev/null 2>&1; then
         _rb_done="${_rb_done}${c}
 "
       else
         _rb_failed="$c"
-        _rb_recover
+        _rb_recover "$c"
         break
       fi
+      _rb_current=""
     done
     trap - INT TERM HUP
 
     if [ -n "$_rb_failed" ]; then
-      echo "❌ ${_rb_failed} revert 실패(충돌 등) — 잔여 상태(REVERT_HEAD·staged)는 정리했습니다." >&2
+      echo "❌ ${_rb_failed} revert 실패(충돌 등) — 잔여 상태 정리를 시도했습니다 (위 경고가 있으면 수동 정리 필요)." >&2
       echo "   재실행하면 이미 되돌린 커밋은 건너뛰고 이어서 진행합니다 (재개 가능)." >&2
       if [ -n "$_rb_done" ]; then
         echo "   이미 되돌린 커밋(각각 revert-of-revert로 복구 가능):" >&2
