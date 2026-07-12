@@ -548,14 +548,34 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   # writer(rename-publish)의 개입을 배제한다 (arbitrary in-place 변경은 아래
   # hardlink 백업 결속이 잡는다). 실패는 복원 포기(REF_ONLY, 보존)로 이어진다.
   _TW_LOCK="state/ticket_write.lock.d"
+  # 리뷰 16차 P1-8(7차): held 판정을 셸 플래그 설정 시점이 아니라 "파일시스템의
+  # 소유 증거"에 결속한다. 종전에는 acquire가 mkdir·pid 기록을 마치고 반환한 뒤
+  # "다음 명령"에서야 _AM_TW_HELD=1이 되어, 그 사이 신호가 오면 cleanup이 소유하지
+  # 않은 것으로 판단해 lock을 남겼다. 이제 pid가 "이미 담긴" 사전 구성 디렉터리를
+  # 원자적 rename으로 획득한다 — 성공한 순간 $_TW_LOCK/pid == $$ 가 파일시스템에
+  # 성립하므로, 어느 시점에 신호가 와도 cleanup(_am_tw_release)은 내용(pid) 기준
+  # 으로 정확히 판정한다. 셸 플래그 창 자체가 사라진다 (lock 형식은 기존 프로토콜
+  # 그대로: 디렉터리 + pid 파일 — ticket_*.sh writer들과 호환).
   _am_tw_acquire() {
-    local _i=0 _p _mp
+    local _i=0 _p _mp _pre
     mkdir -p state 2>/dev/null || true
+    _pre="$_TW_LOCK.acq.$$"
+    _am_tw_mkpre() {
+      rm -rf "$_pre" 2>/dev/null || true
+      mkdir "$_pre" 2>/dev/null || return 1
+      echo "$$" > "$_pre/pid" 2>/dev/null || { rm -rf "$_pre" 2>/dev/null || true; return 1; }
+    }
+    _am_tw_mkpre || return 1
     while :; do
-      if mkdir "$_TW_LOCK" 2>/dev/null; then
-        if echo "$$" > "$_TW_LOCK/pid" 2>/dev/null; then return 0; fi
-        rm -rf "$_TW_LOCK" 2>/dev/null || true
-        return 1
+      if [ ! -e "$_TW_LOCK" ] && mv "$_pre" "$_TW_LOCK" 2>/dev/null; then
+        # rename 경합으로 기존 lock "안"에 중첩됐을 수 있다 — 소유는 경로가 아니라
+        # 내용(pid==$$ + 비중첩)으로만 확정한다.
+        if [ "$(cat "$_TW_LOCK/pid" 2>/dev/null || true)" = "$$" ] && [ ! -d "$_TW_LOCK/${_pre##*/}" ]; then
+          _AM_TW_HELD=1
+          return 0
+        fi
+        rm -rf "$_TW_LOCK/${_pre##*/}" 2>/dev/null || true
+        _am_tw_mkpre || return 1
       fi
       _p="$(cat "$_TW_LOCK/pid" 2>/dev/null || true)"
       if [ -n "$_p" ] && ! kill -0 "$_p" 2>/dev/null; then
@@ -565,11 +585,11 @@ if [ "$ELIGIBLE" -eq 0 ]; then
             rm -rf "$_TW_LOCK.reclaim.$$" 2>/dev/null || true
             continue
           fi
-          mv "$_TW_LOCK.reclaim.$$" "$_TW_LOCK" 2>/dev/null || return 1
+          mv "$_TW_LOCK.reclaim.$$" "$_TW_LOCK" 2>/dev/null || { rm -rf "$_pre" 2>/dev/null || true; return 1; }
         fi
       fi
       _i=$((_i+1))
-      [ "$_i" -ge 100 ] && return 1
+      if [ "$_i" -ge 100 ]; then rm -rf "$_pre" 2>/dev/null || true; return 1; fi
       sleep 0.1
     done
   }
@@ -626,7 +646,8 @@ if [ "$ELIGIBLE" -eq 0 ]; then
         echo "# auto_merge quarantine"
         echo "rollback이 폐기한 merge 잔상. unlink 대신 rename으로 보존해 열린 FD의"
         echo "늦은 write도 이 inode에 남는다 (리뷰 16차 P1)."
-        echo "- 복구: manifest.tsv(시각, merge OID, 원경로, 격리 경로)에서 찾아 mv로 복원."
+        echo "- 복구: manifest.tsv(시각, merge OID, 원경로, 격리 경로, worktree toplevel)에서"
+        echo "  찾아 mv로 복원 — 원경로는 5열의 worktree 기준 상대 경로다 (공유 trash 식별)."
         echo "- 보존: 해당 rollback의 감사 로그(ROLLED_BACK) 확인 후 수동 삭제 가능 (자동 삭제 없음)."
         echo "- manifest에 MOVE-FAILED 표시가 있으면 그 행의 파일은 격리되지 않고 원위치에 있다."
       } > "$1/README.md" 2>/dev/null || true
@@ -634,10 +655,15 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     return 0
   }
   _am_discard() {  # $1=캡처 파일, $2=원경로(기록용)
-    local _dir _dst _i
+    local _dir _dst _i _d1 _d2 _wt
     _dir="$_AM_COMMON_TRASH"
     _am_trash_init "$_dir" || return 1
-    [ "$(_dev_of "$1")" = "$(_dev_of "$_dir")" ] || return 1
+    # 리뷰 16차 P1-9(7차): device 검사는 fail-closed — stat이 한쪽이라도 실패하면
+    # 빈 문자열끼리 "같다"로 판정되어 cross-volume mv(copy+unlink 강등, 늦은
+    # write 유실)를 진행했다. 양쪽 device 값이 모두 non-empty일 때만 비교를
+    # 허용하고, 그 외에는 폐기하지 않는다 (호출자가 원복·보존).
+    _d1="$(_dev_of "$1")"; _d2="$(_dev_of "$_dir")"
+    [ -n "$_d1" ] && [ -n "$_d2" ] && [ "$_d1" = "$_d2" ] || return 1
     # 리뷰 16차 P2(5차): 경로명 충돌 없는 목적지 — noclobber 생성으로 예약한다.
     _i=0
     while :; do
@@ -649,14 +675,18 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     # 파일은 아직 원위치라 원복 자체가 필요 없다 (기록 실패 후의 원복 mv가 그
     # 사이 원경로에 생긴 concurrent 파일을 덮던 창 제거). rename이 실패하면
     # manifest에 정정 행을 남긴다 (best effort — 파일은 원위치 그대로).
-    if ! printf '%s\t%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)" \
-        "${MERGE_COMMIT:-unknown}" "$2" "$_dst" >> "$_dir/manifest.tsv" 2>/dev/null; then
+    # 리뷰 16차 P2(7차): trash는 common git dir 하나를 "여러 worktree"가 공유
+    # 한다 — 상대 원경로만으로는 어느 worktree의 파일인지 식별할 수 없다.
+    # 5열에 worktree toplevel(절대 경로)을 기록해 복원 목적지를 유일하게 만든다.
+    _wt="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    if ! printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)" \
+        "${MERGE_COMMIT:-unknown}" "$2" "$_dst" "$_wt" >> "$_dir/manifest.tsv" 2>/dev/null; then
       rm -f "$_dst.claim"
       return 1
     fi
     if ! mv "$1" "$_dst" 2>/dev/null; then
-      printf '%s\t%s\t%s\t%s\tMOVE-FAILED\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)" \
-        "${MERGE_COMMIT:-unknown}" "$2" "$_dst" >> "$_dir/manifest.tsv" 2>/dev/null || true
+      printf '%s\t%s\t%s\t%s\t%s\tMOVE-FAILED\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)" \
+        "${MERGE_COMMIT:-unknown}" "$2" "$_dst" "$_wt" >> "$_dir/manifest.tsv" 2>/dev/null || true
       rm -f "$_dst.claim"
       return 1
     fi
@@ -692,7 +722,12 @@ if [ "$ELIGIBLE" -eq 0 ]; then
       _AM_ILOCK_PATH=""
       _AM_ILOCK_TOKEN=""
     fi
-    if [ "${_AM_TW_HELD:-0}" = "1" ]; then _am_tw_release 2>/dev/null || true; _AM_TW_HELD=0; fi
+    # 리뷰 16차 P1-8(7차): held 플래그가 아니라 lock의 "내용"(pid==$$)으로 판정
+    # 하는 release를 무조건 호출한다 — acquire 성공 직후 신호가 와도 정확히
+    # 해제된다. 획득 전 단계의 사전 구성 디렉터리(.acq.$$)도 함께 정리.
+    _am_tw_release 2>/dev/null || true
+    rm -rf "$_TW_LOCK.acq.$$" 2>/dev/null || true
+    _AM_TW_HELD=0
     return 0
   }
   # 리뷰 16차 P1(index 원자성): 비교와 reset을 git 규약의 index.lock 아래에서
@@ -769,8 +804,9 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     done <<EOF
 $_now
 EOF
+    # 7차 P1-8: held 상태는 acquire "내부"에서 성공 확정과 함께 설정된다 —
+    # 반환 후 별도 플래그 설정 없음 (그 사이 신호 창 제거).
     _am_tw_acquire || return 1
-    _AM_TW_HELD=1
     while IFS= read -r _line; do
       [ -z "$_line" ] && continue
       _st="${_line%"${_line#??}"}"
