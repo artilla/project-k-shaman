@@ -60,14 +60,18 @@ _make_repo() {
   grep -q "v2" "$repo/file.txt"
 }
 
-@test "R3: main worktree with --yes -> restored to pre-cycle tag" {
+@test "R3: main worktree with --yes -> rolled back by revert (history preserved, no reset --hard)" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
 
   run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"restored T200"* ]]
+  [[ "$output" == *"rolled back T200 by revert"* ]]
   grep -q "v1" "$repo/file.txt"
+  # 비가역 파괴가 아니다 — 원 커밋과 역커밋이 모두 히스토리에 남는다
+  run git -C "$repo" log --format=%s
+  [[ "$output" == *"T200: cycle change"* ]]
+  [[ "$output" == *"rollback(T200)"* ]]
 }
 
 @test "R4: isolated worktree (.ralph/wt-*) runs immediately without --yes even non-interactive" {
@@ -109,7 +113,7 @@ _make_repo() {
   grep -q "v2" "$repo/file.txt"
 }
 
-@test "R7: recorded cycle range (cycle + telemetry + writer audit, post at HEAD) -> rollback proceeds" {
+@test "R7: recorded cycle range (cycle + telemetry + writer audit, post at HEAD) -> revert rollback proceeds" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
   echo "t" >> "$repo/file.txt"
@@ -123,8 +127,11 @@ _make_repo() {
 
   run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"restored T200"* ]]
+  [[ "$output" == *"rolled back T200 by revert"* ]]
   grep -q "v1" "$repo/file.txt"
+  # 히스토리 보존 (reset --hard 아님)
+  run git -C "$repo" log --format=%s
+  [[ "$output" == *"telemetry(T200): tokens_total"* ]]
   # 무효화된 종점 기록은 제거된다
   ! git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
 }
@@ -155,4 +162,25 @@ _make_repo() {
   [ "$status" -eq 3 ]
   [[ "$output" == *"git revert"* ]]
   grep -q "v2" "$repo/file.txt"
+}
+
+@test "R10: unrelated commit inside the pre..post window is not irreversibly destroyed" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 사이클 도중(pre~post 사이) 끼어든 무관 커밋 — post는 시간 경계라 범위에 포함된다
+  echo "concurrent" > "$repo/unrelated.txt"
+  git -C "$repo" add unrelated.txt
+  git -C "$repo" commit -q -m "docs: concurrent unrelated work"
+  git -C "$repo" tag -f "cycle/T200-post"
+
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"revert"* ]]
+  # revert로 워크트리에서는 빠지지만, 커밋이 히스토리에 남아 복구 가능하다
+  run git -C "$repo" log --format=%s
+  [[ "$output" == *"docs: concurrent unrelated work"* ]]
+  [ ! -f "$repo/unrelated.txt" ]
+  local unrelated_c
+  unrelated_c="$(git -C "$repo" log --format=%H --grep='concurrent unrelated' -1)"
+  git -C "$repo" show "$unrelated_c:unrelated.txt" | grep -q concurrent
 }

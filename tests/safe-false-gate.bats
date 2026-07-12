@@ -18,6 +18,7 @@ setup() {
   cp "$REPO_ROOT/scripts/orchestrator.sh" "$TEST_HOME/scripts/orchestrator.sh"
   cp "$REPO_ROOT/scripts/approve.sh" "$TEST_HOME/scripts/approve.sh"
   cp "$REPO_ROOT/scripts/ticket_edit.sh" "$TEST_HOME/scripts/ticket_edit.sh"
+  cp "$REPO_ROOT/scripts/ticket_body.sh" "$TEST_HOME/scripts/ticket_body.sh"
   # 리뷰 2차 P1-7: run_loop의 safe:false 승인 판정은 mission-control/approval.mjs 단일 소스.
   cp "$REPO_ROOT/mission-control/approval.mjs" "$TEST_HOME/mission-control/approval.mjs"
   cp "$REPO_ROOT/.gitignore" "$TEST_HOME/.gitignore"
@@ -1618,4 +1619,37 @@ EOF
   run bash -c 'cd "$1" && ./scripts/pick_next_ticket.sh' _ "$TEST_HOME"
   [ "$status" -eq 0 ]
   [[ "$output" != *"T661-test.md"* ]]
+}
+
+@test "T69: body edit blocked on the write lock re-checks status after acquiring - skipped ticket is not modified" {
+  _make_ticket T690 true open
+  _commit_all "add T690"
+
+  # 외부 프로세스가 write lock을 쥔 상태에서 body 편집을 시작시킨다 —
+  # 편집기는 lock 대기에 들어간다.
+  sleep 60 & local holder=$!
+  mkdir -p "$TEST_HOME/state/ticket_write.lock.d"
+  echo "$holder" > "$TEST_HOME/state/ticket_write.lock.d/pid"
+
+  ( cd "$TEST_HOME" && rc=0 && printf 'new body\n' | ./scripts/ticket_body.sh set T690 > "$TEST_HOME/tb.log" 2>&1 || rc=$?; echo "$rc" > "$TEST_HOME/tb.rc" ) &
+  local editor=$!
+  sleep 0.5
+
+  # lock 대기 중 lifecycle이 open→skipped를 완료한 상황 (승자 writer의 결과)
+  awk '/^---$/{fm++;print;next} fm==1 && $1=="status:"{print "status: skipped";next}{print}' \
+    "$TEST_HOME/docs/tickets/T690-test.md" > "$TEST_HOME/t690.tmp"
+  mv "$TEST_HOME/t690.tmp" "$TEST_HOME/docs/tickets/T690-test.md"
+
+  # lock 해제 — 편집기가 진행한다
+  kill "$holder" 2>/dev/null || true
+  rm -rf "$TEST_HOME/state/ticket_write.lock.d"
+  wait "$editor" 2>/dev/null || true
+
+  # 과거: lock 밖 stale 'open' 판정으로 skipped 티켓 본문을 수정하고 rc=0 —
+  # 이제 lock 안 재판정이 skipped를 보고 거부한다.
+  [ "$(cat "$TEST_HOME/tb.rc")" -ne 0 ]
+  grep -q 'open 티켓만' "$TEST_HOME/tb.log"
+  ! grep -q 'new body' "$TEST_HOME/docs/tickets/T690-test.md"
+  grep -q '^status: skipped' "$TEST_HOME/docs/tickets/T690-test.md"
+  [ ! -d "$TEST_HOME/state/ticket_write.lock.d" ]
 }

@@ -54,26 +54,28 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     exit 3
   fi
 
-  # 가드 4 (리뷰 16차 P1 재설계): 소유권은 commit subject 문자열이 아니라
-  # "기록된 증거"로만 판단한다 — run_loop이 성공 사이클 종점에 남기는
-  # cycle/<ID>-post 태그. subject 매칭은 스푸핑("T200: hotfix" 수동 커밋)과
-  # 혼입 변경을 own commit으로 오분류해 reset --hard로 함께 파괴했다.
-  #   허가 조건 (둘 중 하나, --yes로도 그 외 우회 불가):
-  #     (a) tag 이후 커밋이 없음 — 워크트리/미추적 정리만 수행
-  #     (b) cycle/<ID>-post가 존재하고, HEAD == post이며, pre가 post의 조상 —
-  #         TAG..HEAD 전체가 기록된 "그 사이클"의 산출물임이 증명됨
-  #   그 외에는 파괴를 거부하고 revert 경로를 안내한다 (fail-closed).
+  # 가드 4 (리뷰 16차 P1 재재설계): post 태그는 "시간 경계"일 뿐 소유권 증거가
+  # 아니다 — pre~post 사이에 끼어든 무관 커밋(동시 수동 커밋 등)도 범위에 포함되어
+  # reset --hard가 함께 파괴했다. 따라서 커밋이 존재하는 범위에는 메인 워크트리에서
+  # 비가역 파괴(reset --hard)를 절대 쓰지 않는다:
+  #   (a) tag 이후 커밋 없음        → reset 경로 (워크트리/미추적 정리만)
+  #   (b) 격리 워크트리(.ralph/wt-*) → reset 경로 (워크트리 전체가 폐기 대상)
+  #   (c) 메인 + HEAD == cycle/<ID>-post (기록된 사이클 종점) → git revert 기반
+  #       롤백: 범위의 커밋을 역커밋으로 되돌린다. 히스토리가 보존되므로 범위에
+  #       무관 커밋이 섞여 있었어도 revert-of-revert로 복구 가능 (비가역 유실 없음).
+  #   (d) 그 외 → 거부 + 수동 revert 안내 (fail-closed, --yes 우회 불가)
   POST_TAG="cycle/${ID}-post"
-  ALLOW_RESET=0
+  MODE_ROLLBACK=""
   if [ -z "$(git rev-list -n 1 "${TAG}..HEAD" 2>/dev/null)" ]; then
-    ALLOW_RESET=1
+    MODE_ROLLBACK="reset"
+  elif in_isolated_worktree; then
+    MODE_ROLLBACK="reset"
   elif git rev-parse -q --verify "refs/tags/${POST_TAG}^{commit}" >/dev/null \
      && [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/${POST_TAG}^{commit}")" ] \
      && git merge-base --is-ancestor "refs/tags/${TAG}" "refs/tags/${POST_TAG}" 2>/dev/null; then
-    ALLOW_RESET=1
-  fi
-  if [ "$ALLOW_RESET" != "1" ]; then
-    echo "❌ ${TAG} 이후 커밋들이 기록된 사이클 종점(${POST_TAG})과 일치하지 않습니다 — reset --hard는 아래 커밋을 전부 파괴하므로 거부합니다 (--yes 우회 불가):" >&2
+    MODE_ROLLBACK="revert"
+  else
+    echo "❌ ${TAG} 이후 커밋들이 기록된 사이클 종점(${POST_TAG})과 일치하지 않습니다 — 자동 롤백을 거부합니다 (--yes 우회 불가):" >&2
     git log --format='%h %s' "${TAG}..HEAD" >&2
     echo "   이 티켓의 변경만 되돌리려면 해당 커밋을 선별 revert 하세요 (최신 → 과거 순):" >&2
     git log --format='   git revert %h  # %s' "${TAG}..HEAD" >&2
@@ -82,14 +84,21 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
 
   # 가드 2·3: 메인 워크트리는 명시적 확인 필요 (격리 워크트리는 즉시 실행).
   if ! in_isolated_worktree; then
-    UNTRACKED="$(git clean -nd 2>/dev/null || true)"
-    if [ -n "$UNTRACKED" ]; then
-      echo "⚠️  clean -fd로 삭제될 미추적 파일/디렉터리:" >&2
-      printf '%s\n' "$UNTRACKED" >&2
+    if [ "$MODE_ROLLBACK" = "reset" ]; then
+      UNTRACKED="$(git clean -nd 2>/dev/null || true)"
+      if [ -n "$UNTRACKED" ]; then
+        echo "⚠️  clean -fd로 삭제될 미추적 파일/디렉터리:" >&2
+        printf '%s\n' "$UNTRACKED" >&2
+      fi
+      _PROMPT="메인 워크트리를 ${TAG}로 reset --hard + clean -fd 합니다"
+    else
+      echo "ℹ️  revert 기반 롤백 대상 커밋 (히스토리 보존, 역커밋 생성):" >&2
+      git log --format='   %h %s' "${TAG}..HEAD" >&2
+      _PROMPT="위 커밋들을 git revert로 되돌립니다"
     fi
     if [ "$YES" != "1" ]; then
       if [ -t 0 ]; then
-        printf '⚠️  메인 워크트리를 %s로 reset --hard + clean -fd 합니다. 계속할까요? [y/N] ' "$TAG" >&2
+        printf '⚠️  %s. 계속할까요? [y/N] ' "$_PROMPT" >&2
         read -r answer
         case "$answer" in
           y|Y|yes) ;;
@@ -100,6 +109,25 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
         exit 3
       fi
     fi
+  fi
+
+  if [ "$MODE_ROLLBACK" = "revert" ]; then
+    # 역순(최신→과거) revert — 충돌 시 전체 중단·원상 복구 (fail-closed).
+    if ! git revert --no-commit "${TAG}..HEAD" >/dev/null 2>&1; then
+      git revert --abort >/dev/null 2>&1 || git reset --merge >/dev/null 2>&1 || true
+      echo "❌ revert 충돌 — 자동 롤백을 중단하고 원상 복구했습니다. 수동으로 선별 revert 하세요:" >&2
+      git log --format='   git revert %h  # %s' "${TAG}..HEAD" >&2
+      exit 3
+    fi
+    if git diff --cached --quiet; then
+      echo "ℹ️  revert 결과 변경 없음 (이미 되돌려진 상태) — 커밋 생략."
+      git reset -q --mixed HEAD >/dev/null 2>&1 || true
+    else
+      git commit -q -m "rollback(${ID}): revert ${TAG}..${POST_TAG}"
+    fi
+    git tag -d "$POST_TAG" >/dev/null 2>&1 || true
+    echo "rolled back $ID by revert (history preserved; 미추적 산출물은 보존됨 — 필요 시 수동 정리)"
+    exit 0
   fi
 
   git reset --hard "$TAG" >/dev/null
