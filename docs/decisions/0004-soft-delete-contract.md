@@ -70,6 +70,15 @@ event_type·created_at 등 집계 축은 보존되어 익명 통계는 유지된
    INSERT 거부)
 2. 삭제된 사용자를 가리키는 sessions/streaks/user_fortunes/events/purchases
    신규 행 거부 — 부모 행 FOR SHARE 잠금으로 미커밋 삭제와도 직렬화 (트리거)
+   - sessions 소유자 재배정 금지 (6차): user가 있는 세션의 user_id 변경(NULL
+     포함)은 거부 — 삭제 시 event 스캔(session_id IN 소유 세션)의 우회를
+     차단한다. 허용 전이는 익명 세션의 로그인 바인딩(NULL→user, 삭제 사용자
+     검사 포함)뿐이다.
+   - events 교차 귀속 금지 (6차): event의 user_id와 session 소유자가 다르면
+     거부 — 교차 귀속은 삭제 스캔의 사각을 만든다. 잠금 순서는 스크럽 트리거와
+     동일하게 항상 users → sessions로 통일해 역전 deadlock을 제거했다
+     (소유자 무잠금 선독 → users FOR SHARE → sessions FOR SHARE → 소유자
+     재검증, 변경 감지 시 거부 fail-closed).
 3. `events.scrubbed_at IS NOT NULL` ⇒ `user_id IS NULL AND payload = '{}'`
    (CHECK — 스크럽의 영속성)
 4. purchases.user_id 재배정 금지 — 거래기록 귀속 불변 (트리거)

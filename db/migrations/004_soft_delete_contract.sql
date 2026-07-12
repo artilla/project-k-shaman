@@ -165,10 +165,32 @@ BEGIN
   RETURN NEW;
 END $fn$;
 
+-- sessions: 삭제 사용자 검사에 더해 소유자 "재배정"을 금지한다 (6차 P1).
+-- 소유자를 NULL/다른 사용자로 바꾸면 삭제 시 event 스캔(session_id IN ...)이
+-- 그 세션의 event를 놓쳐 스크럽이 우회됐다. 허용되는 전이는 익명 세션의
+-- 로그인 바인딩(NULL→user, 삭제 사용자 검사 포함)뿐이다.
+CREATE OR REPLACE FUNCTION sessions_guard() RETURNS trigger
+LANGUAGE plpgsql
+SET search_path FROM CURRENT
+AS $fn$
+BEGIN
+  IF TG_OP = 'UPDATE' AND OLD.user_id IS NOT NULL
+     AND NEW.user_id IS DISTINCT FROM OLD.user_id THEN
+    RAISE EXCEPTION 'sessions.id=%: 소유자 재배정(%->%)은 허용되지 않습니다 — 삭제 스크럽 우회 방지 (soft-delete 불변식)', OLD.id, OLD.user_id, NEW.user_id;
+  END IF;
+  IF NEW.user_id IS NOT NULL THEN
+    PERFORM 1 FROM users WHERE id = NEW.user_id AND deleted_at IS NULL FOR SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'sessions.user_id=%: 삭제되었거나 존재하지 않는 사용자입니다 — 신규 연결을 거부합니다 (soft-delete 불변식)', NEW.user_id;
+    END IF;
+  END IF;
+  RETURN NEW;
+END $fn$;
+
 DROP TRIGGER IF EXISTS trg_sessions_no_deleted_user ON sessions;
 CREATE TRIGGER trg_sessions_no_deleted_user
   BEFORE INSERT OR UPDATE OF user_id ON sessions
-  FOR EACH ROW EXECUTE FUNCTION reject_rows_for_deleted_user();
+  FOR EACH ROW EXECUTE FUNCTION sessions_guard();
 
 DROP TRIGGER IF EXISTS trg_streaks_no_deleted_user ON streaks;
 CREATE TRIGGER trg_streaks_no_deleted_user
@@ -186,29 +208,45 @@ CREATE TRIGGER trg_user_fortunes_no_deleted_user
 -- (FOR SHARE)을 잠가 삭제 트랜잭션과 직렬화한다: 삭제가 먼저면 커밋 후
 -- 재평가로 거부되고, INSERT가 먼저면 삭제의 스캔이 이를 포함해 스크럽한다.
 -- 5차 P1-5: session_id UPDATE(재연결)도 같은 검증 대상이다.
+-- 6차 P1: (a) event의 user와 session 소유자가 다르면 거부 — 교차 귀속은 삭제
+-- 스캔의 사각을 만든다. (b) 잠금 순서 통일: 항상 users → sessions — 스크럽
+-- 트리거(users 행 잠금 후 sessions 삭제)와 같은 순서라 역전 deadlock이 없다.
+-- 소유자는 먼저 무잠금으로 읽어 검사 대상 사용자를 정하고, users 잠금 후
+-- sessions를 잠그고 소유자가 그 사이 바뀌지 않았는지 재검증한다 (fail-closed).
 CREATE OR REPLACE FUNCTION events_guard() RETURNS trigger
 LANGUAGE plpgsql
 SET search_path FROM CURRENT
 AS $fn$
 DECLARE
   _owner BIGINT;
+  _owner2 BIGINT;
+  _check_user BIGINT;
 BEGIN
-  IF NEW.user_id IS NOT NULL THEN
-    PERFORM 1 FROM users WHERE id = NEW.user_id AND deleted_at IS NULL FOR SHARE;
-    IF NOT FOUND THEN
-      RAISE EXCEPTION 'events.user_id=%: 삭제되었거나 존재하지 않는 사용자입니다 — 신규 연결을 거부합니다 (soft-delete 불변식)', NEW.user_id;
-    END IF;
-  END IF;
   IF NEW.session_id IS NOT NULL THEN
-    SELECT s.user_id INTO _owner FROM sessions s WHERE s.id = NEW.session_id FOR SHARE OF s;
+    SELECT s.user_id INTO _owner FROM sessions s WHERE s.id = NEW.session_id;
     IF NOT FOUND THEN
       RAISE EXCEPTION 'events.session_id=%: 존재하지 않는 세션입니다 — 연결을 거부합니다', NEW.session_id;
     END IF;
-    IF _owner IS NOT NULL THEN
-      PERFORM 1 FROM users WHERE id = _owner AND deleted_at IS NULL FOR SHARE;
-      IF NOT FOUND THEN
-        RAISE EXCEPTION 'events.session_id=%: 삭제된(또는 삭제 중인) 사용자의 세션입니다 — 연결을 거부합니다 (soft-delete 불변식)', NEW.session_id;
-      END IF;
+    IF NEW.user_id IS NOT NULL AND _owner IS DISTINCT FROM NEW.user_id THEN
+      RAISE EXCEPTION 'events: user_id=%와 session 소유자=%가 다릅니다 — 교차 귀속을 거부합니다 (soft-delete 불변식)', NEW.user_id, _owner;
+    END IF;
+    _check_user := COALESCE(NEW.user_id, _owner);
+  ELSE
+    _check_user := NEW.user_id;
+  END IF;
+  IF _check_user IS NOT NULL THEN
+    PERFORM 1 FROM users WHERE id = _check_user AND deleted_at IS NULL FOR SHARE;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'events: user %는 삭제되었거나(삭제 중이거나) 존재하지 않습니다 — 연결을 거부합니다 (soft-delete 불변식)', _check_user;
+    END IF;
+  END IF;
+  IF NEW.session_id IS NOT NULL THEN
+    SELECT s.user_id INTO _owner2 FROM sessions s WHERE s.id = NEW.session_id FOR SHARE OF s;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'events.session_id=%: 세션이 사라졌습니다 — 연결을 거부합니다', NEW.session_id;
+    END IF;
+    IF _owner2 IS DISTINCT FROM _owner THEN
+      RAISE EXCEPTION 'events.session_id=%: 검사 중 세션 소유자가 바뀌었습니다(%->%) — 연결을 거부합니다 (fail-closed)', NEW.session_id, _owner, _owner2;
     END IF;
   END IF;
   RETURN NEW;
