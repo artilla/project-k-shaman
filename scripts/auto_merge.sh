@@ -612,25 +612,52 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   # (워크트리 내 state/, 워크트리와 같은 볼륨)로 옮기고, rename 전에 실제로
   # 같은 device인지 검증한다. 다르면 폐기하지 않는다 (호출자가 원복·보존).
   _AM_GITDIR="$(git rev-parse --git-dir 2>/dev/null)"
-  _AM_TRASH="${STATE_DIR}/auto_merge.trash.d"
+  # 리뷰 16차 P1-8(5차): 내구성 우선순위 — (1) common git dir(.git; linked
+  # worktree remove에도 살아남고 clean -fd가 절대 닿지 않는다)이 파일과 같은
+  # device면 그곳으로, (2) 아니면 STATE_DIR(워크트리 내 — .gitignore 등재 +
+  # rollback clean의 명시 제외로 보호, 단 worktree 자체가 제거되면 함께 사라짐을
+  # manifest에 경고). 두 후보 모두 device가 다르면 폐기하지 않는다 (원복·보존).
+  _AM_COMMON_TRASH="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || git rev-parse --git-common-dir 2>/dev/null)/auto_merge.trash.d"
+  _AM_STATE_TRASH="${STATE_DIR}/auto_merge.trash.d"
   _dev_of() { stat -c '%d' "$1" 2>/dev/null || stat -f '%d' "$1" 2>/dev/null; }
-  _am_discard() {  # $1=캡처 파일, $2=원경로(기록용)
-    mkdir -p "$_AM_TRASH" 2>/dev/null || return 1
-    if [ ! -f "$_AM_TRASH/README.md" ]; then
+  _am_trash_init() {  # $1=trash dir
+    mkdir -p "$1" 2>/dev/null || return 1
+    if [ ! -f "$1/README.md" ]; then
       {
         echo "# auto_merge quarantine"
         echo "rollback이 폐기한 merge 잔상. unlink 대신 rename으로 보존해 열린 FD의"
         echo "늦은 write도 이 inode에 남는다 (리뷰 16차 P1)."
         echo "- 복구: manifest.tsv(시각, merge OID, 원경로, 격리 경로)에서 찾아 mv로 복원."
-        echo "- 보존: 해당 rollback의 감사 로그(ROLLED_BACK) 확인 후 수동 삭제 가능."
-      } > "$_AM_TRASH/README.md" 2>/dev/null || true
+        echo "- 보존: 해당 rollback의 감사 로그(ROLLED_BACK) 확인 후 수동 삭제 가능 (자동 삭제 없음)."
+        echo "- 주의: state/ 위치일 경우 worktree 제거와 함께 사라진다 — 복구가 필요하면 먼저 옮길 것."
+      } > "$1/README.md" 2>/dev/null || true
     fi
-    [ "$(_dev_of "$1")" = "$(_dev_of "$_AM_TRASH")" ] || return 1
-    local _dst
-    _dst="$_AM_TRASH/$(date +%s).$$.${RANDOM}.$(basename "$1")"
-    mv "$1" "$_dst" 2>/dev/null || return 1
-    printf '%s\t%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)" \
-      "${MERGE_COMMIT:-unknown}" "$2" "$_dst" >> "$_AM_TRASH/manifest.tsv" 2>/dev/null || true
+    return 0
+  }
+  _am_discard() {  # $1=캡처 파일, $2=원경로(기록용)
+    local _dir="" _cand _dst _i
+    for _cand in "$_AM_COMMON_TRASH" "$_AM_STATE_TRASH"; do
+      _am_trash_init "$_cand" || continue
+      if [ "$(_dev_of "$1")" = "$(_dev_of "$_cand")" ]; then _dir="$_cand"; break; fi
+    done
+    [ -n "$_dir" ] || return 1
+    # 리뷰 16차 P2(5차): 경로명 충돌 없는 목적지 — noclobber 생성으로 예약한다.
+    _i=0
+    while :; do
+      _dst="$_dir/$(date +%s).$$.${RANDOM}.$(basename "$1")"
+      if (set -C; : > "$_dst.claim") 2>/dev/null; then break; fi
+      _i=$((_i+1)); [ "$_i" -ge 10 ] && return 1
+    done
+    if ! mv "$1" "$_dst" 2>/dev/null; then rm -f "$_dst.claim"; return 1; fi
+    # 리뷰 16차 P2(5차): manifest 기록 실패를 무시하지 않는다 — 기록이 안 되면
+    # 격리를 원복하고 폐기 실패로 처리한다 (호출자가 보존·REF_ONLY 격하).
+    if ! printf '%s\t%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)" \
+        "${MERGE_COMMIT:-unknown}" "$2" "$_dst" >> "$_dir/manifest.tsv" 2>/dev/null; then
+      mv "$_dst" "$1" 2>/dev/null || true
+      rm -f "$_dst.claim"
+      return 1
+    fi
+    rm -f "$_dst.claim"
   }
   # 리뷰 16차 P1(4차): index CAS 임계구역 중 신호/종료 시 잔여물(.git/index.lock·
   # index.amrb.*·writer lock)을 반드시 정리한다 — Git 수동 복구까지 막던 고착 제거.
@@ -652,8 +679,11 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   _am_index_reset_path() {
     local _p="$1" _e1="$2" _e2="${3-__none__}" _ilock _itmp _cur
     _ilock="${_AM_GITDIR}/index.lock"
-    if ! (set -C; : > "$_ilock") 2>/dev/null; then return 1; fi
+    # 리뷰 16차 P1-9(5차): 소유 기록을 "생성 전"에 — 생성과 기록 사이에 신호가
+    # 오면 index.lock이 고착됐다. 미리 기록해 두면 핸들러의 rm -f가 생성 직후
+    # 어느 시점이든 정리하고, 생성 전이면 없는 파일 rm은 무해하다.
     _AM_ILOCK_PATH="$_ilock"
+    if ! (set -C; : > "$_ilock") 2>/dev/null; then _AM_ILOCK_PATH=""; return 1; fi
     _itmp="${_AM_GITDIR}/index.amrb.$$"
     _AM_ITMP_PATH="$_itmp"
     if ! cp "${_AM_GITDIR}/index" "$_itmp" 2>/dev/null; then rm -f "$_ilock" "$_itmp"; _AM_ILOCK_PATH=""; _AM_ITMP_PATH=""; return 1; fi

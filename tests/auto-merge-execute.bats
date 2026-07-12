@@ -1257,3 +1257,87 @@ MOCK
   # git이 정상 동작한다
   git -C "$d" status --porcelain >/dev/null
 }
+
+# P1(5차): index.lock "생성 직후, 소유 기록 이전" 창의 TERM — 이제 소유 기록이
+# 생성보다 먼저라 어느 시점의 신호든 정리된다. cp(생성 직후 첫 파일 연산) 시점
+# 신호로 검증한다.
+@test "execute: TERM right after index.lock creation (at cp) leaves no stuck lock" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_t2.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/t2.flag" ]; then touch "$TEST_HOME/t2.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_t2.sh"
+
+  local realcp
+  realcp="$(command -v cp)"
+  mkdir -p "$TEST_HOME/t2bin"
+  cat > "$TEST_HOME/t2bin/cp" <<MOCK
+#!/usr/bin/env bash
+case "\$1" in
+  *".git/index")
+    if [ ! -f "$TEST_HOME/t2.sent" ]; then
+      touch "$TEST_HOME/t2.sent"
+      kill -TERM "\$PPID" 2>/dev/null
+      sleep 1
+    fi
+    ;;
+esac
+exec "$realcp" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/t2bin/cp"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/t2bin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_t2.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -ne 0 ]
+  [ -f "$TEST_HOME/t2.sent" ]
+  [ ! -e "$d/.git/index.lock" ]
+  [ -z "$(find "$d/.git" -name 'index.amrb.*' 2>/dev/null)" ]
+  git -C "$d" status --porcelain >/dev/null
+}
+
+# P1(5차): quarantine 내구성 — common git dir(.git) 우선이라 worktree의
+# git clean -fd가 닿지 않고, manifest가 함께 남는다.
+@test "execute: quarantine lands in common git dir with manifest and survives git clean -fd" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_q.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/q.flag" ]; then touch "$TEST_HOME/q.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_q.sh"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_q.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  grep -q $'\tROLLED_BACK$' "$TEST_HOME/state/auto_merge.log"
+  # 폐기된 merge-added 파일이 .git 아래 quarantine에 manifest와 함께 남는다
+  [ -d "$d/.git/auto_merge.trash.d" ]
+  [ -f "$d/.git/auto_merge.trash.d/manifest.tsv" ]
+  grep -q $'\tdocs/file-1.md\t' "$d/.git/auto_merge.trash.d/manifest.tsv"
+  local qfile
+  qfile="$(awk -F'\t' 'END{print $4}' "$d/.git/auto_merge.trash.d/manifest.tsv")"
+  [ -f "$qfile" ]
+  grep -q 'content 1' "$qfile"
+  # git clean -fd에도 살아남는다 (.git은 clean 대상이 아님)
+  git -C "$d" clean -fd >/dev/null 2>&1 || true
+  [ -f "$qfile" ]
+}
