@@ -54,6 +54,21 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     exit 3
   fi
 
+  # 가드 4 (리뷰 16차 P1): reset --hard는 tag 이후의 "모든" 커밋을 파괴한다 —
+  # 이 티켓에 속하지 않는 커밋(다른 티켓의 사이클, telemetry, writer 감사 커밋,
+  # 수동 커밋)이 tag 이후에 있으면 rollback이 그 변경까지 조용히 유실시킨다.
+  # 발견 시 거부하고 revert 경로를 안내한다 (--yes로도 우회 불가, 격리 워크트리
+  # 포함 — 격리 워크트리도 티켓 1개 범위를 넘는 파괴는 정당화되지 않는다).
+  OWN_RE="^[0-9a-f]+ (${ID}: |telemetry\(${ID}\): |ticket_edit\(${ID}\): )"
+  FOREIGN="$(git log --format='%h %s' "${TAG}..HEAD" | grep -Ev "$OWN_RE" || true)"
+  if [ -n "$FOREIGN" ]; then
+    echo "❌ ${TAG} 이후에 ${ID}에 속하지 않는 커밋이 있습니다 — reset --hard가 이를 파괴합니다:" >&2
+    printf '%s\n' "$FOREIGN" >&2
+    echo "   이 티켓의 커밋만 선별적으로 되돌리세요 (최신 → 과거 순):" >&2
+    git log --format='%h %s' "${TAG}..HEAD" | grep -E "$OWN_RE" | awk '{print "     git revert " $1}' >&2 || true
+    exit 3
+  fi
+
   # 가드 2·3: 메인 워크트리는 명시적 확인 필요 (격리 워크트리는 즉시 실행).
   if ! in_isolated_worktree; then
     UNTRACKED="$(git clean -nd 2>/dev/null || true)"

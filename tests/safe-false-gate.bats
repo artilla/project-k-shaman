@@ -1323,17 +1323,13 @@ EOF
   wait
 
   local f="$TEST_HOME/docs/tickets/T570-test.md"
-  # 각 변경은 "반영"되었거나 "명시적으로 거부/실패"해야 한다 — 조용한 유실 금지.
-  if ! grep -q '^priority: P1' "$f"; then
-    grep -Eq '내용 변경 감지|실패' "$TEST_HOME/w_a.log"
-    [ "$(cat "$TEST_HOME/w_a.rc")" -ne 0 ]
-  fi
-  if ! grep -q '^labels: \[alpha, beta\]' "$f"; then
-    grep -Eq '내용 변경 감지|실패' "$TEST_HOME/w_b.log"
-    [ "$(cat "$TEST_HOME/w_b.rc")" -ne 0 ]
-  fi
-  # 최소 한쪽은 성공
-  grep -q '^priority: P1' "$f" || grep -q '^labels: \[alpha, beta\]' "$f"
+  # 리뷰 16차 P1: 기준(CAS) 캡처가 lock 안으로 들어가면서 동시 writer는 "직렬화되어
+  # 둘 다 반영"된다 — 과거의 '한쪽이 내용 변경 감지로 거부' 허용 분기는 lost update를
+  # 사용자에게 전가하던 결함의 관용이었다. 이제 두 편집 모두 성공해야 한다.
+  [ "$(cat "$TEST_HOME/w_a.rc")" -eq 0 ]
+  [ "$(cat "$TEST_HOME/w_b.rc")" -eq 0 ]
+  grep -q '^priority: P1' "$f"
+  grep -q '^labels: \["alpha", "beta"\]' "$f"
   # write lock 잔존 없음
   [ ! -d "$TEST_HOME/state/ticket_write.lock.d" ]
 }
@@ -1500,6 +1496,10 @@ WRAP
   # writer A의 commit을 지연시키는 git wrapper — 과거에는 A의 publish 후 lock이
   # 풀려 B의 publish가 끼어들고, A의 `git add`가 B의 변경까지 스테이징해 한
   # 커밋에 두 변경이 오귀속됐다 (B는 diff 없음 → 커밋 생략, 둘 다 rc=0).
+  # 리뷰 16차: sleep 기반 경합은 비결정적이었다(누가 먼저 lock을 잡는지 부하
+  # 의존, CAS 기준을 lock 밖에서 캡처하던 결함과 결합해 편집 유실) — B는 A의
+  # publish를 "파일 내용으로 관찰"한 뒤에만 디스패치한다 (결정적: A가 lock을
+  # 쥔 채 commit sleep 중임이 보장된 시점).
   local realgit
   realgit="$(command -v git)"
   mkdir -p "$TEST_HOME/slowgit"
@@ -1511,7 +1511,11 @@ EOF
   chmod +x "$TEST_HOME/slowgit/git"
 
   ( cd "$TEST_HOME" && rc=0 && PATH="$TEST_HOME/slowgit:$PATH" ./scripts/ticket_edit.sh set-priority T640 P1 > "$TEST_HOME/wa.log" 2>&1 || rc=$?; echo "$rc" > "$TEST_HOME/wa.rc" ) &
-  sleep 0.4   # A가 lock을 쥐고 publish 후 commit sleep에 들어갈 시간
+  local j=0
+  while ! grep -q '^priority: P1' "$TEST_HOME/docs/tickets/T640-test.md" 2>/dev/null && [ "$j" -lt 200 ]; do
+    sleep 0.05; j=$((j+1))
+  done
+  grep -q '^priority: P1' "$TEST_HOME/docs/tickets/T640-test.md"   # A publish 확인 (미확인이면 즉시 실패)
   ( cd "$TEST_HOME" && rc=0 && ./scripts/ticket_edit.sh set-labels T640 "alpha" > "$TEST_HOME/wb.log" 2>&1 || rc=$?; echo "$rc" > "$TEST_HOME/wb.rc" ) &
   wait
 
@@ -1554,6 +1558,54 @@ EOF
   # 완료로 집계되지 않았으므로 telemetry 커밋도 없다
   run git -C "$TEST_HOME" log --format=%s -5
   [[ "$output" != *"telemetry"* ]]
+}
+
+# ── 리뷰 16차 P1 회귀 ─────────────────────────────────────────────────────────
+
+@test "T67: DONE evidence whose frontmatter id differs from the requested ticket is not completion" {
+  _make_ticket T670 true open
+  # headless mock: 파일명은 T670이지만 frontmatter id를 T999로 바꿔 DONE 이동 —
+  # 과거에는 id "개수"만 검사해 값 불일치 파일이 완료로 집계됐다.
+  cat > "$TEST_HOME/scripts/run_headless.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+f=docs/tickets/T670-test.md
+[ -f "\$f" ] || exit 0   # 재프롬프트 세션은 무동작
+awk '/^---\$/{fm=!fm;print;next} fm && \$1=="id:"{print "id: T999";next} fm && \$1=="status:"{print "status: done";next}{print}' \
+  "\$f" > /tmp/t670.\$\$ && mv /tmp/t670.\$\$ "\$f"
+git mv "\$f" docs/tickets/DONE/T670-test.md
+git add -A; git commit -qm "T670: done(id mismatch)"
+exit 0
+EOF
+  chmod +x "$TEST_HOME/scripts/run_headless.sh"
+  _commit_all "add T670"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T670' _ "$TEST_HOME"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"id-mismatch"* ]]
+  # 완료로 집계되지 않았으므로 telemetry 커밋도 없다
+  run git -C "$TEST_HOME" log --format=%s -5
+  [[ "$output" != *"telemetry"* ]]
+}
+
+@test "T68: writer audit commit does not absorb unrelated pre-staged index entries" {
+  _make_ticket T680 true open
+  _commit_all "add T680"
+
+  # 사용자가 미리 staged해 둔 무관 파일 — 감사 커밋에 흡수되면 안 된다.
+  echo "unrelated" > "$TEST_HOME/other.txt"
+  git -C "$TEST_HOME" add other.txt
+
+  run bash -c 'cd "$1" && ./scripts/ticket_edit.sh set-priority T680 P1' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+
+  # 감사 커밋에는 티켓 파일만 들어간다
+  run git -C "$TEST_HOME" show --name-only --format= HEAD
+  [[ "$output" == *"T680-test.md"* ]]
+  [[ "$output" != *"other.txt"* ]]
+  # 무관 staged 항목은 그대로 index에 보존된다
+  run git -C "$TEST_HOME" diff --cached --name-only
+  [[ "$output" == *"other.txt"* ]]
 }
 
 @test "T66: duplicate depends_on declarations are malformed - no bypass via empty first declaration" {

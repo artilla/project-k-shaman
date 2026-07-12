@@ -87,3 +87,41 @@ _make_repo() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"git revert"* ]]
 }
+
+# ── 리뷰 16차 P1 회귀 ──────────────────────────────────────────────────────────
+
+@test "R6: commits after the tag that do not belong to the ticket -> refused (no bypass with --yes)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 티켓 소속 커밋(허용 형태) 뒤에 "무관" 커밋이 쌓인 상황
+  echo "telemetry" >> "$repo/file.txt"
+  git -C "$repo" add file.txt
+  git -C "$repo" commit -q -m "telemetry(T200): completed_at"
+  echo "other-ticket" > "$repo/other.txt"
+  git -C "$repo" add other.txt
+  git -C "$repo" commit -q -m "T300: unrelated cycle work"
+
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"T300: unrelated cycle work"* ]]
+  [[ "$output" == *"git revert"* ]]
+  # 무관 커밋의 산출물은 파괴되지 않았다
+  [ -f "$repo/other.txt" ]
+  grep -q "v2" "$repo/file.txt"
+}
+
+@test "R7: only own-ticket commits after the tag (cycle + telemetry + writer audit) -> rollback proceeds" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  echo "t" >> "$repo/file.txt"
+  git -C "$repo" add file.txt
+  git -C "$repo" commit -q -m "telemetry(T200): tokens_total"
+  echo "e" >> "$repo/file.txt"
+  git -C "$repo" add file.txt
+  git -C "$repo" commit -q -m "ticket_edit(T200): priority P2→P1"
+
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"restored T200"* ]]
+  grep -q "v1" "$repo/file.txt"
+}

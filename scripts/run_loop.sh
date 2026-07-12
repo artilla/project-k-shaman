@@ -1325,6 +1325,11 @@ EOF
       if [ "$(frontmatter_field_count "$final_file" status)" != "1" ] \
          || [ "$(frontmatter_field_count "$final_file" id)" != "1" ]; then
         wip_stage="status-not-done"
+      # 리뷰 16차 P1: id는 "개수"만이 아니라 "값"도 요청 티켓과 일치해야 한다 —
+      # 파일명은 맞지만 frontmatter id가 다른 파일(다른 티켓 본문의 복제/오이동)이
+      # 완료 증거로 집계되고 telemetry까지 그 id로 커밋됐다.
+      elif [ "$(field_of "$final_file" id)" != "$id" ]; then
+        wip_stage="id-mismatch"
       elif [ -f "$done_file" ] && [ "$final_status" != "done" ]; then
         wip_stage="status-not-done"
       elif [ ! -f "$done_file" ] && [ "$final_status" != "blocked" ] && [ "$final_status" != "skipped" ]; then
