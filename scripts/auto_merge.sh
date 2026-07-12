@@ -599,9 +599,44 @@ if [ "$ELIGIBLE" -eq 0 ]; then
       return 0
     fi
   }
+  # 리뷰 16차 P1(재수정, open-FD 경합 창): _fd_busy 검사 "직후" 열린 FD는 여전히
+  # 다음 unlink에서 늦은 write를 잃는다 — 검사-후-삭제는 원자화가 불가능하므로
+  # "삭제하지 않는다". 폐기 = git-dir 내 격리 디렉터리로 rename(원자, inode 보존).
+  # 검사에 걸리지 않은 늦은 write도 격리된 inode에 남아 복구 가능하다 (유실 소멸).
+  # (.git과 워크트리는 같은 파일시스템 — mv는 rename으로 동작한다.)
+  _AM_GITDIR="$(git rev-parse --git-dir 2>/dev/null)"
+  _AM_TRASH="${_AM_GITDIR}/auto_merge.trash.d"
+  _am_discard() {
+    mkdir -p "$_AM_TRASH" 2>/dev/null || return 1
+    mv "$1" "$_AM_TRASH/$(date +%s).$$.${RANDOM}.$(basename "$1")" 2>/dev/null
+  }
+  # 리뷰 16차 P1(index 원자성): 비교와 reset을 git 규약의 index.lock 아래에서
+  # 수행한다 — lock 획득(noclobber) → canonical index 재검증 → 임시 index에
+  # 경로 단위 reset → rename publish. lock을 쥔 동안 다른 git writer는 git 자신의
+  # 규약대로 실패하므로, 검증~publish 사이에 같은 경로가 stage될 수 없다.
+  # 비교는 blob OID만이 아니라 "mode OID stage" 전체 identity로 한다.
+  # $1=path, $2/$3=허용 index 항목("mode oid stage", ""=부재; $3 생략 가능)
+  _am_index_reset_path() {
+    local _p="$1" _e1="$2" _e2="${3-__none__}" _ilock _itmp _cur
+    _ilock="${_AM_GITDIR}/index.lock"
+    if ! (set -C; : > "$_ilock") 2>/dev/null; then return 1; fi
+    _itmp="${_AM_GITDIR}/index.amrb.$$"
+    if ! cp "${_AM_GITDIR}/index" "$_itmp" 2>/dev/null; then rm -f "$_ilock"; return 1; fi
+    _cur="$(git ls-files -s -- "$_p" 2>/dev/null | awk '{print $1" "$2" "$3; exit}')"
+    if [ "$_cur" != "$_e1" ] && [ "$_cur" != "$_e2" ]; then
+      rm -f "$_itmp" "$_ilock"; return 1
+    fi
+    if ! GIT_INDEX_FILE="$_itmp" git reset -q "HEAD" -- "$_p" >/dev/null 2>&1; then
+      rm -f "$_itmp" "$_ilock"; return 1
+    fi
+    if ! mv -f "$_itmp" "${_AM_GITDIR}/index"; then
+      rm -f "$_itmp" "$_ilock"; return 1
+    fi
+    rm -f "$_ilock"
+  }
   _sync_worktree_after_cas() {
     [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$BASE_BRANCH" ] || return 1
-    local _now _line _st _p _want _have _tmp _bak _mode _perm _idx _headb _rc=0
+    local _now _line _st _p _want _have _tmp _bak _mode _perm _mmode _hent _rc=0
     _now="$(_wt_status_or_fail 2>/dev/null)" || return 1
     [ -z "$_now" ] && return 0
     case "$_now" in *'"'*) return 1 ;; esac
@@ -629,29 +664,29 @@ EOF
       [ -z "$_line" ] && continue
       _st="${_line%"${_line#??}"}"
       _p="${_line#???}"
-      # 리뷰 15차 P1: index 동기화도 경로 단위(git reset -- <path>) — 전역
-      # read-tree --reset은 rollback과 무관한 동시 index-only staged 변경까지 지웠다.
-      # 리뷰 16차 P1: "같은 경로"의 동시 index-only staged 변경도 지우지 않는다 —
-      # index 항목이 정확히 merge 잔상(MERGE_COMMIT blob) 또는 이미 HEAD와 일치할
-      # 때만 reset한다. 다른 값이면(그 사이 누가 stage) 보존하고 REF_ONLY로 격하.
+      # 리뷰 15차 P1 + 16차 P1(재수정): index 동기화는 경로 단위이며, 비교와
+      # reset을 index.lock 아래에서 원자적으로 결속한다(_am_index_reset_path) —
+      # 허용 항목은 "mode OID stage" 전체 identity로, 정확히 merge 잔상 또는
+      # 이미 HEAD와 일치할 때만. 그 외(그 사이 누가 stage·conflict stage 포함)는
+      # 보존하고 REF_ONLY로 격하.
       _want=""
       case "$_st" in
         'M '|'A ') _want="$(git rev-parse -q --verify "${MERGE_COMMIT}:${_p}" 2>/dev/null)" || { _rc=1; continue; } ;;
       esac
-      _idx="$(git ls-files -s -- "$_p" 2>/dev/null | awk '{print $2; exit}')"
       case "$_st" in
         'M ')
-          _headb="$(git rev-parse -q --verify "HEAD:${_p}" 2>/dev/null || true)"
-          if [ "$_idx" != "$_want" ] && [ "$_idx" != "$_headb" ]; then _rc=1; continue; fi
+          _mmode="$(git ls-tree "$MERGE_COMMIT" -- "$_p" 2>/dev/null | awk '{print $1; exit}')"
+          _hent="$(git ls-tree "HEAD" -- "$_p" 2>/dev/null | awk '{print $1" "$3" 0"; exit}')"
+          _am_index_reset_path "$_p" "${_mmode} ${_want} 0" "$_hent" || { _rc=1; continue; }
           ;;
         'A ')
-          if [ -n "$_idx" ] && [ "$_idx" != "$_want" ]; then _rc=1; continue; fi
+          _mmode="$(git ls-tree "$MERGE_COMMIT" -- "$_p" 2>/dev/null | awk '{print $1; exit}')"
+          _am_index_reset_path "$_p" "${_mmode} ${_want} 0" "" || { _rc=1; continue; }
           ;;
         'D ')
-          if [ -n "$_idx" ]; then _rc=1; continue; fi
+          _am_index_reset_path "$_p" "" || { _rc=1; continue; }
           ;;
       esac
-      git reset -q "HEAD" -- "$_p" >/dev/null 2>&1 || { _rc=1; continue; }
       case "$_st" in
         'M ')
           # 리뷰 15차 P1: 파괴를 "지금 그 inode"에 원자 결속 — hardlink 후 교체(ln~mv
@@ -674,7 +709,11 @@ EOF
             mv -f "$_bak" "$_p" 2>/dev/null || true
             rm -f "$_tmp"; _rc=1; continue
           fi
-          rm -f "$_bak"
+          # unlink 금지 — 검사 직후 열린 FD의 늦은 write도 격리 inode에 보존된다.
+          if ! _am_discard "$_bak"; then
+            mv -f "$_bak" "$_p" 2>/dev/null || true
+            rm -f "$_tmp"; _rc=1; continue
+          fi
           # 캡처~복원 사이 새로 생긴 파일은 덮지 않는다 (ln no-clobber) — 실패 시 보존.
           if ! ln "$_tmp" "$_p" 2>/dev/null; then _rc=1; fi
           rm -f "$_tmp"
@@ -692,8 +731,9 @@ EOF
             # 리뷰 16차 P1: 열린 FD 감지 — 늦은 write 유실 방지, 원복·보존.
             mv -f "$_bak" "$_p" 2>/dev/null || true
             _rc=1
-          else
-            rm -f "$_bak"
+          elif ! _am_discard "$_bak"; then
+            mv -f "$_bak" "$_p" 2>/dev/null || true
+            _rc=1
           fi
           ;;
         'D ')

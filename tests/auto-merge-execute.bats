@@ -1172,14 +1172,17 @@ exit 1
 MOCK
   chmod +x "$TEST_HOME/mock_checks_sp.sh"
 
-  # index 동기화 직전 창(ls-files 첫 호출)에 같은 경로(docs/file-1.md)에
-  # foreign 내용을 stage — 과거에는 git reset -- <path>가 조용히 지웠다.
+  # 검증 루프(loop1)의 첫 hash-object 시점 — index 동기화(잠금) "이전" 창 — 에
+  # 같은 경로(docs/file-1.md)에 foreign 내용을 stage. 과거에는 이어지는
+  # git reset -- <path>가 이를 조용히 지웠다. (index.lock 원자 결속 이후로는
+  # 잠금 안의 identity 재검증이 이를 보고 보존한다. 잠금 "도중"의 stage는 git
+  # 규약상 index.lock에 막혀 아예 끼어들 수 없다.)
   local realgit
   realgit="$(command -v git)"
   mkdir -p "$TEST_HOME/spbin"
   cat > "$TEST_HOME/spbin/git" <<MOCK
 #!/usr/bin/env bash
-if [ "\$1" = "ls-files" ] && [ ! -f "$TEST_HOME/sp.injected" ]; then
+if [ "\$1" = "hash-object" ] && [ "\$2" = "--" ] && [ ! -f "$TEST_HOME/sp.injected" ]; then
   touch "$TEST_HOME/sp.injected"
   _b="\$(printf 'foreign-staged-content\n' | "$realgit" -C "$d" hash-object -w --stdin)"
   "$realgit" -C "$d" update-index --add --cacheinfo "100644,\$_b,docs/file-1.md"
