@@ -239,7 +239,22 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     [ "$(git rev-parse HEAD)" = "$HEAD_OID" ] || _rb_publish_fail "검증 후 HEAD가 이동했습니다"
     [ -z "$(git status --porcelain --untracked-files=no)" ] || _rb_publish_fail "추적 파일에 동시 변경(staged 포함)이 생겼습니다"
     [ "$(git rev-parse -q --verify "refs/tags/${POST_TAG}" 2>/dev/null || true)" = "$POST_TAGOBJ" ] || _rb_publish_fail "${POST_TAG} 태그가 그 사이 변경되었습니다"
-    git merge --ff-only "$_NEW" >/dev/null 2>&1 || _rb_publish_fail "fast-forward 공개 실패(동시 변경 감지)"
+    # 8차: ref 공개는 merge --ff-only가 아니라 update-ref의 "old-value CAS"다 —
+    # ff-only는 "검증 시점 OID"가 아니라 "지금 HEAD"와의 조상 관계만 본다:
+    # 위 재검증과 merge 사이에 branch가 과거(예: pre 태그)로 reset되면 _NEW는
+    # 여전히 그 과거의 자손이라 ff가 성공해, 동시 reset이 제거한 커밋들까지
+    # 되살리며 rc=0을 반환했다. CAS는 검증 시점 OID(HEAD_OID)와 원자 비교한다.
+    git update-ref -m "rollback ${ID}: publish owned reverts" HEAD "$_NEW" "$HEAD_OID" 2>/dev/null \
+      || _rb_publish_fail "HEAD CAS 실패 — 그 사이 동시 변경(커밋/reset)이 있었습니다"
+    # ref 공개 완료(비가역). 워크트리·index 동기화는 two-tree merge(read-tree
+    # -m -u)로 — 변경 경로만 갱신하고, 그 사이 생긴 로컬 변경과 충돌하면 파일을
+    # 덮지 않고 실패한다 (이때 ref는 이미 공개됨 — 동기화만 수동 필요, rc≠0).
+    if ! git read-tree -m -u "$HEAD_OID" "$_NEW" 2>/dev/null; then
+      _rb_cleanup_wt
+      trap - INT TERM HUP
+      echo "❌ ref 공개는 완료됐지만(HEAD=${_NEW}) 워크트리 동기화에 실패했습니다 — 로컬 변경과 충돌. 'git status' 확인 후 수동 동기화(git checkout -- <path>)가 필요합니다." >&2
+      exit 3
+    fi
     _rb_cleanup_wt
     trap - INT TERM HUP
     git update-ref -d "refs/rollback/${ID}" >/dev/null 2>&1 || true

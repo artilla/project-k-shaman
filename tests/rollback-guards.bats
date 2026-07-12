@@ -452,3 +452,40 @@ WRAP
   # 계산 결과는 refs/rollback에 보존
   git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
 }
+
+@test "R18: branch reset backwards between re-verification and publish -> CAS refuses (ff-only would resurrect removed commits)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 8차: merge --ff-only는 "검증 시점 OID"와 비교하지 않는다 — 재검증과 merge
+  # 사이에 branch가 과거(pre)로 reset되면 _NEW는 여전히 그 과거의 자손이라
+  # ff가 성공해, 동시 reset이 제거한 커밋을 되살리며 rc=0을 반환했다.
+  # update-ref old-value CAS는 이를 원자적으로 거부한다.
+  # 공개 직전 두 번째 status 호출 시점에 backward reset을 주입하는 wrapper
+  # (첫 status는 시작 가드 — 그 이후 검증·revert가 끝난 뒤의 창을 노린다).
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin5"
+  cat > "$repo/gbin5/git" <<WRAP
+#!/usr/bin/env bash
+if [ "\$1" = "status" ]; then
+  c=0; [ -f "$repo/.r18.count" ] && c=\$(cat "$repo/.r18.count")
+  c=\$((c+1)); echo "\$c" > "$repo/.r18.count"
+  if [ "\$c" = "2" ]; then
+    "$realgit" reset -q --hard cycle/T200-pre
+  fi
+fi
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin5/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin5:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"CAS 실패"* ]]
+  # 동시 reset의 결과가 보존됐다 — 제거된 커밋이 되살아나지 않았다
+  [ "$(git -C "$repo" rev-parse HEAD)" = "$(git -C "$repo" rev-parse cycle/T200-pre)" ]
+  grep -q "v1" "$repo/file.txt"
+  run git -C "$repo" log --format=%s
+  [[ "$output" != *"Revert"* ]]
+  # 계산 결과는 refs/rollback에 보존
+  git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
+}
