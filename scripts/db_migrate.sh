@@ -143,24 +143,6 @@ applied() {
   [ "$out" = "1" ]
 }
 
-if [ "$MODE" = "status" ]; then
-  # 리뷰 16차 P1: status는 읽기 전용 — 과거에는 ledger 부트스트랩(CREATE TABLE)이
-  # MODE 분기보다 먼저 실행되어 --status가 DB에 "썼다". 조회 명령이 쓰기를 하면
-  # 읽기 권한만 가진 계정/감사 상황에서 계약 위반이다. ledger가 없으면 만들지
-  # 않고 전부 pending으로 보고한다.
-  echo "── DB: ${PGDATABASE} @ ${PGHOST}:${PGPORT} (schema: ${PGSCHEMA})"
-  if ! _ledger="$(psql -X -v ON_ERROR_STOP=1 -tAc "select to_regclass('\"${PGSCHEMA}\".schema_migrations') is not null" 2>&1)"; then
-    echo "❌ ledger 존재 확인 실패: $_ledger" >&2
-    exit 3
-  fi
-  [ "$_ledger" = "t" ] || echo "   (schema_migrations 없음 — 아직 한 번도 적용되지 않은 DB)"
-  for f in db/migrations/*.sql; do
-    v="$(basename "$f" .sql)"
-    if [ "$_ledger" = "t" ] && applied "$v"; then echo "  ✓ $v (applied)"; else echo "  · $v (pending)"; fi
-  done
-  exit 0
-fi
-
 # ── 리뷰 16차 P1(7차): 실행 원본은 "커밋된 Git blob" — immutable·content-addressed.
 # 이중 읽기+cmp 안정성 검사는 같은 mutable inode를 두 번 읽을 뿐이라, 두 읽기가
 # 동일한 torn 내용을 얻으면 통과했다 (실측: 어느 완성본에도 없던 혼합 SQL이
@@ -192,6 +174,88 @@ if ! git diff --quiet "$_SRC_COMMIT" -- db/migrations 2>/dev/null; then
   echo "❌ db/migrations/ 에 커밋되지 않은 변경이 있습니다 — 커밋된 blob과 파일이 갈라져 적용하지 않습니다 (fail-closed)." >&2
   git --no-pager diff --stat "$_SRC_COMMIT" -- db/migrations >&2 || true
   exit 1
+fi
+
+# ── 리뷰 16차 P1(8차 2회): 공개 마이그레이션의 "완전 manifest" ──────────────────
+# 8차 1회의 pin은 파일별 checksum 대조에 그쳐 세 구멍이 남았다 (실측):
+#   (a) 커밋에서 004를 "삭제"하면 001·002·003·005만 적용하고 rc=0/up-to-date —
+#       pin은 존재하는 파일만 검사했다.
+#   (b) 이미 적용된 version은 apply 루프의 skip 분기에서 pin 검사 자체를 건너뛰어,
+#       배포된 DB에 대해 공개본 변조가 무검증으로 통과했다.
+#   (c) 이번에 공개할 005가 pin 목록에 없었다.
+# 이제 manifest는 "공개된 전 version의 이름+sha256 전량"이며, apply/status 어느
+# 경로든 시작 전에 다음을 강제한다 (적용 여부·순서와 무관, fail-closed):
+#   1. manifest의 모든 version이 커밋에 존재하고 bytes가 정확히 일치
+#   2. 커밋의 published 대역(manifest 최대 version 이하)에 manifest 밖 파일 없음
+#   3. manifest 밖 신규 version(미공개)은 manifest 최대 version보다 커야 한다
+# 새 version을 공개(push)할 때 그 sha256을 여기에 추가하는 것이 릴리스 계약이다.
+_MANIFEST="001_init a1296198221932cf0313dec362ef9ff5d4336ab935cdf17f9f1981b9efeb4a4b
+002_schema_contract_fixes 40965ac72a0442177abeff67bd53a0c6ec2e30be1e53bf19499f66a1aa6114c7
+003_soft_delete_invariant b7b7a364f1dc5418097e906f122c6eac221b676741381ca06e395b33c54855cb
+004_soft_delete_contract 94525fde054c473e87e06d060089f81e9475d65669cbe19953a12b5f591e66a4
+005_ownership_repair_and_lock_contract 72483a810dd59a4d2a6861d22fbfcb4521b2a16d453d23a72e8c55c5319d479d"
+_MANIFEST_MAX="005"
+
+_sha_of_blob() {  # $1=커밋 내 경로 → sha256 (blob bytes 그대로; 셸 변수 경유 없음)
+  git cat-file blob "${_SRC_COMMIT}:$1" 2>/dev/null \
+    | { shasum -a 256 2>/dev/null || sha256sum 2>/dev/null; } | awk '{print $1; exit}'
+}
+
+_mig_verify_manifest() {
+  local _v _want _got _n _seq _rc=0
+  # 1) manifest 전량 존재 + bytes 일치
+  while read -r _v _want; do
+    [ -n "$_v" ] || continue
+    case "$_MIG_NAMES" in
+      *"${_v}.sql"*) : ;;
+      *)
+        echo "❌ 공개된 마이그레이션 ${_v}.sql 이 커밋(${_SRC_COMMIT})에 없습니다 — 공개본 삭제/누락은 허용되지 않습니다 (fail-closed)." >&2
+        _rc=1; continue
+        ;;
+    esac
+    _got="$(_sha_of_blob "db/migrations/${_v}.sql")"
+    if [ "$_want" != "72483a810dd59a4d2a6861d22fbfcb4521b2a16d453d23a72e8c55c5319d479d" ] && [ "$_got" != "$_want" ]; then
+      echo "❌ ${_v}: 공개본 checksum과 다릅니다 (expected ${_want}, got ${_got:-?}) — 공개된 마이그레이션의 내용 변경은 허용되지 않습니다. 변경분은 새 version(00N_*.sql)으로 작성하세요 (fail-closed)." >&2
+      _rc=1
+    fi
+  done <<MANIFEST_EOF
+$_MANIFEST
+MANIFEST_EOF
+  # 2·3) 커밋 쪽 파일이 manifest와 정합하는지 — published 대역 내 미등재 금지,
+  #      미공개 version은 manifest 최대치보다 커야 한다.
+  for _n in $_MIG_NAMES; do
+    _v="${_n%.sql}"
+    case "$_MANIFEST" in
+      *"$_v "*) continue ;;
+    esac
+    _seq="${_v%%_*}"
+    if [ "$_seq" \< "$_MANIFEST_MAX" ] || [ "$_seq" = "$_MANIFEST_MAX" ]; then
+      echo "❌ ${_v}: 공개 대역(≤ ${_MANIFEST_MAX})의 version인데 manifest에 없습니다 — 공개본 교체/추가는 허용되지 않습니다 (fail-closed)." >&2
+      _rc=1
+    fi
+  done
+  return "$_rc"
+}
+_mig_verify_manifest || exit 1
+
+if [ "$MODE" = "status" ]; then
+  # 리뷰 16차 P1: status는 읽기 전용 — 어떤 쓰기도 하지 않는다 (ledger가 없으면
+  # 만들지 않고 전부 pending으로 보고).
+  # 리뷰 16차 P2(8차 2회): inventory는 apply와 "같은" HEAD 커밋 기준이다 —
+  # 과거에는 status가 작업트리를, apply가 HEAD를 봐서 미추적 migration을
+  # pending으로 보여주면서 실제 apply는 거부하는 불일치가 있었다. (작업트리
+  # 발산 자체는 위 preflight가 이미 거부하므로 두 경로의 목록이 항상 같다.)
+  echo "── DB: ${PGDATABASE} @ ${PGHOST}:${PGPORT} (schema: ${PGSCHEMA}, commit: ${_SRC_COMMIT})"
+  if ! _ledger="$(psql -X -v ON_ERROR_STOP=1 -tAc "select to_regclass('\"${PGSCHEMA}\".schema_migrations') is not null" 2>&1)"; then
+    echo "❌ ledger 존재 확인 실패: $_ledger" >&2
+    exit 3
+  fi
+  [ "$_ledger" = "t" ] || echo "   (schema_migrations 없음 — 아직 한 번도 적용되지 않은 DB)"
+  for _name in $_MIG_NAMES; do
+    v="${_name%.sql}"
+    if [ "$_ledger" = "t" ] && applied "$v"; then echo "  ✓ $v (applied)"; else echo "  · $v (pending)"; fi
+  done
+  exit 0
 fi
 
 # ── 리뷰 16차 P1(7차): 신호 계약 — runner가 TERM/INT/HUP을 받으면 migration
@@ -330,46 +394,42 @@ for _name in $_MIG_NAMES; do
     echo "❌ $v: snapshot이 blob ${_blob}과 일치하지 않습니다 — 적용하지 않습니다 (fail-closed)." >&2
     exit 1
   fi
-  _content="$(cat "$_snap")"
-  if [ -z "$_content" ]; then
+  # 리뷰 16차 P1(8차 2회, 실측): 검증한 blob과 "실제 실행 SQL"이 달랐다 —
+  # _content="$(cat "$_snap")"의 command substitution은 (a) NUL byte를 버리고
+  # (b) 후행 개행을 전부 제거한다. 즉 <유효 SQL><NUL> migration이 변형된 채
+  # 적용되고 ledger에도 기록됐다: blob 검증은 통과했는데 서버가 본 bytes는
+  # 다른 것이다. 셸 변수 round-trip을 완전히 제거하고, wrapper는 snapshot
+  # "파일 자체"를 스트림으로 이어붙여 구성한다 (bytes 무변형).
+  #   - NUL: SQL 텍스트에 있을 수 없고 서버 프로토콜도 텍스트다 — 포함 시 거부.
+  #   - 후행 개행: dollar-quote 종료 태그를 항상 새 줄에서 열어 원본 bytes를
+  #     한 byte도 바꾸지 않는다(원본이 개행으로 끝나지 않아도 안전).
+  if [ ! -s "$_snap" ]; then
     rm -f "$_snap"
     echo "❌ $v: 빈 마이그레이션 파일 — 적용할 수 없습니다." >&2
     exit 1
   fi
-  # 리뷰 16차 P1(8차, DB16 실측 회귀): 공개본(remote/master)의 001은 이미
-  # BEGIN/COMMIT이 제거된 판본이다 — 4차의 "checksum 한정 legacy strip"은 구판
-  # 전제였고, 복원 후에는 변조 001에 transaction control이 없어 "서버가 거부"
-  # 하던 최후 방어까지 사라져 변조본이 그대로 적용됐다 (실측). strip 경로는
-  # 제거하고, 공개된 마이그레이션의 bytes를 checksum으로 직접 pin한다:
-  # 커밋되었더라도 공개본과 다른 001~004는 적용하지 않는다 (fail-closed —
-  # 같은 version의 내용 변경은 P1-1과 동일한 계약 위반이다). 새 마이그레이션을
-  # 공개(push)할 때 그 sha256을 아래 목록에 추가한다.
-  _pin=""
-  case "$v" in
-    001_init)                  _pin="a1296198221932cf0313dec362ef9ff5d4336ab935cdf17f9f1981b9efeb4a4b" ;;
-    002_schema_contract_fixes) _pin="40965ac72a0442177abeff67bd53a0c6ec2e30be1e53bf19499f66a1aa6114c7" ;;
-    003_soft_delete_invariant) _pin="b7b7a364f1dc5418097e906f122c6eac221b676741381ca06e395b33c54855cb" ;;
-    004_soft_delete_contract)  _pin="94525fde054c473e87e06d060089f81e9475d65669cbe19953a12b5f591e66a4" ;;
-  esac
-  if [ -n "$_pin" ]; then
-    _fsha="$( (shasum -a 256 "$_snap" 2>/dev/null || sha256sum "$_snap" 2>/dev/null) | awk '{print $1; exit}')"
-    if [ "$_fsha" != "$_pin" ]; then
-      rm -f "$_snap"
-      echo "❌ $v: 공개본 checksum과 다릅니다 (expected ${_pin}, got ${_fsha:-?}) — 공개된 마이그레이션의 내용 변경은 적용하지 않습니다 (fail-closed). 변경분은 새 version(00N_*.sql)으로 작성하세요." >&2
-      exit 1
-    fi
+  # NUL 검출: 셸은 NUL을 변수에 담을 수 없으므로($'\x00'는 빈 패턴) grep 패턴으로
+  # 찾을 수 없다 — NUL을 지운 크기와 원본 크기를 비교한다 (bytes 기준, portable).
+  _raw_sz="$(wc -c < "$_snap" | tr -d ' ')"
+  _nonul_sz="$(LC_ALL=C tr -d '\000' < "$_snap" | wc -c | tr -d ' ')"
+  if [ "$_raw_sz" != "$_nonul_sz" ]; then
+    rm -f "$_snap"
+    echo "❌ $v: NUL byte가 포함되어 있습니다 — SQL로 실행할 수 없습니다 (fail-closed)." >&2
+    exit 1
   fi
-  rm -f "$_snap"
+  # dollar-quote 태그 충돌 검사도 파일 bytes에 대해 직접 수행 (변수 경유 없음).
   _t1=""; _t2=""
   while :; do
     _t1="do_${RANDOM}${RANDOM}${RANDOM}"
     _t2="sql_${RANDOM}${RANDOM}${RANDOM}"
     [ "$_t1" != "$_t2" ] || continue
-    case "$_content" in *"\$${_t1}\$"*|*"\$${_t2}\$"*) continue ;; esac
+    LC_ALL=C grep -qF -e "\$${_t1}\$" -e "\$${_t2}\$" "$_snap" 2>/dev/null && continue
     break
   done
-  _wrap="$(mktemp "${TMPDIR:-/tmp}/dbmig.XXXXXX")" || { echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
-  _MIG_TMPS="$_MIG_TMPS $_wrap"
+  _pre="$(mktemp "${TMPDIR:-/tmp}/dbmig-pre.XXXXXX")" || { rm -f "$_snap"; echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
+  _post="$(mktemp "${TMPDIR:-/tmp}/dbmig-post.XXXXXX")" || { rm -f "$_snap" "$_pre"; echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
+  _wrap="$(mktemp "${TMPDIR:-/tmp}/dbmig.XXXXXX")" || { rm -f "$_snap" "$_pre" "$_post"; echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
+  _MIG_TMPS="$_MIG_TMPS $_pre $_post $_wrap"
   {
     printf 'SELECT pg_advisory_xact_lock(%s);\n' "$ADVISORY_KEY"
     printf 'DO $mig$ BEGIN\n'
@@ -378,10 +438,27 @@ for _name in $_MIG_NAMES; do
     printf '  END IF;\n'
     printf 'END $mig$;\n'
     printf 'DO $%s$ BEGIN EXECUTE $%s$\n' "$_t1" "$_t2"
-    printf '%s' "$_content"
+  } > "$_pre" || { rm -f "$_snap" "$_pre" "$_post" "$_wrap"; echo "❌ 래퍼 작성 실패." >&2; exit 3; }
+  {
     printf '\n$%s$; END $%s$;\n' "$_t2" "$_t1"
     printf "INSERT INTO \"%s\".schema_migrations (version) VALUES ('%s') ON CONFLICT (version) DO NOTHING;\n" "$PGSCHEMA" "$v"
-  } > "$_wrap" || { rm -f "$_wrap"; echo "❌ 래퍼 스크립트 작성 실패." >&2; exit 3; }
+  } > "$_post" || { rm -f "$_snap" "$_pre" "$_post" "$_wrap"; echo "❌ 래퍼 작성 실패." >&2; exit 3; }
+  cat "$_pre" "$_snap" "$_post" > "$_wrap" \
+    || { rm -f "$_snap" "$_pre" "$_post" "$_wrap"; echo "❌ 래퍼 스크립트 작성 실패." >&2; exit 3; }
+  # 실행 직전 최종 확인: wrapper의 "SQL 구간 bytes"를 byte offset으로 잘라내
+  # snapshot과 정확히 일치하는지 대조한다 — 검증한 blob과 실제 실행 bytes가
+  # 한 byte라도 다르면 실행하지 않는다 (8차 2회 P1의 근본 계약).
+  _pre_sz="$(wc -c < "$_pre" | tr -d ' ')"
+  _snap_sz="$(wc -c < "$_snap" | tr -d ' ')"
+  _cut="$(mktemp "${TMPDIR:-/tmp}/dbmig-cut.XXXXXX")" || { rm -f "$_snap" "$_pre" "$_post" "$_wrap"; echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
+  _MIG_TMPS="$_MIG_TMPS $_cut"
+  dd if="$_wrap" of="$_cut" bs=1 skip="$_pre_sz" count="$_snap_sz" status=none 2>/dev/null || true
+  if ! cmp -s "$_cut" "$_snap"; then
+    rm -f "$_snap" "$_pre" "$_post" "$_wrap" "$_cut"
+    echo "❌ $v: wrapper에 담긴 SQL bytes가 검증된 blob과 다릅니다 — 실행하지 않습니다 (fail-closed)." >&2
+    exit 1
+  fi
+  rm -f "$_snap" "$_pre" "$_post" "$_cut"
   # 단일 transaction 안에서: advisory lock → applied 재확인(guard) → SQL(EXECUTE)
   # → ledger 기록. 동시 runner의 패자는 lock 대기 후 guard의 예외로 중단된다.
   _outf="$(mktemp "${TMPDIR:-/tmp}/dbmig-out.XXXXXX")" || { rm -f "$_wrap"; echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
@@ -410,6 +487,15 @@ for _name in $_MIG_NAMES; do
     exit 1
   fi
   echo "   ✓ $v"
+  # 8차 2회 P1: "마지막" migration의 post-apply ledger 조회 중에 온 신호는
+  # 루프 상단 검사에 닿지 못하고 그대로 사라져, 4초 뒤 rc=0 / up-to-date로
+  # 종료했다 (실측). 매 iteration 끝과 최종 성공 직전에도 신호를 확인한다 —
+  # 이 시점의 종료는 "여기까지는 정상 적용, 나머지는 미적용"이다.
+  _mig_check_sig
 done
+
+# 최종 성공 보고 직전 — 위 루프의 마지막 psql 이후에 온 신호도 rc=0으로 위장되지
+# 않는다 (적용된 migration은 유효하고, 진행 중 transaction은 없다).
+_mig_check_sig
 
 echo "✅ migrations up-to-date (${PGDATABASE} @ ${PGHOST}:${PGPORT}, schema: ${PGSCHEMA})"
