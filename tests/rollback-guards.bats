@@ -255,7 +255,9 @@ $B"
   mkdir -p "$repo/gbin"
   cat > "$repo/gbin/git" <<WRAP
 #!/usr/bin/env bash
-if [ "\$1" = "-C" ] && [ "\$3" = "revert" ] && [ "\$4" != "--abort" ] && [ ! -f "$repo/.injected" ]; then
+case " \$* " in *" revert "*) is_revert=1 ;; *) is_revert=0 ;; esac
+case " \$* " in *" --abort "*) is_revert=0 ;; esac
+if [ "\$is_revert" = "1" ] && [ ! -f "$repo/.injected" ]; then
   touch "$repo/.injected"
   echo late > "$repo/foreign.txt"
   "$realgit" add foreign.txt
@@ -311,9 +313,11 @@ $A"
   mkdir -p "$repo/gbin2"
   cat > "$repo/gbin2/git" <<WRAP
 #!/usr/bin/env bash
-if [ "\$1" = "-C" ] && [ "\$3" = "revert" ] && [ "\$5" = "$A" ]; then
-  echo "concurrent-dirty" >> "$repo/stable.txt"
-fi
+case " \$* " in
+  *" revert "*)
+    case " \$* " in *" $A"*) echo "concurrent-dirty" >> "$repo/stable.txt" ;; esac
+    ;;
+esac
 exec "$realgit" "\$@"
 WRAP
   chmod +x "$repo/gbin2/git"
@@ -391,7 +395,9 @@ $B"
   mkdir -p "$repo/gbin3"
   cat > "$repo/gbin3/git" <<WRAP
 #!/usr/bin/env bash
-if [ "\$1" = "-C" ] && [ "\$3" = "revert" ] && [ "\$4" != "--abort" ]; then
+case " \$* " in *" revert "*) is_revert=1 ;; *) is_revert=0 ;; esac
+case " \$* " in *" --abort "*) is_revert=0 ;; esac
+if [ "\$is_revert" = "1" ]; then
   "$realgit" "\$@"
   rc=\$?
   if [ "\$rc" -ne 0 ] && [ ! -f "$repo/.r16" ]; then
@@ -434,7 +440,9 @@ WRAP
   mkdir -p "$repo/gbin4"
   cat > "$repo/gbin4/git" <<WRAP
 #!/usr/bin/env bash
-if [ "\$1" = "-C" ] && [ "\$3" = "revert" ] && [ "\$4" != "--abort" ] && [ ! -f "$repo/.r17" ]; then
+case " \$* " in *" revert "*) is_revert=1 ;; *) is_revert=0 ;; esac
+case " \$* " in *" --abort "*) is_revert=0 ;; esac
+if [ "\$is_revert" = "1" ] && [ ! -f "$repo/.r17" ]; then
   touch "$repo/.r17"
   "$realgit" tag -f -a "cycle/T200-post" -m "owned-commits
 moved-to-new-cycle" HEAD >/dev/null 2>&1
@@ -488,4 +496,66 @@ WRAP
   [[ "$output" != *"Revert"* ]]
   # 계산 결과는 refs/rollback에 보존
   git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
+}
+
+@test "R19: switching to another branch at the same OID -> publish targets the pinned branch ref, refused on switch" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 8차 2회 P1(#4): 공개가 symbolic HEAD를 갱신해, 검증 후 "같은 OID의 다른
+  # branch"로 전환하면 그 branch가 rollback되고 원래 branch는 그대로인데 rc=0 +
+  # 태그 삭제까지 일어났다 (실측). 이제 검증 시점의 구체 branch ref를 고정하고,
+  # 공개 직전 그 branch 위에 있는지 재검증한다.
+  git -C "$repo" branch other       # master와 같은 OID
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin6"
+  cat > "$repo/gbin6/git" <<WRAP
+#!/usr/bin/env bash
+case " \$* " in *" revert "*) is_revert=1 ;; *) is_revert=0 ;; esac
+case " \$* " in *" --abort "*) is_revert=0 ;; esac
+if [ "\$is_revert" = "1" ] && [ ! -f "$repo/.r19" ]; then
+  touch "$repo/.r19"
+  "$realgit" symbolic-ref HEAD refs/heads/other   # 같은 OID의 다른 branch로 전환
+fi
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin6/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin6:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"branch가 바뀌었습니다"* ]]
+  # 어느 branch도 rollback되지 않았고, 태그도 살아 있다
+  [ "$(git -C "$repo" rev-parse refs/heads/master)" = "$(git -C "$repo" rev-parse refs/heads/other)" ]
+  run git -C "$repo" log --format=%s refs/heads/other
+  [[ "$output" != *"Revert"* ]]
+  git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+  git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
+}
+
+@test "R20: repository hooks cannot inject commits into the rollback (hooks disabled in the isolated worktree)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 8차 2회 P1(#7): 격리 worktree의 revert도 저장소 hook을 실행해, post-commit
+  # hook이 만든 외부 커밋이 rollback 결과에 포함된 채 rc=0으로 공개됐다 (실측).
+  mkdir -p "$repo/.git/hooks"
+  cat > "$repo/.git/hooks/post-commit" <<'HOOK'
+#!/usr/bin/env bash
+[ -f "$GIT_DIR/.hookran" ] && exit 0
+touch "$GIT_DIR/.hookran"
+echo "injected by hook" > hook-artifact.txt
+git add hook-artifact.txt
+git -c user.email=h@h -c user.name=H commit -q -m "hook: injected commit" --no-verify
+HOOK
+  chmod +x "$repo/.git/hooks/post-commit"
+
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 0 ]
+  # 소유 커밋만 되돌아갔고, hook 커밋·산출물은 rollback 결과에 없다
+  grep -q "v1" "$repo/file.txt"
+  [ ! -f "$repo/hook-artifact.txt" ]
+  run git -C "$repo" log --format=%s
+  [[ "$output" != *"hook: injected commit"* ]]
+  # 공개된 커밋은 우리 revert 하나뿐이다
+  [ "$(git -C "$repo" rev-list --count 'cycle/T200-pre..HEAD')" = "2" ]
+  [ "$(git -C "$repo" log --format=%s | grep -c 'Revert')" = "1" ]
 }

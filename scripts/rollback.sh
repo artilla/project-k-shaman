@@ -118,6 +118,16 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   fi
 
   if [ "$MODE_ROLLBACK" = "revert" ]; then
+    # 8차 2회 P1(#4): 공개 대상은 symbolic HEAD가 아니라 "지금 checkout된 구체
+    # branch ref"다. update-ref HEAD ...는 실행 시점에 HEAD가 가리키는 branch를
+    # 갱신하므로, 같은 OID의 다른 branch로 전환하면 그 branch가 rollback되고
+    # 원래 branch는 그대로인데 rc=0 + 태그 삭제가 일어났다 (실측). 검증 시점의
+    # branch를 고정하고, 공개 직전 "여전히 그 branch에 있는지"까지 재검증한다.
+    HEAD_REF="$(git symbolic-ref -q HEAD || true)"   # detached면 빈 문자열
+    if [ -z "$HEAD_REF" ]; then
+      echo "❌ detached HEAD 상태입니다 — 자동 revert 롤백은 branch 위에서만 수행합니다 (fail-closed)." >&2
+      exit 3
+    fi
     # 소유 OID 고정 — 태그 "이름" 재조회는 그 사이 태그 이동 시 다른 annotation을
     # 읽는 TOCTOU (6차 P1-5). 해석 시점에 고정한 tag object OID에서 직접 읽는다.
     # (annotated tag object의 message에서 OID 추출; lightweight/비태그 객체면
@@ -189,7 +199,18 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
       git worktree prune >/dev/null 2>&1 || true
       rm -rf "$_WT_BASE" 2>/dev/null || true
     }
-    trap '_rb_cleanup_wt; echo "❌ 신호로 중단됨 — 격리 worktree만 정리했습니다 (메인 워크트리·index·HEAD는 변경되지 않았습니다)." >&2; exit 130' INT TERM HUP
+    # 8차 2회 P1(#6): 공개(ref transaction) "이후"의 신호는 더 이상 "메인 무변경"이
+    # 아니다 — HEAD는 새 OID이고 index/worktree만 이전 상태일 수 있다. 공개 여부를
+    # 상태로 들고 정확히 보고한다 (거짓 안심 금지).
+    _RB_PUBLISHED=0
+    _rb_sig_msg() {
+      if [ "$_RB_PUBLISHED" = "1" ]; then
+        echo "❌ 신호로 중단됨 — ref 공개는 이미 완료됐습니다(${HEAD_REF} = ${_NEW}). index/worktree가 이전 상태로 남았을 수 있습니다: 'git status' 확인 후 'git reset --hard HEAD'(로컬 변경이 없을 때만) 또는 'git checkout -- <path>'로 동기화하세요." >&2
+      else
+        echo "❌ 신호로 중단됨 — 격리 worktree만 정리했습니다 (메인 워크트리·index·HEAD는 변경되지 않았습니다)." >&2
+      fi
+    }
+    trap '_rb_cleanup_wt; _rb_sig_msg; exit 130' INT TERM HUP
     if ! git worktree add --detach "$_WT" "$HEAD_OID" >/dev/null 2>&1; then
       _rb_cleanup_wt
       trap - INT TERM HUP
@@ -197,7 +218,15 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
       exit 3
     fi
 
+    # 8차 2회 P1(#7): 격리 worktree의 revert도 "저장소의" hook(post-commit 등)을
+    # 실행한다 — hook이 만든 외부 커밋이 격리 HEAD에 쌓여 rollback 결과에 포함된
+    # 채 rc=0으로 공개됐다 (실측). 롤백은 소유 커밋의 역커밋"만" 만들어야 하므로
+    # 이 구간의 git은 hook을 전부 무력화한다 (core.hooksPath를 디렉터리가 아닌
+    # 경로로 고정 — 어떤 hook도 발견되지 않는다).
+    _rbgit() { git -c core.hooksPath=/dev/null -C "$_WT" "$@"; }
+
     _rb_failed=""
+    _rb_made=0
     for c in $OWNED; do
       case "$ALREADY" in
         *"$c"*)
@@ -205,11 +234,12 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
           continue
           ;;
       esac
-      if ! git -C "$_WT" revert --no-edit "$c" >/dev/null 2>&1; then
-        git -C "$_WT" revert --abort >/dev/null 2>&1 || true  # 격리 index — 파괴 대상 없음
+      if ! _rbgit revert --no-edit "$c" >/dev/null 2>&1; then
+        _rbgit revert --abort >/dev/null 2>&1 || true  # 격리 index — 파괴 대상 없음
         _rb_failed="$c"
         break
       fi
+      _rb_made=$((_rb_made+1))
     done
 
     if [ -n "$_rb_failed" ]; then
@@ -224,6 +254,19 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     fi
     _NEW="$(git -C "$_WT" rev-parse HEAD)"
 
+    # 결과 검증: 격리 HEAD에 쌓인 커밋 수가 "우리가 만든 revert 수"와 정확히
+    # 같아야 한다 — hook·외부 개입이 만든 여분의 커밋이 결과에 섞이면 거부한다
+    # (hook 무력화의 이중 방어, fail-closed).
+    _rb_cnt="$(git rev-list --count "${HEAD_OID}..${_NEW}" 2>/dev/null || echo -1)"
+    if [ "$_rb_cnt" != "$_rb_made" ]; then
+      git update-ref "refs/rollback/${ID}" "$_NEW" >/dev/null 2>&1 || true
+      _rb_cleanup_wt
+      trap - INT TERM HUP
+      echo "❌ 격리 rollback 결과에 예상 밖 커밋이 있습니다 (revert ${_rb_made}건, 실제 ${_rb_cnt}건 — hook 등 외부 개입) — 공개하지 않았습니다 (fail-closed)." >&2
+      echo "   계산 결과는 refs/rollback/${ID} 에 보존했습니다." >&2
+      exit 3
+    fi
+
     # 공개 전 재검증 — 전부 성립할 때만 ff-only로 원자 공개 (fail-closed):
     #   (1) HEAD가 검증 시점 그대로, (2) 추적 파일 clean(동시 staged/변경 보존 —
     #   같은 경로 포함), (3) post 태그가 해석 시점의 tag object 그대로(태그가 새
@@ -236,35 +279,45 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
       echo "   계산된 롤백 결과는 refs/rollback/${ID} 에 보존했습니다 — 검토 후 수동 병합하거나 재실행하세요." >&2
       exit 3
     }
-    [ "$(git rev-parse HEAD)" = "$HEAD_OID" ] || _rb_publish_fail "검증 후 HEAD가 이동했습니다"
+    # 공개 전 사전 점검 (빠른 실패용 — "판정"은 아래 ref transaction의 CAS다):
+    #   여전히 같은 branch 위에 있고, 추적 파일이 clean해야 한다.
+    [ "$(git symbolic-ref -q HEAD || true)" = "$HEAD_REF" ] \
+      || _rb_publish_fail "검증 후 checkout된 branch가 바뀌었습니다 (${HEAD_REF} → $(git symbolic-ref -q HEAD || echo detached))"
     [ -z "$(git status --porcelain --untracked-files=no)" ] || _rb_publish_fail "추적 파일에 동시 변경(staged 포함)이 생겼습니다"
-    [ "$(git rev-parse -q --verify "refs/tags/${POST_TAG}" 2>/dev/null || true)" = "$POST_TAGOBJ" ] || _rb_publish_fail "${POST_TAG} 태그가 그 사이 변경되었습니다"
-    # 8차: ref 공개는 merge --ff-only가 아니라 update-ref의 "old-value CAS"다 —
-    # ff-only는 "검증 시점 OID"가 아니라 "지금 HEAD"와의 조상 관계만 본다:
-    # 위 재검증과 merge 사이에 branch가 과거(예: pre 태그)로 reset되면 _NEW는
-    # 여전히 그 과거의 자손이라 ff가 성공해, 동시 reset이 제거한 커밋들까지
-    # 되살리며 rc=0을 반환했다. CAS는 검증 시점 OID(HEAD_OID)와 원자 비교한다.
-    git update-ref -m "rollback ${ID}: publish owned reverts" HEAD "$_NEW" "$HEAD_OID" 2>/dev/null \
-      || _rb_publish_fail "HEAD CAS 실패 — 그 사이 동시 변경(커밋/reset)이 있었습니다"
-    # ref 공개 완료(비가역). 워크트리·index 동기화는 two-tree merge(read-tree
-    # -m -u)로 — 변경 경로만 갱신하고, 그 사이 생긴 로컬 변경과 충돌하면 파일을
-    # 덮지 않고 실패한다 (이때 ref는 이미 공개됨 — 동기화만 수동 필요, rc≠0).
+
+    # 8차 2회 P1(#4·#5): 공개는 "하나의 ref transaction"이다.
+    #   #4: 대상은 symbolic HEAD가 아니라 검증 시점에 고정한 구체 branch ref —
+    #       update-ref HEAD는 실행 시점의 branch를 갱신해, 같은 OID의 다른 branch로
+    #       전환하면 엉뚱한 branch를 rollback하고 rc=0을 반환했다 (실측).
+    #   #5: 태그 검증(읽기)과 ref 공개가 분리돼 있으면, 그 사이 태그가 새 cycle로
+    #       이동해도 낡은 rollback이 먼저 공개되고 태그 삭제만 나중에 실패했다.
+    #       branch 갱신(old=HEAD_OID)과 태그 삭제(old=POST_TAGOBJ)를 한 transaction
+    #       으로 묶으면, 둘 중 하나라도 old-value가 어긋나면 "아무것도" 적용되지
+    #       않는다 — 낡은 결과의 부분 공개가 원리적으로 불가능하다.
+    if ! git update-ref --stdin >/dev/null 2>&1 <<REF_TXN
+start
+update ${HEAD_REF} ${_NEW} ${HEAD_OID}
+delete refs/tags/${POST_TAG} ${POST_TAGOBJ}
+prepare
+commit
+REF_TXN
+    then
+      _rb_publish_fail "ref transaction 실패 — 그 사이 ${HEAD_REF} 또는 ${POST_TAG}가 변경되었습니다 (branch·태그 모두 무변경)"
+    fi
+    _RB_PUBLISHED=1   # 이 지점부터 "메인 무변경"은 더 이상 사실이 아니다 (#6)
+
+    # ref 공개 완료(원자). 워크트리·index 동기화는 two-tree merge(read-tree -m -u):
+    # 변경 경로만 갱신하고, 그 사이 생긴 로컬 변경과 충돌하면 덮지 않고 실패한다
+    # (이때 ref는 이미 공개된 상태 — 동기화만 수동 필요, rc≠0으로 보고).
     if ! git read-tree -m -u "$HEAD_OID" "$_NEW" 2>/dev/null; then
       _rb_cleanup_wt
       trap - INT TERM HUP
-      echo "❌ ref 공개는 완료됐지만(HEAD=${_NEW}) 워크트리 동기화에 실패했습니다 — 로컬 변경과 충돌. 'git status' 확인 후 수동 동기화(git checkout -- <path>)가 필요합니다." >&2
+      echo "❌ ref 공개는 완료됐지만(${HEAD_REF} = ${_NEW}) 워크트리 동기화에 실패했습니다 — 로컬 변경과 충돌. 'git status' 확인 후 수동 동기화(git checkout -- <path>)가 필요합니다." >&2
       exit 3
     fi
     _rb_cleanup_wt
     trap - INT TERM HUP
     git update-ref -d "refs/rollback/${ID}" >/dev/null 2>&1 || true
-
-    # 태그 삭제 CAS — 공개 직전 재검증을 통과했으므로 실패는 공개~삭제 사이의
-    # 동시 이동뿐이다. 성공 오보 대신 수동 확인이 필요한 상태로 보고한다 (rc≠0).
-    if ! git update-ref -d "refs/tags/${POST_TAG}" "$POST_TAGOBJ" >/dev/null 2>&1; then
-      echo "❌ revert 공개는 완료됐지만 ${POST_TAG} 태그가 그 사이 변경되어 삭제하지 못했습니다 — 태그 상태를 수동 확인하세요." >&2
-      exit 3
-    fi
     echo "rolled back $ID by revert (owned commits only; history preserved; 미추적 산출물은 보존됨)"
     exit 0
   fi
