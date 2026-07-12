@@ -230,16 +230,20 @@ _rel_of() {
   esac
 }
 _wt_status_or_fail() {
-  local out lock_rel log_rel
+  local out lock_rel log_rel trash_rel
   lock_rel="$(_rel_of "$(_phys_of "$STATE_DIR/auto_merge.lock.d")")"
   log_rel="$(_rel_of "$(_phys_of "$STATE_DIR/auto_merge.log")")"
+  # 리뷰 16차 P1(4차): quarantine은 STATE_DIR 아래(워크트리와 같은 파일시스템) —
+  # 자기 산출물이므로 clean 판정에서 제외한다 (lock·log와 동일 계약).
+  trash_rel="$(_rel_of "$(_phys_of "$STATE_DIR/auto_merge.trash.d")")"
   out="$(git status --porcelain --untracked-files=all)" || return 1
-  printf '%s' "$out" | awk -v lock="$lock_rel" -v log_f="$log_rel" '
+  printf '%s' "$out" | awk -v lock="$lock_rel" -v log_f="$log_rel" -v trash="$trash_rel" '
     {
       p = substr($0, 4)
       if (lock != "" && (p == lock || p == lock "/" || index(p, lock "/") == 1)) next
       if (lock != "" && index(p, lock ".reclaim.") == 1) next
       if (log_f != "" && p == log_f) next
+      if (trash != "" && (p == trash || p == trash "/" || index(p, trash "/") == 1)) next
       print
     }'
 }
@@ -601,14 +605,43 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   }
   # 리뷰 16차 P1(재수정, open-FD 경합 창): _fd_busy 검사 "직후" 열린 FD는 여전히
   # 다음 unlink에서 늦은 write를 잃는다 — 검사-후-삭제는 원자화가 불가능하므로
-  # "삭제하지 않는다". 폐기 = git-dir 내 격리 디렉터리로 rename(원자, inode 보존).
-  # 검사에 걸리지 않은 늦은 write도 격리된 inode에 남아 복구 가능하다 (유실 소멸).
-  # (.git과 워크트리는 같은 파일시스템 — mv는 rename으로 동작한다.)
+  # "삭제하지 않는다". 폐기 = 격리 디렉터리로 rename(원자, inode 보존).
+  # 리뷰 16차 P1(4차): git-dir는 linked worktree에서 워크트리와 "다른 파일시스템/
+  # 볼륨"일 수 있고(mv가 copy+unlink로 강등 → 늦은 write 유실), per-worktree
+  # gitdir는 `git worktree remove`와 함께 삭제된다 — 격리 위치를 STATE_DIR
+  # (워크트리 내 state/, 워크트리와 같은 볼륨)로 옮기고, rename 전에 실제로
+  # 같은 device인지 검증한다. 다르면 폐기하지 않는다 (호출자가 원복·보존).
   _AM_GITDIR="$(git rev-parse --git-dir 2>/dev/null)"
-  _AM_TRASH="${_AM_GITDIR}/auto_merge.trash.d"
-  _am_discard() {
+  _AM_TRASH="${STATE_DIR}/auto_merge.trash.d"
+  _dev_of() { stat -c '%d' "$1" 2>/dev/null || stat -f '%d' "$1" 2>/dev/null; }
+  _am_discard() {  # $1=캡처 파일, $2=원경로(기록용)
     mkdir -p "$_AM_TRASH" 2>/dev/null || return 1
-    mv "$1" "$_AM_TRASH/$(date +%s).$$.${RANDOM}.$(basename "$1")" 2>/dev/null
+    if [ ! -f "$_AM_TRASH/README.md" ]; then
+      {
+        echo "# auto_merge quarantine"
+        echo "rollback이 폐기한 merge 잔상. unlink 대신 rename으로 보존해 열린 FD의"
+        echo "늦은 write도 이 inode에 남는다 (리뷰 16차 P1)."
+        echo "- 복구: manifest.tsv(시각, merge OID, 원경로, 격리 경로)에서 찾아 mv로 복원."
+        echo "- 보존: 해당 rollback의 감사 로그(ROLLED_BACK) 확인 후 수동 삭제 가능."
+      } > "$_AM_TRASH/README.md" 2>/dev/null || true
+    fi
+    [ "$(_dev_of "$1")" = "$(_dev_of "$_AM_TRASH")" ] || return 1
+    local _dst
+    _dst="$_AM_TRASH/$(date +%s).$$.${RANDOM}.$(basename "$1")"
+    mv "$1" "$_dst" 2>/dev/null || return 1
+    printf '%s\t%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)" \
+      "${MERGE_COMMIT:-unknown}" "$2" "$_dst" >> "$_AM_TRASH/manifest.tsv" 2>/dev/null || true
+  }
+  # 리뷰 16차 P1(4차): index CAS 임계구역 중 신호/종료 시 잔여물(.git/index.lock·
+  # index.amrb.*·writer lock)을 반드시 정리한다 — Git 수동 복구까지 막던 고착 제거.
+  _AM_ILOCK_PATH=""
+  _AM_ITMP_PATH=""
+  _AM_TW_HELD=0
+  _am_release_transients() {
+    [ -n "${_AM_ITMP_PATH:-}" ] && { rm -f "$_AM_ITMP_PATH" 2>/dev/null || true; _AM_ITMP_PATH=""; }
+    [ -n "${_AM_ILOCK_PATH:-}" ] && { rm -f "$_AM_ILOCK_PATH" 2>/dev/null || true; _AM_ILOCK_PATH=""; }
+    if [ "${_AM_TW_HELD:-0}" = "1" ]; then _am_tw_release 2>/dev/null || true; _AM_TW_HELD=0; fi
+    return 0
   }
   # 리뷰 16차 P1(index 원자성): 비교와 reset을 git 규약의 index.lock 아래에서
   # 수행한다 — lock 획득(noclobber) → canonical index 재검증 → 임시 index에
@@ -620,19 +653,23 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     local _p="$1" _e1="$2" _e2="${3-__none__}" _ilock _itmp _cur
     _ilock="${_AM_GITDIR}/index.lock"
     if ! (set -C; : > "$_ilock") 2>/dev/null; then return 1; fi
+    _AM_ILOCK_PATH="$_ilock"
     _itmp="${_AM_GITDIR}/index.amrb.$$"
-    if ! cp "${_AM_GITDIR}/index" "$_itmp" 2>/dev/null; then rm -f "$_ilock"; return 1; fi
+    _AM_ITMP_PATH="$_itmp"
+    if ! cp "${_AM_GITDIR}/index" "$_itmp" 2>/dev/null; then rm -f "$_ilock" "$_itmp"; _AM_ILOCK_PATH=""; _AM_ITMP_PATH=""; return 1; fi
     _cur="$(git ls-files -s -- "$_p" 2>/dev/null | awk '{print $1" "$2" "$3; exit}')"
     if [ "$_cur" != "$_e1" ] && [ "$_cur" != "$_e2" ]; then
-      rm -f "$_itmp" "$_ilock"; return 1
+      rm -f "$_itmp" "$_ilock"; _AM_ILOCK_PATH=""; _AM_ITMP_PATH=""; return 1
     fi
     if ! GIT_INDEX_FILE="$_itmp" git reset -q "HEAD" -- "$_p" >/dev/null 2>&1; then
-      rm -f "$_itmp" "$_ilock"; return 1
+      rm -f "$_itmp" "$_ilock"; _AM_ILOCK_PATH=""; _AM_ITMP_PATH=""; return 1
     fi
     if ! mv -f "$_itmp" "${_AM_GITDIR}/index"; then
-      rm -f "$_itmp" "$_ilock"; return 1
+      rm -f "$_itmp" "$_ilock"; _AM_ILOCK_PATH=""; _AM_ITMP_PATH=""; return 1
     fi
+    _AM_ITMP_PATH=""
     rm -f "$_ilock"
+    _AM_ILOCK_PATH=""
   }
   _sync_worktree_after_cas() {
     [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$BASE_BRANCH" ] || return 1
@@ -660,6 +697,7 @@ if [ "$ELIGIBLE" -eq 0 ]; then
 $_now
 EOF
     _am_tw_acquire || return 1
+    _AM_TW_HELD=1
     while IFS= read -r _line; do
       [ -z "$_line" ] && continue
       _st="${_line%"${_line#??}"}"
@@ -710,7 +748,7 @@ EOF
             rm -f "$_tmp"; _rc=1; continue
           fi
           # unlink 금지 — 검사 직후 열린 FD의 늦은 write도 격리 inode에 보존된다.
-          if ! _am_discard "$_bak"; then
+          if ! _am_discard "$_bak" "$_p"; then
             mv -f "$_bak" "$_p" 2>/dev/null || true
             rm -f "$_tmp"; _rc=1; continue
           fi
@@ -731,7 +769,7 @@ EOF
             # 리뷰 16차 P1: 열린 FD 감지 — 늦은 write 유실 방지, 원복·보존.
             mv -f "$_bak" "$_p" 2>/dev/null || true
             _rc=1
-          elif ! _am_discard "$_bak"; then
+          elif ! _am_discard "$_bak" "$_p"; then
             mv -f "$_bak" "$_p" 2>/dev/null || true
             _rc=1
           fi
@@ -755,6 +793,7 @@ EOF
 $_now
 EOF
     _am_tw_release
+    _AM_TW_HELD=0
     # 최종 판정: clean일 때만 완전 복구 — 잔여(보존된 동시 변경 포함)는 REF_ONLY.
     [ "$_rc" -eq 0 ] || return 1
     _now="$(_wt_status_or_fail 2>/dev/null)" || return 1
@@ -783,13 +822,14 @@ EOF
   # INTERRUPTED:<phase>를 남겨 병합 잔존 여부를 감사 로그에서 알 수 있게 한다.
   # 리뷰 10차 P1: lock 해제는 token이 자신일 때만 (남의 lock 삭제 금지).
   AM_PHASE="pre-merge"
-  trap '[ "$AM_PHASE" != "done" ] && _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "INTERRUPTED:${AM_PHASE}"; [ "$(cat "$AM_LOCK/token" 2>/dev/null)" = "$AM_LOCK_TOKEN" ] && rm -rf "$AM_LOCK" 2>/dev/null || true' EXIT
+  trap '_am_release_transients; [ "$AM_PHASE" != "done" ] && _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "INTERRUPTED:${AM_PHASE}"; [ "$(cat "$AM_LOCK/token" 2>/dev/null)" = "$AM_LOCK_TOKEN" ] && rm -rf "$AM_LOCK" 2>/dev/null || true' EXIT
   # 리뷰 11차 P1: TERM/INT/HUP 시 실행 중인 post-check 자식 그룹을 먼저 종료·reap한
   # 뒤에야 EXIT trap이 lock을 해제한다 (자식이 lock 해제 후에도 실행되던 문제).
   AM_CHECK_PID=""
   # 리뷰 12차 P1: 그룹 기준 생존 판정 — leader가 먼저 죽어도 그룹의 잔존 자손을
   # 회수한다 (kill -0 -- -PGID). 신호 시 진행 중이던 merge 잔여도 abort 시도.
   _am_on_signal() {
+    _am_release_transients
     if [ -n "${AM_CHECK_PID:-}" ]; then
       kill -TERM -- "-${AM_CHECK_PID}" 2>/dev/null || kill -TERM "${AM_CHECK_PID}" 2>/dev/null || true
       local _i=0

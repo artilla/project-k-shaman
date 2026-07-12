@@ -1205,3 +1205,55 @@ MOCK
   [ "$(git -C "$d" show ":docs/file-1.md")" = "foreign-staged-content" ]
   grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
 }
+
+# P1(4차): index CAS 임계구역(index.lock 보유) 중 TERM — .git/index.lock·
+# index.amrb.*·writer lock이 남아 이후 수동 Git 복구까지 막던 고착 제거 검증.
+@test "execute: TERM during index CAS leaves no stuck locks (index.lock, index.amrb, writer lock)" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  local base
+  base="$(git -C "$d" rev-parse main)"
+
+  cat > "$TEST_HOME/mock_checks_tm.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/tm.flag" ]; then touch "$TEST_HOME/tm.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_tm.sh"
+
+  # rollback의 index CAS 구간(ls-files 호출 = index.lock 보유 중)에서 auto_merge
+  # 프로세스에 TERM을 보낸다 — wrapper의 부모가 auto_merge 셸이다.
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$TEST_HOME/tmbin"
+  cat > "$TEST_HOME/tmbin/git" <<MOCK
+#!/usr/bin/env bash
+if [ "\$1" = "ls-files" ] && [ ! -f "$TEST_HOME/tm.sent" ]; then
+  touch "$TEST_HOME/tm.sent"
+  kill -TERM "\$PPID" 2>/dev/null
+  sleep 1
+fi
+exec "$realgit" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/tmbin/git"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/tmbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_tm.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -ne 0 ]
+  # 신호가 실제로 CAS 구간에 도달했다
+  [ -f "$TEST_HOME/tm.sent" ]
+  # 고착 잔여물 없음 — 이후 수동 git 작업이 막히지 않는다
+  [ ! -e "$d/.git/index.lock" ]
+  [ -z "$(find "$d/.git" -name 'index.amrb.*' 2>/dev/null)" ]
+  [ ! -d "$TEST_HOME/state/ticket_write.lock.d" ]
+  [ ! -d "$TEST_HOME/state/auto_merge.lock.d" ]
+  # git이 정상 동작한다
+  git -C "$d" status --porcelain >/dev/null
+}
