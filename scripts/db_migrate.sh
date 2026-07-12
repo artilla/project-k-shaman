@@ -2,12 +2,10 @@
 # db_migrate.sh — db/migrations/*.sql 을 순서대로 멱등 적용한다.
 #
 # 소유권 계약 (리뷰 15차 P1 + 16차 P1):
-#   - transaction: 각 마이그레이션은 runner가 --single-transaction으로 감싼다.
-#     SQL 파일은 transaction control(BEGIN/COMMIT/ROLLBACK/END/ABORT/START·PREPARE
-#     TRANSACTION)을 쓰지 않는다 — 내부 COMMIT은 단일 transaction을 중도 종결시켜
-#     부분 commit·advisory lock 조기 해제를 만든다(16차 P1). runner는 SQL을 수정해
-#     실행하지 않고, 문맥 인지 스캐너(문자열·주석·dollar-quote 제외)로 정확히
-#     검출해 실행 전에 거부한다 (fail-closed).
+#   - transaction: 각 마이그레이션은 runner가 --single-transaction으로 감싸고,
+#     파일 내용은 DO 블록의 EXECUTE(SPI) 안에서 실행한다 — transaction control·
+#     psql meta command·COPY FROM STDIN은 "서버"가 원자 컨텍스트에서 거부한다.
+#     runner는 SQL을 수정하지도, 수제 파서로 판정하지도 않는다 (16차 P1 재재수정).
 #   - ledger: version 기록(INSERT INTO schema_migrations)은 runner가 같은
 #     transaction에서 수행한다. SQL 파일이 marker를 빠뜨려도 재실행되지 않는다.
 #   - 동시 실행: pg_advisory_xact_lock으로 직렬화. 패자는 승자 commit 후 guard
@@ -47,7 +45,9 @@ esac
 ENV_FILE="${ENV_FILE:-.env.local}"
 [ -f "$ENV_FILE" ] || { echo "❌ ${ENV_FILE} 이 없습니다." >&2; exit 2; }
 
-DB_URL="$(sed -n 's/^DATABASE_URL=//p' "$ENV_FILE" | head -1 | tr -d '"' | tr -d "'")"
+# 리뷰 16차 P2: sed|head는 대형 파일에서 SIGPIPE(rc=141) 무진단 종료가 가능 —
+# 입력을 끝까지 소비하는 awk 단일 패스로 첫 선언만 추출.
+DB_URL="$(awk '!f && sub(/^DATABASE_URL=/, "") { v = $0; f = 1 } END { if (f) print v }' "$ENV_FILE" | tr -d '"' | tr -d "'")"
 [ -n "$DB_URL" ] || { echo "❌ ${ENV_FILE} 에 DATABASE_URL 이 없습니다." >&2; exit 2; }
 
 # 리뷰 15차 P2: 수동 파서의 한계를 명시 거부로 — percent-encoding('%')·IPv6('[')는
@@ -88,6 +88,13 @@ if [ -n "$_query" ]; then
     case "$_sch" in
       *[!A-Za-z0-9_]*) echo "❌ DATABASE_URL schema 파라미터가 유효한 식별자가 아닙니다: '$_sch'" >&2; exit 2 ;;
     esac
+    # 리뷰 16차 P2: 63자(NAMEDATALEN-1) 초과는 서버가 잘라 다른 이름이 된다 —
+    # 원래 이름으로 성공을 보고하지 않도록 명시 거부 (검증기가 ASCII만 통과시키므로
+    # 문자수 == 바이트수).
+    if [ "${#_sch}" -gt 63 ]; then
+      echo "❌ DATABASE_URL schema 이름이 63자를 초과합니다 (PostgreSQL 식별자 한계): '$_sch'" >&2
+      exit 2
+    fi
     PGSCHEMA="$_sch"
   fi
 fi
@@ -170,121 +177,49 @@ for f in db/migrations/*.sql; do
     continue
   fi
   echo "── apply $v"
-  # 리뷰 16차 P1(부분 commit, 재수정): SQL 파일 내부의 최상위 transaction control은
-  # --single-transaction을 중도 종결시킨다 — 내부 COMMIT 시점에 그때까지의 변경이
-  # 실제로 commit되고 advisory xact lock도 풀려, 이후 문장이 실패하면 "부분 적용
-  # + ledger 미기록 + 직렬화 붕괴"가 된다.
-  # 1차 수정(독립 행 정규식 중화)의 두 결함을 반영해 재설계:
-  #   (a) `COMMIT; -- comment` 같은 변형을 놓쳐 부분 commit이 재현됐고,
-  #   (b) 반대로 문맥(예: 문자열/주석)을 모르는 삭제는 원본과 다른 SQL을 실행했다.
-  # → SQL을 "수정해서 실행"하지 않는다. 문자열('')·식별자("")·주석(--, /* */ 중첩)·
-  #   dollar-quote($tag$)를 인지하는 스캐너가 문장 첫 키워드를 검사해, 지원하지
-  #   않는 transaction control이 있으면 실행 전에 정확히 거부한다 (fail-closed).
-  #   한계: BEGIN ATOMIC(비 dollar-quote 함수 본문, PG14+)은 오탐 거부 — 이 저장소
-  #   계약상 함수 본문은 dollar-quote를 쓴다.
-  if ! _tc_out="$(awk '
-    { src = src $0 "\n" }
-    END {
-      n = length(src); i = 1; stmt = ""; ln = 1; sln = 1; bad = 0
-      while (i <= n) {
-        c = substr(src, i, 1); two = substr(src, i, 2)
-        if (two == "--") { while (i <= n && substr(src,i,1) != "\n") i++; continue }
-        if (two == "/*") {
-          d = 1; i += 2
-          while (i <= n && d > 0) {
-            t = substr(src, i, 2)
-            if (t == "/*") { d++; i += 2; continue }
-            if (t == "*/") { d--; i += 2; continue }
-            if (substr(src,i,1) == "\n") ln++
-            i++
-          }
-          continue
-        }
-        if (c == "\x27") {
-          i++
-          while (i <= n) {
-            if (substr(src,i,2) == "\x27\x27") { i += 2; continue }
-            if (substr(src,i,1) == "\x27") { i++; break }
-            if (substr(src,i,1) == "\n") ln++
-            i++
-          }
-          stmt = stmt "S"; continue
-        }
-        if (c == "\"") {
-          i++
-          while (i <= n) {
-            if (substr(src,i,2) == "\"\"") { i += 2; continue }
-            if (substr(src,i,1) == "\"") { i++; break }
-            if (substr(src,i,1) == "\n") ln++
-            i++
-          }
-          stmt = stmt "I"; continue
-        }
-        if (c == "$") {
-          j = i + 1; tag = ""
-          while (j <= n) {
-            ch = substr(src, j, 1)
-            if (ch == "$") break
-            if (ch !~ /[A-Za-z0-9_]/) { j = 0; break }
-            tag = tag ch; j++
-          }
-          if (j > 0 && substr(src, j, 1) == "$") {
-            dq = "$" tag "$"
-            rest = substr(src, j + 1)
-            k = index(rest, dq)
-            if (k > 0) {
-              seg = substr(src, i, (j - i + 1) + k - 1 + length(dq))
-              ln += gsub(/\n/, "", seg)
-              i = j + k + length(dq)
-              stmt = stmt "D"; continue
-            }
-          }
-          stmt = stmt c; i++; continue
-        }
-        if (c == ";") { bad += check(stmt, sln); stmt = ""; i++; sln = ln; continue }
-        if (c == "\n") ln++
-        if (stmt == "" && c ~ /[ \t\r\n]/) { sln = ln; i++; continue }
-        stmt = stmt c; i++
-      }
-      bad += check(stmt, sln)
-      exit (bad > 0 ? 1 : 0)
-    }
-    function check(s, l,   w1, w2) {
-      gsub(/^[ \t\r\n]+/, "", s)
-      if (s == "") return 0
-      if (match(s, /^[A-Za-z]+/) == 0) return 0
-      w1 = toupper(substr(s, 1, RLENGTH))
-      s2 = substr(s, RLENGTH + 1)
-      gsub(/^[ \t\r\n]+/, "", s2)
-      w2 = ""
-      if (match(s2, /^[A-Za-z]+/) > 0) w2 = toupper(substr(s2, 1, RLENGTH))
-      if (w1 == "BEGIN" || w1 == "COMMIT" || w1 == "END" || w1 == "ROLLBACK" || w1 == "ABORT") {
-        printf "  line %d: %s ...\n", l, w1; return 1
-      }
-      if ((w1 == "START" || w1 == "PREPARE") && w2 == "TRANSACTION") {
-        printf "  line %d: %s TRANSACTION ...\n", l, w1; return 1
-      }
-      return 0
-    }
-  ' "$f")"; then
-    echo "❌ $v: 파일에 최상위 transaction control 문장이 있습니다 — transaction은 runner가 소유하므로 지원하지 않습니다. 해당 문장을 제거하세요 (실행하지 않음, fail-closed):" >&2
-    printf '%s\n' "$_tc_out" >&2
+  # 리뷰 16차 P1 재재수정: 원자성 경계를 수제 파서(AWK scanner)가 아니라 "서버"가
+  # 강제한다. 파일 내용을 고유 dollar-quote 리터럴로 감싸 DO 블록의 EXECUTE(SPI)로
+  # 실행하면, 원자 컨텍스트에서 서버 자신이 다음을 거부한다 (전부 실측 검증):
+  #   - transaction control(BEGIN/COMMIT/ROLLBACK/…):
+  #     "EXECUTE of transaction commands is not implemented" → 전체 rollback
+  #   - psql meta command(\i 외부 파일 포함·\! 셸 실행 등): psql이 해석하지 않고
+  #     (dollar-quote 내부) 서버에 도달해 syntax error — 셸/포함 실행 자체가 불가능
+  #   - COPY FROM STDIN: "cannot COPY to/from client in PL/pgSQL"
+  #   - E-string·중첩 dollar-quote·form-feed·주석: 서버의 실제 lexer가 처리
+  #     (수제 파서의 오탐/미탐 소멸)
+  # 남은 파서 의존은 "고유 태그가 내용에 문자열로 존재하지 않음" 포함 검사뿐이다.
+  _content="$(cat "$f")" || { echo "❌ $v: 파일 읽기 실패." >&2; exit 3; }
+  if [ -z "$_content" ]; then
+    echo "❌ $v: 빈 마이그레이션 파일 — 적용할 수 없습니다." >&2
     exit 1
   fi
-  # 단일 transaction 안에서: advisory lock → applied 재확인(guard) → SQL → ledger 기록.
-  # 동시 runner의 패자는 lock 대기 후 guard의 예외로 transaction이 중단된다.
-  _guard="DO \$mig\$ BEGIN
-    IF EXISTS (SELECT 1 FROM schema_migrations WHERE version = '$v') THEN
-      RAISE EXCEPTION 'migration % is already applied', '$v';
-    END IF;
-  END \$mig\$;"
+  _t1=""; _t2=""
+  while :; do
+    _t1="do_${RANDOM}${RANDOM}${RANDOM}"
+    _t2="sql_${RANDOM}${RANDOM}${RANDOM}"
+    [ "$_t1" != "$_t2" ] || continue
+    case "$_content" in *"\$${_t1}\$"*|*"\$${_t2}\$"*) continue ;; esac
+    break
+  done
+  _wrap="$(mktemp "${TMPDIR:-/tmp}/dbmig.XXXXXX")" || { echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
+  {
+    printf 'SELECT pg_advisory_xact_lock(%s);\n' "$ADVISORY_KEY"
+    printf 'DO $mig$ BEGIN\n'
+    printf "  IF EXISTS (SELECT 1 FROM schema_migrations WHERE version = '%s') THEN\n" "$v"
+    printf "    RAISE EXCEPTION 'migration %% is already applied', '%s';\n" "$v"
+    printf '  END IF;\n'
+    printf 'END $mig$;\n'
+    printf 'DO $%s$ BEGIN EXECUTE $%s$\n' "$_t1" "$_t2"
+    printf '%s' "$_content"
+    printf '\n$%s$; END $%s$;\n' "$_t2" "$_t1"
+    printf "INSERT INTO schema_migrations (version) VALUES ('%s') ON CONFLICT (version) DO NOTHING;\n" "$v"
+  } > "$_wrap" || { rm -f "$_wrap"; echo "❌ 래퍼 스크립트 작성 실패." >&2; exit 3; }
+  # 단일 transaction 안에서: advisory lock → applied 재확인(guard) → SQL(EXECUTE)
+  # → ledger 기록. 동시 runner의 패자는 lock 대기 후 guard의 예외로 중단된다.
   _out=""
   _rc=0
-  _out="$(psql -X -v ON_ERROR_STOP=1 -q --single-transaction \
-      -c "SELECT pg_advisory_xact_lock(${ADVISORY_KEY})" \
-      -c "$_guard" \
-      -f "$f" \
-      -c "INSERT INTO schema_migrations (version) VALUES ('$v') ON CONFLICT (version) DO NOTHING" 2>&1)" || _rc=$?
+  _out="$(psql -X -v ON_ERROR_STOP=1 -q --single-transaction -f "$_wrap" 2>&1)" || _rc=$?
+  rm -f "$_wrap"
   if [ "$_rc" -ne 0 ]; then
     # 리뷰 16차 P1(오류 오판): 출력 문자열 매칭으로 skip을 판정하지 않는다 —
     # 마이그레이션 SQL의 임의 오류 메시지에 'ALREADY_APPLIED'가 포함되면 실패한
