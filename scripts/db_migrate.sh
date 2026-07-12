@@ -191,23 +191,31 @@ for f in db/migrations/*.sql; do
   #   - E-string·중첩 dollar-quote·form-feed·주석: 서버의 실제 lexer가 처리
   #     (수제 파서의 오탐/미탐 소멸)
   # 남은 파서 의존은 "고유 태그가 내용에 문자열로 존재하지 않음" 포함 검사뿐이다.
-  _content="$(cat "$f")" || { echo "❌ $v: 파일 읽기 실패." >&2; exit 3; }
+  # 리뷰 16차 P1(5차): hash와 실행 내용을 "runner 소유 snapshot 하나"에서 얻는다 —
+  # 파일을 먼저 읽고 경로를 나중에 다시 hash하면, 그 사이 atomic replace로
+  # 변형본을 읽고 정상 checksum으로 판정하는 TOCTOU가 성립했다. snapshot 파일은
+  # runner만 쓰는 private temp이므로 이후 원본 경로가 어떻게 바뀌어도 무관하다.
+  _snap="$(mktemp "${TMPDIR:-/tmp}/dbmig-snap.XXXXXX")" || { echo "❌ snapshot temp 생성 실패." >&2; exit 3; }
+  if ! cat "$f" > "$_snap"; then rm -f "$_snap"; echo "❌ $v: 파일 읽기 실패." >&2; exit 3; fi
+  _content="$(cat "$_snap")"
   if [ -z "$_content" ]; then
+    rm -f "$_snap"
     echo "❌ $v: 빈 마이그레이션 파일 — 적용할 수 없습니다." >&2
     exit 1
   fi
   # 리뷰 16차 P1(4차): 공개된 001_init은 역사적 BEGIN/COMMIT을 포함한다 — 파일
   # bytes는 불변으로 유지하고(원격과 byte-identical), "알려진 checksum에 한정한"
-  # legacy bootstrap 경로로만 해당 두 라인을 실행 시점에 제거한다. checksum이
-  # 내용을 고정하므로 이 변환은 결정적이며, bytes가 다르면(변조/드리프트) 이
-  # 경로를 타지 않고 서버가 transaction control을 거부한다 (fail-closed).
+  # legacy bootstrap 경로로만 해당 두 라인을 실행 시점에 제거한다. checksum과
+  # 실행 내용 모두 위 snapshot에서 나오므로(5차 P1) 판정과 실행이 결속된다.
+  # bytes가 다르면 이 경로를 타지 않고 서버가 transaction control을 거부한다.
   if [ "$v" = "001_init" ]; then
-    _fsha="$( (shasum -a 256 "$f" 2>/dev/null || sha256sum "$f" 2>/dev/null) | awk '{print $1; exit}')"
+    _fsha="$( (shasum -a 256 "$_snap" 2>/dev/null || sha256sum "$_snap" 2>/dev/null) | awk '{print $1; exit}')"
     if [ "$_fsha" = "0c135ce5f5ccc05e574667c853aa297ddca36cbfd09c8e2fe9c2b0d102d5d5d3" ]; then
       echo "   ℹ️  001_init: 알려진 공개 bytes(checksum 일치) — legacy BEGIN/COMMIT 라인을 제거해 단일 transaction으로 적용합니다."
       _content="$(printf '%s' "$_content" | grep -Ev '^(BEGIN|COMMIT);$')"
     fi
   fi
+  rm -f "$_snap"
   _t1=""; _t2=""
   while :; do
     _t1="do_${RANDOM}${RANDOM}${RANDOM}"
