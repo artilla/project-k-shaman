@@ -33,8 +33,23 @@ _make_repo() {
   echo "v2" > "$d/file.txt"
   git -C "$d" add file.txt
   git -C "$d" commit -q -m "T200: cycle change"
-  # run_loop이 성공 사이클 종점에 남기는 소유권 증거 (리뷰 16차 P1)
-  git -C "$d" tag "cycle/T200-post"
+  # run_loop이 성공 사이클 종점에 남기는 소유권 증거 — annotation에 소유 커밋
+  # OID 목록 (리뷰 16차 P1 4차: rollback은 이 목록"만" revert한다)
+  git -C "$d" tag -a "cycle/T200-post" -m "owned-commits
+$(git -C "$d" rev-parse HEAD)"
+}
+
+# 티켓 소유 커밋을 추가하고 post 태그를 소유 목록과 함께 갱신
+_add_owned_commit() {  # <dir> <msg> [<file> <content>]
+  local d="$1" msg="$2" f="${3:-file.txt}" c="${4:-x}"
+  echo "$c" >> "$d/$f"
+  git -C "$d" add "$f"
+  git -C "$d" commit -q -m "$msg"
+  local prev
+  prev="$(git -C "$d" tag -l --format='%(contents)' cycle/T200-post | grep -E '^[0-9a-f]{40}$' || true)"
+  git -C "$d" tag -f -a "cycle/T200-post" -m "owned-commits
+$(git -C "$d" rev-parse HEAD)
+$prev"
 }
 
 @test "R1: dirty tracked files -> refused exit 3 (protects work from reset --hard)" {
@@ -71,7 +86,7 @@ _make_repo() {
   # 비가역 파괴가 아니다 — 원 커밋과 역커밋이 모두 히스토리에 남는다
   run git -C "$repo" log --format=%s
   [[ "$output" == *"T200: cycle change"* ]]
-  [[ "$output" == *"rollback(T200)"* ]]
+  [[ "$output" == *"Revert"* ]]
 }
 
 @test "R4: isolated worktree (.ralph/wt-*) runs immediately without --yes even non-interactive" {
@@ -116,14 +131,8 @@ _make_repo() {
 @test "R7: recorded cycle range (cycle + telemetry + writer audit, post at HEAD) -> revert rollback proceeds" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
-  echo "t" >> "$repo/file.txt"
-  git -C "$repo" add file.txt
-  git -C "$repo" commit -q -m "telemetry(T200): tokens_total"
-  echo "e" >> "$repo/file.txt"
-  git -C "$repo" add file.txt
-  git -C "$repo" commit -q -m "ticket_edit(T200): priority P2→P1"
-  # run_loop은 사이클 "종점"(telemetry 이후)에 post를 기록한다
-  git -C "$repo" tag -f "cycle/T200-post"
+  _add_owned_commit "$repo" "telemetry(T200): tokens_total" file.txt t
+  _add_owned_commit "$repo" "ticket_edit(T200): priority P2→P1" file.txt e
 
   run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
   [ "$status" -eq 0 ]
@@ -164,23 +173,101 @@ _make_repo() {
   grep -q "v2" "$repo/file.txt"
 }
 
-@test "R10: unrelated commit inside the pre..post window is not irreversibly destroyed" {
+@test "R10: unrelated commit inside the pre..post window is NOT reverted (owned OIDs only)" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
-  # 사이클 도중(pre~post 사이) 끼어든 무관 커밋 — post는 시간 경계라 범위에 포함된다
+  # 사이클 도중 끼어든 무관 커밋 — 소유 목록에 없으므로 revert 대상이 아니다
+  # (리뷰 16차 P1-3 4차: 범위 revert 금지, OID 고정)
   echo "concurrent" > "$repo/unrelated.txt"
   git -C "$repo" add unrelated.txt
   git -C "$repo" commit -q -m "docs: concurrent unrelated work"
-  git -C "$repo" tag -f "cycle/T200-post"
+  # post는 HEAD를 가리키되 annotation의 소유 목록에는 T200 커밋만 있다
+  local owned
+  owned="$(git -C "$repo" log --format=%H --grep='^T200: cycle change' -1)"
+  git -C "$repo" tag -f -a "cycle/T200-post" -m "owned-commits
+$owned"
 
   run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
   [ "$status" -eq 0 ]
   [[ "$output" == *"revert"* ]]
-  # revert로 워크트리에서는 빠지지만, 커밋이 히스토리에 남아 복구 가능하다
+  # 무관 커밋의 산출물은 워크트리에 그대로 남는다 (revert되지 않음)
+  [ -f "$repo/unrelated.txt" ]
+  grep -q concurrent "$repo/unrelated.txt"
+  # 티켓 소유 커밋만 되돌려졌다
+  grep -q "v1" "$repo/file.txt"
   run git -C "$repo" log --format=%s
   [[ "$output" == *"docs: concurrent unrelated work"* ]]
-  [ ! -f "$repo/unrelated.txt" ]
-  local unrelated_c
-  unrelated_c="$(git -C "$repo" log --format=%H --grep='concurrent unrelated' -1)"
-  git -C "$repo" show "$unrelated_c:unrelated.txt" | grep -q concurrent
+  [[ "$output" == *"T200: cycle change"* ]]
+}
+
+@test "R11: post tag without owned-commit annotation -> automatic rollback refused (fail-closed)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 구 형식(무주석) 태그로 교체
+  git -C "$repo" tag -f "cycle/T200-post"
+
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"소유 커밋 목록"* ]]
+  [[ "$output" == *"git revert"* ]]
+  grep -q "v2" "$repo/file.txt"
+}
+
+@test "R12: mid-sequence revert failure (conflict) -> clean recovery, no REVERT_HEAD, no staged leftovers" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 소유 커밋 2개가 같은 줄을 순차 수정한 상태에서 annotation 순서를 "역순"으로
+  # 기록 — 첫 revert(과거 커밋)가 최신 내용과 충돌해 sequencer가 REVERT_HEAD를
+  # 남기며 실패한다. 상태 머신은 이를 정리하고 fail-closed로 끝나야 한다.
+  # (git revert는 pre-commit/commit-msg 훅을 실행하지 않음 — 실측. 충돌이
+  # 결정적 실패 주입 수단이다.)
+  local A B
+  A="$(git -C "$repo" rev-parse HEAD)"   # T200: cycle change (v1→v2)
+  echo "v3" > "$repo/file.txt"
+  git -C "$repo" add file.txt
+  git -C "$repo" commit -q -m "T200: second change"
+  B="$(git -C "$repo" rev-parse HEAD)"
+  git -C "$repo" tag -f -a "cycle/T200-post" -m "owned-commits
+$A
+$B"
+
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"revert 실패"* ]]
+  # 중간상태 잔존 없음 — 수동 Git 작업이 막히지 않는다
+  [ ! -e "$repo/.git/REVERT_HEAD" ]
+  [ -z "$(git -C "$repo" status --porcelain --untracked-files=no)" ]
+  grep -q "v3" "$repo/file.txt"
+  # post 태그는 남아 있어 정리 후 재시도 가능하다
+  git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+}
+
+@test "R13: foreign commit injected after validation is not reverted (pinned OIDs, no HEAD TOCTOU)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+
+  # 검증(소유 목록 확정) 이후, 첫 revert 직전에 foreign commit을 주입하는 wrapper
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin"
+  cat > "$repo/gbin/git" <<WRAP
+#!/usr/bin/env bash
+if [ "\$1" = "revert" ] && [ "\$2" != "--abort" ] && [ ! -f "$repo/.injected" ]; then
+  touch "$repo/.injected"
+  echo late > "$repo/foreign.txt"
+  "$realgit" add foreign.txt
+  "$realgit" -c user.email=f@f -c user.name=F commit -q -m "foreign: injected after validation"
+fi
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 0 ]
+  # foreign commit과 산출물은 revert되지 않았다
+  [ -f "$repo/foreign.txt" ]
+  run git -C "$repo" log --format=%s
+  [[ "$output" == *"foreign: injected after validation"* ]]
+  # 소유 커밋은 되돌려졌다
+  grep -q "v1" "$repo/file.txt"
 }

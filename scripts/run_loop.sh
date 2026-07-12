@@ -1451,6 +1451,16 @@ EOF
     fi
   done
 
+  # 리뷰 16차 P1(4차): rollback 소유권은 "커밋 OID 목록"으로 고정한다 — 세션이
+  # 만든 커밋(pre_head..HEAD, 완료 확정 시점)과 아래 telemetry 커밋의 OID를
+  # 기록하고, post 태그의 annotation에 남긴다. rollback은 이 목록"만" revert한다.
+  # 한계(문서화): 세션 창 중 끼어든 외부 커밋은 구분 불가 — 메인 워크트리 사이클은
+  # state/lock으로 단일 writer를 전제하며, per-OID revert라 오귀속도 개별 복구 가능.
+  local owned_oids=""
+  if [ "$GIT_REPO" = "1" ] && [ -n "$pre_head" ]; then
+    owned_oids="$(git rev-list "${pre_head}..HEAD" 2>/dev/null || true)"
+  fi
+
   # ────────── 10. 계측 (ADR-0046): 완료 타임스탬프 영속 ──────────
   # DONE 티켓 frontmatter에 completed_at / started_at(reservation meta)을 durable하게
   # 기록한다. 별도 telemetry 커밋이며 페르소나 커밋과 분리된다. Mission Control은 이를
@@ -1467,6 +1477,7 @@ EOF
     if fm_set_field "$done_file" completed_at "$completed_at_val" \
        && { [ -z "$started_at_val" ] || fm_set_field "$done_file" started_at "$started_at_val"; } \
        && git commit -m "telemetry(${id}): completed_at" -- "$done_file" >/dev/null 2>&1; then
+      owned_oids="$(git rev-parse HEAD)"$'\n'"$owned_oids"
       echo "🕒 telemetry: $id completed_at=$completed_at_val"
     else
       git checkout -- "$done_file" 2>/dev/null || true   # 실패 시 트리 clean 복원
@@ -1489,6 +1500,7 @@ EOF
          && fm_set_field "$done_file" tokens_in "$tin" \
          && fm_set_field "$done_file" tokens_out "$tout" \
          && git commit -m "telemetry(${id}): tokens_total" -- "$done_file" >/dev/null 2>&1; then
+        owned_oids="$(git rev-parse HEAD)"$'\n'"$owned_oids"
         echo "🔢 telemetry: $id tokens_total=$ttot (in=$tin out=$tout)"
       else
         git checkout -- "$done_file" 2>/dev/null || true   # 실패 시 트리 clean 복원
@@ -1510,8 +1522,11 @@ EOF
   # 범위)으로만 reset --hard를 허가한다 — subject 스푸핑("TXXX:"로 보이는 수동
   # 커밋)이나 혼입 변경의 오분류로 무관 커밋이 파괴되지 않는다.
   if [ "$DRY_RUN" = "0" ] && [ "$GIT_REPO" = "1" ]; then
-    if ! git tag -f "cycle/${id}-post" HEAD >/dev/null 2>&1; then
-      echo "⚠️  post-cycle tag 기록 실패 — 이 사이클은 rollback.sh의 reset 경로를 쓸 수 없습니다 (revert 안내만 가능)."
+    # annotation에 소유 커밋 OID 목록을 남긴다 — rollback은 이 목록만 revert한다
+    # (리뷰 16차 P1 4차: 시간 경계가 아니라 OID 고정 소유권).
+    if ! git tag -f -a "cycle/${id}-post" -m "owned-commits
+${owned_oids}" HEAD >/dev/null 2>&1; then
+      echo "⚠️  post-cycle tag 기록 실패 — 이 사이클은 rollback.sh의 자동 revert 경로를 쓸 수 없습니다 (수동 revert 안내만 가능)."
     fi
   fi
 

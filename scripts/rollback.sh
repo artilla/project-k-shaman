@@ -112,21 +112,71 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   fi
 
   if [ "$MODE_ROLLBACK" = "revert" ]; then
-    # 역순(최신→과거) revert — 충돌 시 전체 중단·원상 복구 (fail-closed).
-    if ! git revert --no-commit "${TAG}..HEAD" >/dev/null 2>&1; then
-      git revert --abort >/dev/null 2>&1 || git reset --merge >/dev/null 2>&1 || true
-      echo "❌ revert 충돌 — 자동 롤백을 중단하고 원상 복구했습니다. 수동으로 선별 revert 하세요:" >&2
+    # 리뷰 16차 P1(4차): 소유 커밋 OID 고정 — post 태그 annotation에 run_loop이
+    # 기록한 목록"만" revert한다 (범위 revert 금지).
+    #   - 범위(pre..HEAD) 안의 무관 커밋은 건드리지 않는다 (P1-3)
+    #   - 검증 후 끼어든 foreign commit도 OID가 고정돼 있어 revert되지 않는다 (P1-4)
+    #   - 커밋 하나당 역커밋 하나 — 개별 revert-of-revert로 선택 복구 가능
+    OWNED="$(git tag -l --format='%(contents)' "$POST_TAG" 2>/dev/null | grep -E '^[0-9a-f]{40}$' || true)"
+    if [ -z "$OWNED" ]; then
+      echo "❌ ${POST_TAG}에 소유 커밋 목록(annotation)이 없습니다 — 자동 롤백 불가 (구 형식/수동 태그, fail-closed). 수동 선별 revert:" >&2
       git log --format='   git revert %h  # %s' "${TAG}..HEAD" >&2
       exit 3
     fi
-    if git diff --cached --quiet; then
-      echo "ℹ️  revert 결과 변경 없음 (이미 되돌려진 상태) — 커밋 생략."
-      git reset -q --mixed HEAD >/dev/null 2>&1 || true
-    else
-      git commit -q -m "rollback(${ID}): revert ${TAG}..${POST_TAG}"
+    RANGE_OIDS="$(git rev-list "${TAG}..HEAD" 2>/dev/null || true)"
+    for c in $OWNED; do
+      case "$RANGE_OIDS" in
+        *"$c"*) : ;;
+        *)
+          echo "❌ 소유 목록의 커밋 ${c}가 ${TAG}..HEAD 범위에 없습니다 — 기록 불일치, 자동 롤백을 거부합니다 (fail-closed)." >&2
+          exit 3
+          ;;
+      esac
+    done
+
+    # 실패·신호 복구 상태 머신 (리뷰 16차 P1-4): 어떤 경로로 중단돼도
+    # REVERT_HEAD·staged 역변경을 남기지 않는다 (가드 1이 시작 clean을 보장하므로
+    # reset --hard HEAD는 revert 잔여물만 제거한다).
+    _rb_recover() {
+      git revert --abort >/dev/null 2>&1 || true
+      if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+        git reset --hard HEAD >/dev/null 2>&1 || true
+      fi
+    }
+    trap '_rb_recover; echo "❌ 신호로 중단됨 — revert 잔여 상태를 정리했습니다." >&2; exit 130' INT TERM HUP
+
+    _rb_done=""
+    _rb_failed=""
+    for c in $OWNED; do
+      if git revert --no-edit "$c" >/dev/null 2>&1; then
+        _rb_done="${_rb_done}${c}
+"
+      else
+        _rb_failed="$c"
+        _rb_recover
+        break
+      fi
+    done
+    trap - INT TERM HUP
+
+    if [ -n "$_rb_failed" ]; then
+      echo "❌ ${_rb_failed} revert 실패(충돌 또는 커밋 훅) — 잔여 상태(REVERT_HEAD·staged)는 정리했습니다." >&2
+      if [ -n "$_rb_done" ]; then
+        echo "   이미 되돌린 커밋(각각 revert-of-revert로 복구 가능):" >&2
+        printf '%s' "$_rb_done" | sed 's/^/     /' >&2
+      fi
+      echo "   남은 커밋은 수동으로 선별 revert 하세요:" >&2
+      for c in $OWNED; do
+        case "$_rb_done" in
+          *"$c"*) : ;;
+          *) echo "     git revert $c" >&2 ;;
+        esac
+      done
+      exit 3
     fi
+
     git tag -d "$POST_TAG" >/dev/null 2>&1 || true
-    echo "rolled back $ID by revert (history preserved; 미추적 산출물은 보존됨 — 필요 시 수동 정리)"
+    echo "rolled back $ID by revert (owned commits only; history preserved; 미추적 산출물은 보존됨)"
     exit 0
   fi
 
