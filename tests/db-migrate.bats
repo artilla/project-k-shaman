@@ -61,12 +61,26 @@ setup() {
   ENVF="$PGT/${TEST_DB}.env"
   echo "DATABASE_URL=postgres://postgres:x@127.0.0.1:${PGT_PORT}/${TEST_DB}?schema=public" > "$ENVF"
   # fixture 격리: runner + migrations를 temp ROOT로 복사 (실제 저장소 무변조)
+  # 리뷰 16차 P1(7차): runner의 실행 원본은 "HEAD에 커밋된 blob"뿐이다 —
+  # fixture도 git repo여야 하고, 테스트가 migration 파일을 쓰거나 바꾸면
+  # _commit_migs로 커밋해야 적용 대상이 된다 (미커밋 변경은 fail-closed 거부).
   TROOT="$PGT/root_${BATS_TEST_NUMBER}"
   mkdir -p "$TROOT/scripts" "$TROOT/db"
   cp "$REPO_ROOT/scripts/db_migrate.sh" "$TROOT/scripts/db_migrate.sh"
   cp -R "$REPO_ROOT/db/migrations" "$TROOT/db/migrations"
   chmod +x "$TROOT/scripts/db_migrate.sh"
+  git -C "$TROOT" init -q
+  git -C "$TROOT" config user.email "db@test"
+  git -C "$TROOT" config user.name "dbtest"
+  git -C "$TROOT" add -A
+  git -C "$TROOT" commit -qm "fixture"
   RUNNER="$TROOT/scripts/db_migrate.sh"
+}
+
+# 테스트가 만든/바꾼 migration을 커밋 — 커밋된 blob만 실행되는 계약(7차 P1-2).
+_commit_migs() {
+  git -C "$TROOT" add -A db/migrations
+  git -C "$TROOT" commit -qm "migs: $BATS_TEST_NUMBER" >/dev/null
 }
 
 teardown() {
@@ -102,6 +116,7 @@ _psql() {
 CREATE TABLE IF NOT EXISTS should_not_survive (id INT);
 SELECT 1/0;
 SQL
+  _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 1 ]
   [[ "$output" == *"rollback"* ]]
@@ -171,6 +186,7 @@ COMMIT; -- innocuous-looking comment
 CREATE TABLE IF NOT EXISTS partial_b (id INT);
 SELECT 1/0;
 SQL
+  _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 1 ]
   [[ "$output" == *"transaction"* ]]
@@ -182,6 +198,7 @@ SQL
   cat > "$TROOT/db/migrations/998_txn_zz_test.sql" <<'SQL'
 commit ;
 SQL
+  _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 1 ]
   [ "$(_psql "select count(*) from schema_migrations where version like '998%'")" = "0" ]
@@ -291,6 +308,7 @@ SQL
   cat > "$TROOT/db/migrations/997_lie_zz_test.sql" <<'SQL'
 DO $x$ BEGIN RAISE EXCEPTION 'ALREADY_APPLIED impostor'; END $x$;
 SQL
+  _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   # 과거: 출력 문자열 매칭으로 skip 처리되어 rc=0으로 위장 — 지금은 실패(rc=1)
   [ "$status" -eq 1 ]
@@ -314,6 +332,7 @@ END';
 END $body$;
 CREATE TABLE IF NOT EXISTS zz_ok (note TEXT DEFAULT 'ROLLBACK; -- in string');
 SQL
+  _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 0 ]
   # 함수 본문이 원본 그대로 적용됐다 (수정 실행 없음)
@@ -334,6 +353,7 @@ CREATE TABLE IF NOT EXISTS meta_a (id INT);
 \i $TROOT/evil-include.sql
 \! touch $TROOT/pwned
 SQL
+  _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 1 ]
   # 셸 실행·외부 포함이 일어나지 않았고, 부분 적용도 없다
@@ -349,6 +369,7 @@ COPY copy_a FROM STDIN;
 1
 \.
 SQL
+  _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 1 ]
   [ "$(_psql "select count(*) from information_schema.tables where table_name='copy_a'")" = "0" ]
@@ -391,6 +412,7 @@ CREATE TABLE IF NOT EXISTS sneaky.schema_migrations (
 SET LOCAL search_path = sneaky;
 CREATE TABLE hijack_probe (id INT);
 SQL
+  _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 0 ]
   # ledger는 public에 기록됐고, sneaky 쪽 위장 ledger에는 기록되지 않았다
@@ -416,6 +438,7 @@ SQL
   _as_pg "'$PGBIN/createdb' -h 127.0.0.1 -p $PGT_PORT -U postgres $TEST_DB2"
   echo "DATABASE_URL=postgres://postgres:x@127.0.0.1:${PGT_PORT}/${TEST_DB2}?schema=public" > "$ENVF"
   printf -- '-- tampered\n' >> "$TROOT/db/migrations/001_init.sql"
+  _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 1 ]
   [[ "$output" != *"legacy BEGIN/COMMIT"* ]]
@@ -484,30 +507,19 @@ SQL
   _psql "insert into events (event_type, session_id) select 'anon', id from sessions where user_id is null limit 1"
 }
 
-@test "DB19: checksum and executed SQL come from one runner-owned snapshot - path swap after read cannot forge the legacy path" {
-  # 리뷰 16차 P1-1(5차): 변형 001을 읽힌 뒤 hash 직전에 정상 001로 atomic
-  # replace하는 TOCTOU — snapshot 결속 후에는 hash도 실행도 변형본 기준이라
-  # legacy 경로를 위조할 수 없고, 서버가 BEGIN/COMMIT을 거부한다.
+@test "DB19: committed tampered 001 cannot forge the legacy path - blob checksum mismatch, server rejects txn control" {
+  # 리뷰 16차 P1-1(5차→7차): 실행 원본이 커밋된 blob이므로 "읽기 후 경로 교체"
+  # 류의 TOCTOU는 성립 지점 자체가 없다. 남는 공격면은 "변형본을 커밋"하는 것 —
+  # 이 경우 checksum(blob bytes)이 공개 001과 달라 legacy 경로에 진입하지 못하고,
+  # 서버가 BEGIN/COMMIT을 원자 컨텍스트에서 거부한다.
   cp "$TROOT/db/migrations/001_init.sql" "$PGT/pristine_001.sql"
-  # 변형본: BEGIN/COMMIT 유지 + 악성 객체 추가
+  # 변형본: BEGIN/COMMIT 유지 + 악성 객체 추가 — 커밋까지 한다
   awk '1; /^BEGIN;$/{print "CREATE TABLE evil_toctou (id INT);"}' "$PGT/pristine_001.sql" \
     > "$TROOT/db/migrations/001_init.sql"
-  # hash 도구 호출 시점에 원본 경로를 정상본으로 원자 교체하는 wrapper
-  mkdir -p "$PGT/swapbin"
-  for tool in shasum sha256sum; do
-    real="$(command -v $tool 2>/dev/null || true)"
-    [ -n "$real" ] || continue
-    cat > "$PGT/swapbin/$tool" <<WRAP
-#!/usr/bin/env bash
-if [ ! -f "$PGT/swapped" ]; then
-  touch "$PGT/swapped"
-  cp "$PGT/pristine_001.sql" "$PGT/.p.tmp" && mv "$PGT/.p.tmp" "$TROOT/db/migrations/001_init.sql"
-fi
-exec "$real" "\$@"
-WRAP
-    chmod +x "$PGT/swapbin/$tool"
-  done
-  run env PATH="$PGT/swapbin:$PATH" ENV_FILE="$ENVF" "$RUNNER"
+  _commit_migs
+  # 작업트리는 정상본으로 되돌려 놓아도(경로 위장) 실행·판정은 blob 기준이라 무관
+  # — 단, 작업트리≠HEAD는 그 자체로 거부 대상이므로 여기서는 blob과 일치시킨다.
+  run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 1 ]
   # 위조 실패 — legacy 경로 미진입, 변형 SQL 미실행, ledger 미기록
   [[ "$output" != *"legacy BEGIN/COMMIT"* ]]
@@ -519,7 +531,9 @@ WRAP
   # 002까지만 적용된 시점의 삭제는 sessions를 먼저 지워 session-only event가
   # orphan으로 남았다 — 004는 소유 증거가 없는 이중 orphan payload를 전부 스크럽.
   mkdir -p "$TROOT/hold"
-  mv "$TROOT/db/migrations/003_soft_delete_invariant.sql" "$TROOT/db/migrations/004_soft_delete_contract.sql" "$TROOT/hold/"
+  mv "$TROOT/db/migrations/003_soft_delete_invariant.sql" "$TROOT/db/migrations/004_soft_delete_contract.sql" \
+     "$TROOT/db/migrations/005_ownership_repair_and_lock_contract.sql" "$TROOT/hold/"
+  _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 0 ]
   _psql "insert into users (provider, provider_subject) values ('kakao','u1')"
@@ -528,8 +542,9 @@ WRAP
   # 002-era 삭제: 트리거가 세션을 지워 event가 orphan(session_id NULL)이 된다
   _psql "update users set deleted_at=now() where id=1"
   [ "$(_psql "select (session_id is null and payload::text like '%legacy%') from events where event_type='visit'")" = "t" ]
-  # 003·004 적용 — legacy 정책이 orphan payload를 스크럽한다
+  # 003·004·005 적용 — legacy 정책이 orphan payload를 스크럽한다
   mv "$TROOT/hold/"*.sql "$TROOT/db/migrations/"
+  _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 0 ]
   [ "$(_psql "select payload::text from events where event_type='visit'")" = "{}" ]
@@ -577,34 +592,126 @@ WRAP
   [ "$(_psql "select count(*) from events where event_type in ('ok','ok2')")" = "2" ]
 }
 
-@test "DB22: in-place modification during the runner's read is detected (torn-read stability) - not applied, no ledger row" {
-  # 6차 P1-1: rename swap(DB19)과 달리 "같은 inode"에 대한 in-place 수정은
-  # snapshot 복사와 원자적으로 경쟁한다 — 이중 읽기 + cmp 안정성 검사가 감지해
-  # 적용하지 않아야 한다 (fail-closed). 첫 읽기 직후 파일에 SQL을 덧붙인다.
-  local realcat flag
-  realcat="$(command -v cat)"
-  flag="$PGT/torn_${BATS_TEST_NUMBER}.flag"
-  mkdir -p "$PGT/tornbin_${BATS_TEST_NUMBER}"
-  cat > "$PGT/tornbin_${BATS_TEST_NUMBER}/cat" <<WRAP
-#!/usr/bin/env bash
-"$realcat" "\$@"
-rc=\$?
-case "\$*" in
-  *db/migrations/002_*)
-    if [ ! -f "$flag" ]; then
-      touch "$flag"
-      printf 'CREATE TABLE torn_write (id INT);\n' >> "$TROOT/db/migrations/002_schema_contract_fixes.sql"
-    fi
-    ;;
-esac
-exit \$rc
-WRAP
-  chmod +x "$PGT/tornbin_${BATS_TEST_NUMBER}/cat"
-  run env PATH="$PGT/tornbin_${BATS_TEST_NUMBER}:$PATH" ENV_FILE="$ENVF" "$RUNNER"
+@test "DB22: working-tree divergence from HEAD is refused up front - torn/in-place mutation has no execution path" {
+  # 6차 P1-1→7차 P1-2: 이중 읽기+cmp는 같은 mutable inode를 두 번 읽을 뿐이라
+  # 동일한 torn 내용을 두 번 읽으면 통과했다 (실측). 이제 실행 원본은 커밋된
+  # blob"만"이고, 작업트리가 HEAD와 다르면(미커밋 수정) 어떤 것도 적용하기 전에
+  # 거부한다 — torn 내용이 실행될 경로 자체가 없다 (fail-closed).
+  printf 'CREATE TABLE torn_write (id INT);\n' >> "$TROOT/db/migrations/002_schema_contract_fixes.sql"
+  run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"불안정 읽기"* ]]
-  # 001은 정상 적용, 002는 실행도 기록도 되지 않았다
-  [ "$(_psql "select count(*) from schema_migrations where version='001_init'")" = "1" ]
-  [ "$(_psql "select count(*) from schema_migrations where version like '002%'")" = "0" ]
+  [[ "$output" == *"커밋되"* ]]
+  # 아무것도 적용되지 않았다 — 전체 집합 무결성 (ledger 자체가 없다)
+  [ "$(_psql "select to_regclass('public.schema_migrations') is null")" = "t" ]
   [ "$(_psql "select to_regclass('torn_write') is null")" = "t" ]
+
+  # 미추적 *.sql(집합 불일치)도 거부된다
+  git -C "$TROOT" checkout -- db/migrations/002_schema_contract_fixes.sql
+  printf 'CREATE TABLE stray (id INT);\n' > "$TROOT/db/migrations/993_stray_zz_test.sql"
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"목록"* ]]
+  [ "$(_psql "select to_regclass('public.schema_migrations') is null")" = "t" ]
+  rm -f "$TROOT/db/migrations/993_stray_zz_test.sql"
+
+  # 정리 후에는 정상 적용된다
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [ "$(_psql "select count(*) from schema_migrations where version='001_init'")" = "1" ]
+}
+
+@test "DB23: pre-existing cross-attributed events are repaired by 005 - guest-bind then delete cannot scrub third-party payload" {
+  # 리뷰 16차 P1-4(7차): 001~004 시절의 교차 귀속 행(event.user_id=B /
+  # session.owner=A, event.user_id=B / guest session)은 004 적용 후에도 남았고,
+  # guest 세션을 A에 바인딩한 뒤 A를 삭제하면 B 귀속 payload까지 스크럽됐다.
+  # 005의 repair는 불일치 행의 session 링크를 절단한다 (귀속·payload 보존).
+  mkdir -p "$TROOT/hold"
+  mv "$TROOT/db/migrations/005_ownership_repair_and_lock_contract.sql" "$TROOT/hold/"
+  _commit_migs
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "insert into users (provider, provider_subject) values ('kakao','A')"   # id 1
+  _psql "insert into users (provider, provider_subject) values ('kakao','B')"   # id 2
+  _psql "insert into sessions (user_id) values (1)"
+  _psql "insert into sessions (user_id) values (NULL)"
+  local SA SG
+  SA="$(_psql "select id from sessions where user_id=1")"
+  SG="$(_psql "select id from sessions where user_id is null")"
+  # 구 004에는 교차 귀속 거부가 없다 — 두 행 모두 통과한다
+  _psql "insert into events (event_type, user_id, session_id, payload) values ('x', 2, '$SA', '{\"keep\":\"a\"}'::jsonb)"
+  _psql "insert into events (event_type, user_id, session_id, payload) values ('y', 2, '$SG', '{\"keep\":\"g\"}'::jsonb)"
+  # 005 적용 — repair가 session 링크를 절단한다
+  mv "$TROOT/hold/"*.sql "$TROOT/db/migrations/"
+  _commit_migs
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [ "$(_psql "select count(*) from events where user_id=2 and session_id is null and event_type in ('x','y')")" = "2" ]
+  # 재현 경로: guest 세션을 A에 바인딩 후 A 삭제 — B의 payload는 스크럽되지 않는다
+  _psql "update sessions set user_id=1 where id='$SG'"
+  [ "$(_psql "select app_soft_delete_user(1)")" = "t" ]
+  [ "$(_psql "select payload::text from events where event_type='x'")" = '{"keep": "a"}' ]
+  [ "$(_psql "select payload::text from events where event_type='y'")" = '{"keep": "g"}' ]
+  [ "$(_psql "select count(*) from events where scrubbed_at is not null and event_type in ('x','y')")" = "0" ]
+}
+
+@test "DB24: write contract - app_lock_user_rows fixes users->children order, app_soft_delete_user is the delete entrypoint" {
+  # 리뷰 16차 P1-5(7차): PG는 child row lock "후" BEFORE UPDATE 트리거를 실행하므로
+  # UPDATE 경로(child→users)와 삭제 경로(users→children)의 잠금 순서 역전은 트리거
+  # 선언만으로 제거되지 않는다. 계약: writer는 DML 전에 app_lock_user_rows로
+  # user 행을 먼저 잠근다 — 삭제와 교차해도 deadlock 없이 직렬화된다.
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "insert into users (provider, provider_subject) values ('kakao','u1')"
+  _psql "insert into sessions (user_id) values (1)"
+  _psql "insert into events (event_type, user_id, payload) values ('e', 1, '{\"p\":1}'::jsonb)"
+  # writer(계약 경로): user 잠금 → child no-op UPDATE(트리거 발화 컬럼 포함) → 지연 커밋
+  ( PGOPTIONS='-c client_min_messages=warning' "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" \
+      -c "BEGIN; SELECT app_lock_user_rows(1); UPDATE events SET user_id=user_id WHERE user_id=1; UPDATE sessions SET user_id=user_id WHERE user_id=1; SELECT pg_sleep(1.5); COMMIT;" >/dev/null 2>&1 ) &
+  local writer=$!
+  sleep 0.5
+  # 삭제(계약 진입점): writer 커밋을 기다렸다가 deadlock 없이 성공해야 한다
+  run _psql "select app_soft_delete_user(1)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"t"* ]]
+  wait "$writer" 2>/dev/null || true
+  [ "$(_psql "select (deleted_at is not null) from users where id=1")" = "t" ]
+  # 이미 삭제된 사용자 재호출은 false (멱등 신호)
+  [ "$(_psql "select app_soft_delete_user(1)")" = "f" ]
+  # 스크럽 결과는 기존 계약과 동일
+  [ "$(_psql "select count(*) from sessions where user_id=1")" = "0" ]
+  [ "$(_psql "select payload::text from events where event_type='e'")" = "{}" ]
+}
+
+@test "DB25: TERM to the runner kills the migration psql process group - no late commit, temps cleaned, no lingering backend" {
+  # 리뷰 16차 P1-3(7차): 과거에는 runner가 rc=143으로 죽은 뒤에도 child psql이
+  # 계속 실행되어 몇 초 뒤 테이블·ledger를 commit했고 wrapper temp도 남았다.
+  # 이제 psql은 별도 프로세스 그룹 — 신호 전달·bounded reap·서버 backend 종료
+  # 확인 후 runner가 종료한다.
+  cat > "$TROOT/db/migrations/990_slow_zz_test.sql" <<'SQL'
+CREATE TABLE IF NOT EXISTS slow_probe (id INT);
+SELECT pg_sleep(15);
+SQL
+  _commit_migs
+  mkdir -p "$TROOT/tmp"
+  env ENV_FILE="$ENVF" TMPDIR="$TROOT/tmp" "$RUNNER" > "$PGT/sig_${BATS_TEST_NUMBER}.log" 2>&1 &
+  local rpid=$! i=0 rc=0
+  # 990 적용(pg_sleep) 단계 진입 대기
+  while [ "$i" -lt 60 ]; do
+    if grep -q "apply 990_slow_zz_test" "$PGT/sig_${BATS_TEST_NUMBER}.log" 2>/dev/null \
+       && [ "$(_psql "select count(*) from pg_stat_activity where application_name like 'db_migrate.%' and query like '%pg_sleep%'")" != "0" ]; then
+      break
+    fi
+    sleep 0.25; i=$((i+1))
+  done
+  kill -TERM "$rpid"
+  wait "$rpid" || rc=$?
+  [ "$rc" -eq 143 ]
+  # child psql이 이어서 commit하지 못했다 — 시간이 지나도 결과가 없다
+  sleep 3
+  [ "$(_psql "select count(*) from schema_migrations where version like '990%'")" = "0" ]
+  [ "$(_psql "select to_regclass('slow_probe') is null")" = "t" ]
+  # wrapper/snapshot/출력 temp가 남지 않았다
+  [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
+  # 서버에 이 runner의 잔존 backend가 없다 (transaction 종료 확인)
+  [ "$(_psql "select count(*) from pg_stat_activity where application_name like 'db_migrate.%'")" = "0" ]
 }

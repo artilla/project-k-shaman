@@ -13,6 +13,11 @@
 #     문자열 매칭 판정 금지).
 #   - --status: 읽기 전용 — 어떤 쓰기도 하지 않는다 (16차 P1).
 #   - fail-closed: 접속/query 실패는 'pending'이 아니라 오류(rc≠0)다.
+#   - 실행 원본(16차 P1 7차): apply는 작업트리 파일이 아니라 "HEAD에 커밋된
+#     Git blob"의 bytes만 실행한다 — immutable·content-addressed. 작업트리가
+#     커밋과 다르면 거부한다.
+#   - 신호(16차 P1 7차): migration psql은 별도 프로세스 그룹 — TERM/INT/HUP을
+#     전달하고 bounded reap + 서버 backend 종료 확인 후 runner가 종료한다.
 #
 # 연결 정보: .env.local 의 DATABASE_URL. 구성요소를 분해해 PG* 환경변수로
 # 전달한다 (password의 '$' 등 특수문자 안전).
@@ -101,6 +106,9 @@ fi
 
 export PGUSER PGPASSWORD PGHOST PGPORT PGDATABASE
 export PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-10}"
+# 리뷰 16차 P1(7차): 신호 시 서버 쪽 종료 확인의 식별자 — 이 runner의 모든
+# 접속이 같은 application_name을 쓴다 (pg_stat_activity로 잔존 backend 판정).
+export PGAPPNAME="db_migrate.$$"
 # 리뷰 16차 P1: 식별자 quoting — unquoted 식별자는 서버가 소문자로 접는다.
 # schema=AppData가 실제로는 appdata에 적용되면서 로그에는 AppData로 표시됐다.
 # 검증된 식별자를 quote해 대소문자 그대로(애플리케이션/Prisma와 동일 의미) 사용.
@@ -153,6 +161,102 @@ if [ "$MODE" = "status" ]; then
   exit 0
 fi
 
+# ── 리뷰 16차 P1(7차): 실행 원본은 "커밋된 Git blob" — immutable·content-addressed.
+# 이중 읽기+cmp 안정성 검사는 같은 mutable inode를 두 번 읽을 뿐이라, 두 읽기가
+# 동일한 torn 내용을 얻으면 통과했다 (실측: 어느 완성본에도 없던 혼합 SQL이
+# rc=0으로 적용·ledger 기록). N회 재독으로는 원리적으로 해결되지 않는다 —
+# apply는 파일이 아니라 HEAD에 커밋된 blob의 bytes"만" 실행한다:
+#   - blob OID는 내용의 해시(content-addressed)이고 object는 immutable이다.
+#     snapshot을 blob OID로 재해시해 일치할 때만 실행한다 — 판정과 실행이 같은
+#     불변 bytes에 결속된다.
+#   - 작업트리가 커밋 내용과 다르면(미커밋 수정·미추적/누락 *.sql) 적용 의도와
+#     실행 내용이 갈라진 상태다 — 적용하지 않는다 (fail-closed).
+#   - 커밋은 시작 시점에 한 번 고정한다(_SRC_COMMIT) — 실행 중 HEAD 이동 무관.
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+  echo "❌ git 저장소가 아닙니다 — migration은 커밋된 blob에서만 실행합니다 (fail-closed)." >&2
+  exit 2
+}
+_SRC_COMMIT="$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" || {
+  echo "❌ HEAD 커밋을 해석할 수 없습니다 — migration은 커밋된 blob에서만 실행합니다." >&2
+  exit 2
+}
+_MIG_NAMES="$(git ls-tree --name-only "${_SRC_COMMIT}:db/migrations" 2>/dev/null | grep -E '\.sql$' | sort || true)"
+[ -n "$_MIG_NAMES" ] || { echo "❌ ${_SRC_COMMIT} 커밋에 db/migrations/*.sql 이 없습니다." >&2; exit 2; }
+_WORK_NAMES="$(for _wf in db/migrations/*.sql; do [ -e "$_wf" ] && basename "$_wf"; done | sort)"
+if [ "$_MIG_NAMES" != "$_WORK_NAMES" ]; then
+  echo "❌ 작업트리의 마이그레이션 목록이 커밋(${_SRC_COMMIT})과 다릅니다 — 미추적/누락 파일을 커밋하거나 정리한 뒤 실행하세요 (fail-closed)." >&2
+  diff <(printf '%s\n' "$_MIG_NAMES") <(printf '%s\n' "$_WORK_NAMES") >&2 || true
+  exit 1
+fi
+if ! git diff --quiet "$_SRC_COMMIT" -- db/migrations 2>/dev/null; then
+  echo "❌ db/migrations/ 에 커밋되지 않은 변경이 있습니다 — 커밋된 blob과 파일이 갈라져 적용하지 않습니다 (fail-closed)." >&2
+  git --no-pager diff --stat "$_SRC_COMMIT" -- db/migrations >&2 || true
+  exit 1
+fi
+
+# ── 리뷰 16차 P1(7차): 신호 계약 — runner가 TERM/INT/HUP을 받으면 migration
+# psql "프로세스 그룹" 전체에 신호를 전달하고, bounded reap(전달 → 대기 → KILL)
+# 후 서버 쪽 backend 종료까지 확인하고 나서 종료한다. 과거에는 runner가
+# rc=143으로 죽은 뒤에도 child psql이 계속 실행되어 4초 뒤 commit했고 wrapper
+# temp도 남았다 (실측).
+_MIG_TMPS=""
+_mig_cleanup_tmps() { local _t; for _t in $_MIG_TMPS; do rm -f "$_t" 2>/dev/null || true; done; _MIG_TMPS=""; }
+_MIG_SIG=""
+trap '_MIG_SIG=TERM' TERM
+trap '_MIG_SIG=INT'  INT
+trap '_MIG_SIG=HUP'  HUP
+trap '_mig_cleanup_tmps' EXIT
+_mig_sig_num() { case "$1" in INT) echo 2 ;; HUP) echo 1 ;; *) echo 15 ;; esac; }
+
+# 서버 쪽 종료 확인: 이 runner(application_name=$PGAPPNAME)의 다른 backend가
+# 사라질 때까지 bounded 대기 — 중간에 종료 요청(pg_terminate_backend)으로
+# escalate하고, 끝까지 남으면 실패(호출자가 경고)를 반환한다.
+_mig_server_drain() {
+  local _q="select count(*) from pg_stat_activity where application_name = '${PGAPPNAME}' and pid <> pg_backend_pid()" _n="" _i=0
+  while [ "$_i" -lt 20 ]; do
+    _n="$(psql -X -tAc "$_q" 2>/dev/null || echo "")"
+    [ "$_n" = "0" ] && return 0
+    if [ "$_i" -eq 8 ] && [ -n "$_n" ]; then
+      psql -X -tAc "select pg_terminate_backend(pid) from pg_stat_activity where application_name = '${PGAPPNAME}' and pid <> pg_backend_pid()" >/dev/null 2>&1 || true
+    fi
+    sleep 0.25; _i=$((_i+1))
+  done
+  [ "$(psql -X -tAc "$_q" 2>/dev/null || echo x)" = "0" ]
+}
+
+# migration psql 실행 — job control(set -m)로 별도 프로세스 그룹에 배치.
+# $1=wrapper SQL 파일, $2=출력 파일. 반환: psql rc. 신호 수신 시 전달·reap·
+# 서버 확인·temp 정리 후 여기서 종료한다.
+_mig_run_psql() {
+  local _pid _rc _i _snum
+  set -m
+  psql -X -v ON_ERROR_STOP=1 -q --single-transaction -f "$1" > "$2" 2>&1 &
+  _pid=$!
+  set +m
+  while :; do
+    _rc=0
+    wait "$_pid" 2>/dev/null || _rc=$?
+    if [ -n "$_MIG_SIG" ]; then
+      kill -s "$_MIG_SIG" -- "-${_pid}" 2>/dev/null || true
+      _i=0
+      while kill -0 "$_pid" 2>/dev/null && [ "$_i" -lt 20 ]; do sleep 0.25; _i=$((_i+1)); done
+      if kill -0 "$_pid" 2>/dev/null; then
+        kill -KILL -- "-${_pid}" 2>/dev/null || true
+      fi
+      wait "$_pid" 2>/dev/null || true
+      if ! _mig_server_drain; then
+        echo "⚠️  서버에 이 runner의 backend가 아직 남아 있을 수 있습니다 — pg_stat_activity(application_name=${PGAPPNAME})를 확인하세요." >&2
+      fi
+      _snum="$(_mig_sig_num "$_MIG_SIG")"
+      _mig_cleanup_tmps
+      echo "❌ 신호(${_MIG_SIG})로 중단됨 — migration psql 프로세스 그룹에 신호를 전달하고 서버 backend 종료를 확인했습니다 (미완료 transaction은 서버가 rollback)." >&2
+      exit $((128 + _snum))
+    fi
+    kill -0 "$_pid" 2>/dev/null || break
+  done
+  return "$_rc"
+}
+
 # ledger 부트스트랩 (apply 전용 — 존재 보장, 이후 guard/INSERT가 의존).
 # 리뷰 15차 P1: CREATE TABLE IF NOT EXISTS도 동시 실행에서 pg_type 충돌로 실패할 수
 # 있다 — advisory lock 아래에서 수행해 부트스트랩 자체를 직렬화한다.
@@ -173,8 +277,8 @@ else
     -c "$_bootstrap_ddl" >/dev/null || { echo "❌ schema/ledger 부트스트랩 실패." >&2; exit 3; }
 fi
 
-for f in db/migrations/*.sql; do
-  v="$(basename "$f" .sql)"
+for _name in $_MIG_NAMES; do
+  v="${_name%.sql}"
   if applied "$v"; then
     echo "── skip  $v (이미 적용됨)"
     continue
@@ -191,23 +295,25 @@ for f in db/migrations/*.sql; do
   #   - E-string·중첩 dollar-quote·form-feed·주석: 서버의 실제 lexer가 처리
   #     (수제 파서의 오탐/미탐 소멸)
   # 남은 파서 의존은 "고유 태그가 내용에 문자열로 존재하지 않음" 포함 검사뿐이다.
-  # 리뷰 16차 P1(5차): hash와 실행 내용을 "runner 소유 snapshot 하나"에서 얻는다 —
-  # 파일을 먼저 읽고 경로를 나중에 다시 hash하면, 그 사이 atomic replace로
-  # 변형본을 읽고 정상 checksum으로 판정하는 TOCTOU가 성립했다. snapshot 파일은
-  # runner만 쓰는 private temp이므로 이후 원본 경로가 어떻게 바뀌어도 무관하다.
-  _snap="$(mktemp "${TMPDIR:-/tmp}/dbmig-snap.XXXXXX")" || { echo "❌ snapshot temp 생성 실패." >&2; exit 3; }
-  _snap2="$(mktemp "${TMPDIR:-/tmp}/dbmig-snap.XXXXXX")" || { rm -f "$_snap"; echo "❌ snapshot temp 생성 실패." >&2; exit 3; }
-  if ! cat "$f" > "$_snap"; then rm -f "$_snap" "$_snap2"; echo "❌ $v: 파일 읽기 실패." >&2; exit 3; fi
-  # 리뷰 16차 P1(6차): 동일 inode의 in-place 동시 수정은 단일 읽기에 이전·새
-  # SQL이 섞인 torn read를 만든다 — 두 번 읽어 byte 단위로 일치할 때만 안정된
-  # snapshot으로 인정한다. 다르면 실행하지 않는다 (fail-closed).
-  if ! cat "$f" > "$_snap2"; then rm -f "$_snap" "$_snap2"; echo "❌ $v: 파일 읽기 실패(2차)." >&2; exit 3; fi
-  if ! cmp -s "$_snap" "$_snap2"; then
-    rm -f "$_snap" "$_snap2"
-    echo "❌ $v: 읽는 동안 파일이 변경되었습니다(불안정 읽기) — 적용하지 않습니다 (fail-closed)." >&2
+  # 리뷰 16차 P1(5차→7차): checksum과 실행 내용은 "runner 소유 snapshot 하나"에서
+  # 얻되, snapshot의 원천은 mutable 파일이 아니라 고정 커밋의 "blob"이다 (위
+  # preflight 주석 참조). blob OID 재해시로 snapshot bytes를 검증한다 — torn
+  # read·in-place 변조·atomic replace 전부 무관해진다.
+  _blob="$(git rev-parse -q --verify "${_SRC_COMMIT}:db/migrations/${_name}" 2>/dev/null || true)"
+  if [ -z "$_blob" ]; then
+    echo "❌ $v: 커밋(${_SRC_COMMIT})에서 blob을 해석할 수 없습니다 — 적용하지 않습니다 (fail-closed)." >&2
     exit 1
   fi
-  rm -f "$_snap2"
+  _snap="$(mktemp "${TMPDIR:-/tmp}/dbmig-snap.XXXXXX")" || { echo "❌ snapshot temp 생성 실패." >&2; exit 3; }
+  _MIG_TMPS="$_MIG_TMPS $_snap"
+  if ! git cat-file blob "$_blob" > "$_snap" 2>/dev/null; then
+    rm -f "$_snap"; echo "❌ $v: blob 읽기 실패 (${_blob})." >&2; exit 3
+  fi
+  if [ "$(git hash-object -t blob -- "$_snap" 2>/dev/null)" != "$_blob" ]; then
+    rm -f "$_snap"
+    echo "❌ $v: snapshot이 blob ${_blob}과 일치하지 않습니다 — 적용하지 않습니다 (fail-closed)." >&2
+    exit 1
+  fi
   _content="$(cat "$_snap")"
   if [ -z "$_content" ]; then
     rm -f "$_snap"
@@ -221,7 +327,7 @@ for f in db/migrations/*.sql; do
   # bytes가 다르면 이 경로를 타지 않고 서버가 transaction control을 거부한다.
   if [ "$v" = "001_init" ]; then
     _fsha="$( (shasum -a 256 "$_snap" 2>/dev/null || sha256sum "$_snap" 2>/dev/null) | awk '{print $1; exit}')"
-    if [ "$_fsha" = "0c135ce5f5ccc05e574667c853aa297ddca36cbfd09c8e2fe9c2b0d102d5d5d3" ]; then
+    if [ "$_fsha" = "a1296198221932cf0313dec362ef9ff5d4336ab935cdf17f9f1981b9efeb4a4b" ]; then
       echo "   ℹ️  001_init: 알려진 공개 bytes(checksum 일치) — legacy BEGIN/COMMIT 라인을 제거해 단일 transaction으로 적용합니다."
       _content="$(printf '%s' "$_content" | grep -Ev '^(BEGIN|COMMIT);$')"
     fi
@@ -236,6 +342,7 @@ for f in db/migrations/*.sql; do
     break
   done
   _wrap="$(mktemp "${TMPDIR:-/tmp}/dbmig.XXXXXX")" || { echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
+  _MIG_TMPS="$_MIG_TMPS $_wrap"
   {
     printf 'SELECT pg_advisory_xact_lock(%s);\n' "$ADVISORY_KEY"
     printf 'DO $mig$ BEGIN\n'
@@ -250,10 +357,12 @@ for f in db/migrations/*.sql; do
   } > "$_wrap" || { rm -f "$_wrap"; echo "❌ 래퍼 스크립트 작성 실패." >&2; exit 3; }
   # 단일 transaction 안에서: advisory lock → applied 재확인(guard) → SQL(EXECUTE)
   # → ledger 기록. 동시 runner의 패자는 lock 대기 후 guard의 예외로 중단된다.
-  _out=""
+  _outf="$(mktemp "${TMPDIR:-/tmp}/dbmig-out.XXXXXX")" || { rm -f "$_wrap"; echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
+  _MIG_TMPS="$_MIG_TMPS $_outf"
   _rc=0
-  _out="$(psql -X -v ON_ERROR_STOP=1 -q --single-transaction -f "$_wrap" 2>&1)" || _rc=$?
-  rm -f "$_wrap"
+  _mig_run_psql "$_wrap" "$_outf" || _rc=$?
+  _out="$(cat "$_outf" 2>/dev/null || true)"
+  rm -f "$_wrap" "$_outf"
   if [ "$_rc" -ne 0 ]; then
     # 리뷰 16차 P1(오류 오판): 출력 문자열 매칭으로 skip을 판정하지 않는다 —
     # 마이그레이션 SQL의 임의 오류 메시지에 'ALREADY_APPLIED'가 포함되면 실패한
