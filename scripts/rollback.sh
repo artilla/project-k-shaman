@@ -54,18 +54,29 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     exit 3
   fi
 
-  # 가드 4 (리뷰 16차 P1): reset --hard는 tag 이후의 "모든" 커밋을 파괴한다 —
-  # 이 티켓에 속하지 않는 커밋(다른 티켓의 사이클, telemetry, writer 감사 커밋,
-  # 수동 커밋)이 tag 이후에 있으면 rollback이 그 변경까지 조용히 유실시킨다.
-  # 발견 시 거부하고 revert 경로를 안내한다 (--yes로도 우회 불가, 격리 워크트리
-  # 포함 — 격리 워크트리도 티켓 1개 범위를 넘는 파괴는 정당화되지 않는다).
-  OWN_RE="^[0-9a-f]+ (${ID}: |telemetry\(${ID}\): |ticket_edit\(${ID}\): )"
-  FOREIGN="$(git log --format='%h %s' "${TAG}..HEAD" | grep -Ev "$OWN_RE" || true)"
-  if [ -n "$FOREIGN" ]; then
-    echo "❌ ${TAG} 이후에 ${ID}에 속하지 않는 커밋이 있습니다 — reset --hard가 이를 파괴합니다:" >&2
-    printf '%s\n' "$FOREIGN" >&2
-    echo "   이 티켓의 커밋만 선별적으로 되돌리세요 (최신 → 과거 순):" >&2
-    git log --format='%h %s' "${TAG}..HEAD" | grep -E "$OWN_RE" | awk '{print "     git revert " $1}' >&2 || true
+  # 가드 4 (리뷰 16차 P1 재설계): 소유권은 commit subject 문자열이 아니라
+  # "기록된 증거"로만 판단한다 — run_loop이 성공 사이클 종점에 남기는
+  # cycle/<ID>-post 태그. subject 매칭은 스푸핑("T200: hotfix" 수동 커밋)과
+  # 혼입 변경을 own commit으로 오분류해 reset --hard로 함께 파괴했다.
+  #   허가 조건 (둘 중 하나, --yes로도 그 외 우회 불가):
+  #     (a) tag 이후 커밋이 없음 — 워크트리/미추적 정리만 수행
+  #     (b) cycle/<ID>-post가 존재하고, HEAD == post이며, pre가 post의 조상 —
+  #         TAG..HEAD 전체가 기록된 "그 사이클"의 산출물임이 증명됨
+  #   그 외에는 파괴를 거부하고 revert 경로를 안내한다 (fail-closed).
+  POST_TAG="cycle/${ID}-post"
+  ALLOW_RESET=0
+  if [ -z "$(git rev-list -n 1 "${TAG}..HEAD" 2>/dev/null)" ]; then
+    ALLOW_RESET=1
+  elif git rev-parse -q --verify "refs/tags/${POST_TAG}^{commit}" >/dev/null \
+     && [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/${POST_TAG}^{commit}")" ] \
+     && git merge-base --is-ancestor "refs/tags/${TAG}" "refs/tags/${POST_TAG}" 2>/dev/null; then
+    ALLOW_RESET=1
+  fi
+  if [ "$ALLOW_RESET" != "1" ]; then
+    echo "❌ ${TAG} 이후 커밋들이 기록된 사이클 종점(${POST_TAG})과 일치하지 않습니다 — reset --hard는 아래 커밋을 전부 파괴하므로 거부합니다 (--yes 우회 불가):" >&2
+    git log --format='%h %s' "${TAG}..HEAD" >&2
+    echo "   이 티켓의 변경만 되돌리려면 해당 커밋을 선별 revert 하세요 (최신 → 과거 순):" >&2
+    git log --format='   git revert %h  # %s' "${TAG}..HEAD" >&2
     exit 3
   fi
 
@@ -93,6 +104,8 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
 
   git reset --hard "$TAG" >/dev/null
   git clean -fd >/dev/null
+  # 사이클 종점 기록은 reset으로 무효화됨 — 잔존 post 태그 제거 (오판 방지 위생).
+  git tag -d "$POST_TAG" >/dev/null 2>&1 || true
   echo "restored $ID to $TAG"
   exit 0
 fi

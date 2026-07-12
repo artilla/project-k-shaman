@@ -1505,6 +1505,16 @@ EOF
     return 16
   fi
 
+  # 리뷰 16차 P1: rollback 소유권 증거 — 성공 사이클의 "종점"을 태그로 기록한다.
+  # rollback.sh는 commit subject 문자열이 아니라 이 기록(cycle/<ID>-pre ~ -post
+  # 범위)으로만 reset --hard를 허가한다 — subject 스푸핑("TXXX:"로 보이는 수동
+  # 커밋)이나 혼입 변경의 오분류로 무관 커밋이 파괴되지 않는다.
+  if [ "$DRY_RUN" = "0" ] && [ "$GIT_REPO" = "1" ]; then
+    if ! git tag -f "cycle/${id}-post" HEAD >/dev/null 2>&1; then
+      echo "⚠️  post-cycle tag 기록 실패 — 이 사이클은 rollback.sh의 reset 경로를 쓸 수 없습니다 (revert 안내만 가능)."
+    fi
+  fi
+
   echo "✅ cycle done — $ticket → DONE/  (lock은 trap에서 정리됨)"
   # 리뷰 11차 P1: current_ticket도 lock 토큰이 자신일 때만 제거 (소유권 결속).
   if [ "$(cat state/lock 2>/dev/null)" = "$LOCK_TOKEN" ]; then

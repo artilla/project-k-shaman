@@ -33,6 +33,8 @@ _make_repo() {
   echo "v2" > "$d/file.txt"
   git -C "$d" add file.txt
   git -C "$d" commit -q -m "T200: cycle change"
+  # run_loop이 성공 사이클 종점에 남기는 소유권 증거 (리뷰 16차 P1)
+  git -C "$d" tag "cycle/T200-post"
 }
 
 @test "R1: dirty tracked files -> refused exit 3 (protects work from reset --hard)" {
@@ -90,13 +92,10 @@ _make_repo() {
 
 # ── 리뷰 16차 P1 회귀 ──────────────────────────────────────────────────────────
 
-@test "R6: commits after the tag that do not belong to the ticket -> refused (no bypass with --yes)" {
+@test "R6: commits after the recorded cycle end -> refused (no bypass with --yes)" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
-  # 티켓 소속 커밋(허용 형태) 뒤에 "무관" 커밋이 쌓인 상황
-  echo "telemetry" >> "$repo/file.txt"
-  git -C "$repo" add file.txt
-  git -C "$repo" commit -q -m "telemetry(T200): completed_at"
+  # 기록된 종점(post 태그) 이후에 쌓인 커밋 — 소속과 무관하게 파괴 금지
   echo "other-ticket" > "$repo/other.txt"
   git -C "$repo" add other.txt
   git -C "$repo" commit -q -m "T300: unrelated cycle work"
@@ -110,7 +109,7 @@ _make_repo() {
   grep -q "v2" "$repo/file.txt"
 }
 
-@test "R7: only own-ticket commits after the tag (cycle + telemetry + writer audit) -> rollback proceeds" {
+@test "R7: recorded cycle range (cycle + telemetry + writer audit, post at HEAD) -> rollback proceeds" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
   echo "t" >> "$repo/file.txt"
@@ -119,9 +118,41 @@ _make_repo() {
   echo "e" >> "$repo/file.txt"
   git -C "$repo" add file.txt
   git -C "$repo" commit -q -m "ticket_edit(T200): priority P2→P1"
+  # run_loop은 사이클 "종점"(telemetry 이후)에 post를 기록한다
+  git -C "$repo" tag -f "cycle/T200-post"
 
   run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
   [ "$status" -eq 0 ]
   [[ "$output" == *"restored T200"* ]]
   grep -q "v1" "$repo/file.txt"
+  # 무효화된 종점 기록은 제거된다
+  ! git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+}
+
+@test "R8: subject-spoofed commit (T200: ...) without recorded evidence -> refused (subject is not ownership)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 종점 기록 이후의 수동 커밋 — subject가 "T200:"으로 보여도 own commit이 아니다.
+  # 과거 subject 매칭 가드는 이를 own으로 오인해 reset --hard로 함께 파괴했다.
+  echo "manual hotfix mixed with unrelated change" > "$repo/hotfix.txt"
+  git -C "$repo" add hotfix.txt
+  git -C "$repo" commit -q -m "T200: hotfix (manual, mixed content)"
+
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"git revert"* ]]
+  # 수동 커밋의 산출물은 파괴되지 않았다
+  [ -f "$repo/hotfix.txt" ]
+  grep -q "v2" "$repo/file.txt"
+}
+
+@test "R9: pre tag only, no post record, commits present -> destructive reset refused" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  git -C "$repo" tag -d "cycle/T200-post" >/dev/null
+
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"git revert"* ]]
+  grep -q "v2" "$repo/file.txt"
 }
