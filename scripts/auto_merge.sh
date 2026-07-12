@@ -612,13 +612,12 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   # (워크트리 내 state/, 워크트리와 같은 볼륨)로 옮기고, rename 전에 실제로
   # 같은 device인지 검증한다. 다르면 폐기하지 않는다 (호출자가 원복·보존).
   _AM_GITDIR="$(git rev-parse --git-dir 2>/dev/null)"
-  # 리뷰 16차 P1-8(5차): 내구성 우선순위 — (1) common git dir(.git; linked
-  # worktree remove에도 살아남고 clean -fd가 절대 닿지 않는다)이 파일과 같은
-  # device면 그곳으로, (2) 아니면 STATE_DIR(워크트리 내 — .gitignore 등재 +
-  # rollback clean의 명시 제외로 보호, 단 worktree 자체가 제거되면 함께 사라짐을
-  # manifest에 경고). 두 후보 모두 device가 다르면 폐기하지 않는다 (원복·보존).
+  # 리뷰 16차 P1-9(6차): 격리 위치는 common git dir 하나뿐 — STATE_DIR(워크트리 내)
+  # fallback은 `git worktree remove`와 함께 소실되므로 "격리"가 아니었다. common
+  # git dir는 linked worktree remove에도 살아남고 clean -fd가 절대 닿지 않는다.
+  # 파일과 device가 다르면(cross-volume rename은 copy+unlink 강등 — 늦은 write
+  # 유실) 폐기하지 않는다 — 호출자가 원복·보존하고 REF_ONLY로 격하한다.
   _AM_COMMON_TRASH="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || git rev-parse --git-common-dir 2>/dev/null)/auto_merge.trash.d"
-  _AM_STATE_TRASH="${STATE_DIR}/auto_merge.trash.d"
   _dev_of() { stat -c '%d' "$1" 2>/dev/null || stat -f '%d' "$1" 2>/dev/null; }
   _am_trash_init() {  # $1=trash dir
     mkdir -p "$1" 2>/dev/null || return 1
@@ -629,18 +628,16 @@ if [ "$ELIGIBLE" -eq 0 ]; then
         echo "늦은 write도 이 inode에 남는다 (리뷰 16차 P1)."
         echo "- 복구: manifest.tsv(시각, merge OID, 원경로, 격리 경로)에서 찾아 mv로 복원."
         echo "- 보존: 해당 rollback의 감사 로그(ROLLED_BACK) 확인 후 수동 삭제 가능 (자동 삭제 없음)."
-        echo "- 주의: state/ 위치일 경우 worktree 제거와 함께 사라진다 — 복구가 필요하면 먼저 옮길 것."
+        echo "- manifest에 MOVE-FAILED 표시가 있으면 그 행의 파일은 격리되지 않고 원위치에 있다."
       } > "$1/README.md" 2>/dev/null || true
     fi
     return 0
   }
   _am_discard() {  # $1=캡처 파일, $2=원경로(기록용)
-    local _dir="" _cand _dst _i
-    for _cand in "$_AM_COMMON_TRASH" "$_AM_STATE_TRASH"; do
-      _am_trash_init "$_cand" || continue
-      if [ "$(_dev_of "$1")" = "$(_dev_of "$_cand")" ]; then _dir="$_cand"; break; fi
-    done
-    [ -n "$_dir" ] || return 1
+    local _dir _dst _i
+    _dir="$_AM_COMMON_TRASH"
+    _am_trash_init "$_dir" || return 1
+    [ "$(_dev_of "$1")" = "$(_dev_of "$_dir")" ] || return 1
     # 리뷰 16차 P2(5차): 경로명 충돌 없는 목적지 — noclobber 생성으로 예약한다.
     _i=0
     while :; do
@@ -648,25 +645,53 @@ if [ "$ELIGIBLE" -eq 0 ]; then
       if (set -C; : > "$_dst.claim") 2>/dev/null; then break; fi
       _i=$((_i+1)); [ "$_i" -ge 10 ] && return 1
     done
-    if ! mv "$1" "$_dst" 2>/dev/null; then rm -f "$_dst.claim"; return 1; fi
-    # 리뷰 16차 P2(5차): manifest 기록 실패를 무시하지 않는다 — 기록이 안 되면
-    # 격리를 원복하고 폐기 실패로 처리한다 (호출자가 보존·REF_ONLY 격하).
+    # 리뷰 16차 P1-10(6차): manifest는 rename "전"에 기록한다 — 기록 실패 시
+    # 파일은 아직 원위치라 원복 자체가 필요 없다 (기록 실패 후의 원복 mv가 그
+    # 사이 원경로에 생긴 concurrent 파일을 덮던 창 제거). rename이 실패하면
+    # manifest에 정정 행을 남긴다 (best effort — 파일은 원위치 그대로).
     if ! printf '%s\t%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)" \
         "${MERGE_COMMIT:-unknown}" "$2" "$_dst" >> "$_dir/manifest.tsv" 2>/dev/null; then
-      mv "$_dst" "$1" 2>/dev/null || true
+      rm -f "$_dst.claim"
+      return 1
+    fi
+    if ! mv "$1" "$_dst" 2>/dev/null; then
+      printf '%s\t%s\t%s\t%s\tMOVE-FAILED\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)" \
+        "${MERGE_COMMIT:-unknown}" "$2" "$_dst" >> "$_dir/manifest.tsv" 2>/dev/null || true
       rm -f "$_dst.claim"
       return 1
     fi
     rm -f "$_dst.claim"
   }
+  # 리뷰 16차 P1-10(6차): 원복은 no-clobber — 캡처(rename)~원복 사이에 다른
+  # 프로세스가 원경로에 만든 "새 파일"을 mv -f가 덮어썼다. ln(하드링크, 목적지
+  # 존재 시 실패)으로 inode를 보존한 채 복원하고(캡처본에 열린 FD의 늦은 write도
+  # 유지), 실패하면 새 파일을 덮지 않고 캡처본을 남겨 경고한다.
+  _am_restore() {  # $1=캡처 파일, $2=원경로
+    if ln "$1" "$2" 2>/dev/null; then rm -f "$1" 2>/dev/null || true; return 0; fi
+    echo "⚠️  원복 생략: ${2}에 그 사이 새 파일이 생성됨 — 덮지 않고 캡처본을 ${1}에 보존합니다." >&2
+    return 1
+  }
   # 리뷰 16차 P1(4차): index CAS 임계구역 중 신호/종료 시 잔여물(.git/index.lock·
   # index.amrb.*·writer lock)을 반드시 정리한다 — Git 수동 복구까지 막던 고착 제거.
   _AM_ILOCK_PATH=""
+  _AM_ILOCK_TOKEN=""
+  _AM_LTMP_PATH=""
   _AM_ITMP_PATH=""
   _AM_TW_HELD=0
   _am_release_transients() {
     [ -n "${_AM_ITMP_PATH:-}" ] && { rm -f "$_AM_ITMP_PATH" 2>/dev/null || true; _AM_ITMP_PATH=""; }
-    [ -n "${_AM_ILOCK_PATH:-}" ] && { rm -f "$_AM_ILOCK_PATH" 2>/dev/null || true; _AM_ILOCK_PATH=""; }
+    [ -n "${_AM_LTMP_PATH:-}" ] && { rm -f "$_AM_LTMP_PATH" 2>/dev/null || true; _AM_LTMP_PATH=""; }
+    if [ -n "${_AM_ILOCK_PATH:-}" ]; then
+      # 리뷰 16차 P1-8(6차): 소유 판정은 경로가 아니라 "내용 토큰" — 내 토큰과
+      # 일치할 때만 삭제한다. 획득 실패 직후 신호가 와도 남의 index.lock(git
+      # 자신의 lock 포함)은 내용이 다르므로 절대 지우지 않는다.
+      if [ -n "${_AM_ILOCK_TOKEN:-}" ] \
+         && [ "$(cat "$_AM_ILOCK_PATH" 2>/dev/null || true)" = "$_AM_ILOCK_TOKEN" ]; then
+        rm -f "$_AM_ILOCK_PATH" 2>/dev/null || true
+      fi
+      _AM_ILOCK_PATH=""
+      _AM_ILOCK_TOKEN=""
+    fi
     if [ "${_AM_TW_HELD:-0}" = "1" ]; then _am_tw_release 2>/dev/null || true; _AM_TW_HELD=0; fi
     return 0
   }
@@ -677,29 +702,47 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   # 비교는 blob OID만이 아니라 "mode OID stage" 전체 identity로 한다.
   # $1=path, $2/$3=허용 index 항목("mode oid stage", ""=부재; $3 생략 가능)
   _am_index_reset_path() {
-    local _p="$1" _e1="$2" _e2="${3-__none__}" _ilock _itmp _cur
+    local _p="$1" _e1="$2" _e2="${3-__none__}" _ilock _itmp _cur _ltmp
     _ilock="${_AM_GITDIR}/index.lock"
-    # 리뷰 16차 P1-9(5차): 소유 기록을 "생성 전"에 — 생성과 기록 사이에 신호가
-    # 오면 index.lock이 고착됐다. 미리 기록해 두면 핸들러의 rm -f가 생성 직후
-    # 어느 시점이든 정리하고, 생성 전이면 없는 파일 rm은 무해하다.
+    # 리뷰 16차 P1-8(6차): 5차의 "획득 전 경로 등록"은 획득 실패(타 프로세스의
+    # lock 존재) 직후 신호가 오면 핸들러의 rm -f가 "남의" index.lock을 지웠다.
+    # 소유는 경로가 아니라 "내용 토큰"으로 판정한다: 고유 토큰을 담은 임시 파일을
+    # ln(원자, 목적지 존재 시 실패)으로 index.lock에 걸고, 핸들러·해제는 내용이
+    # 내 토큰과 일치할 때만 삭제한다. git 자신의 lock(내용=index 바이너리)이나
+    # 다른 인스턴스의 lock(다른 토큰)은 어느 시점의 신호에서도 지워지지 않는다.
+    _AM_ILOCK_TOKEN="amrb.$$.${RANDOM}${RANDOM}.${RANDOM}"
+    _ltmp="${_AM_GITDIR}/index.amrb-lock.$$"
+    _AM_LTMP_PATH="$_ltmp"
+    if ! printf '%s' "$_AM_ILOCK_TOKEN" > "$_ltmp" 2>/dev/null; then
+      rm -f "$_ltmp" 2>/dev/null || true
+      _AM_LTMP_PATH=""; _AM_ILOCK_TOKEN=""
+      return 1
+    fi
     _AM_ILOCK_PATH="$_ilock"
-    if ! (set -C; : > "$_ilock") 2>/dev/null; then _AM_ILOCK_PATH=""; return 1; fi
+    if ! ln "$_ltmp" "$_ilock" 2>/dev/null; then
+      rm -f "$_ltmp"
+      _AM_LTMP_PATH=""; _AM_ILOCK_PATH=""; _AM_ILOCK_TOKEN=""
+      return 1
+    fi
+    rm -f "$_ltmp"
+    _AM_LTMP_PATH=""
     _itmp="${_AM_GITDIR}/index.amrb.$$"
     _AM_ITMP_PATH="$_itmp"
-    if ! cp "${_AM_GITDIR}/index" "$_itmp" 2>/dev/null; then rm -f "$_ilock" "$_itmp"; _AM_ILOCK_PATH=""; _AM_ITMP_PATH=""; return 1; fi
+    if ! cp "${_AM_GITDIR}/index" "$_itmp" 2>/dev/null; then rm -f "$_ilock" "$_itmp"; _AM_ILOCK_PATH=""; _AM_ILOCK_TOKEN=""; _AM_ITMP_PATH=""; return 1; fi
     _cur="$(git ls-files -s -- "$_p" 2>/dev/null | awk '{print $1" "$2" "$3; exit}')"
     if [ "$_cur" != "$_e1" ] && [ "$_cur" != "$_e2" ]; then
-      rm -f "$_itmp" "$_ilock"; _AM_ILOCK_PATH=""; _AM_ITMP_PATH=""; return 1
+      rm -f "$_itmp" "$_ilock"; _AM_ILOCK_PATH=""; _AM_ILOCK_TOKEN=""; _AM_ITMP_PATH=""; return 1
     fi
     if ! GIT_INDEX_FILE="$_itmp" git reset -q "HEAD" -- "$_p" >/dev/null 2>&1; then
-      rm -f "$_itmp" "$_ilock"; _AM_ILOCK_PATH=""; _AM_ITMP_PATH=""; return 1
+      rm -f "$_itmp" "$_ilock"; _AM_ILOCK_PATH=""; _AM_ILOCK_TOKEN=""; _AM_ITMP_PATH=""; return 1
     fi
     if ! mv -f "$_itmp" "${_AM_GITDIR}/index"; then
-      rm -f "$_itmp" "$_ilock"; _AM_ILOCK_PATH=""; _AM_ITMP_PATH=""; return 1
+      rm -f "$_itmp" "$_ilock"; _AM_ILOCK_PATH=""; _AM_ILOCK_TOKEN=""; _AM_ITMP_PATH=""; return 1
     fi
     _AM_ITMP_PATH=""
     rm -f "$_ilock"
     _AM_ILOCK_PATH=""
+    _AM_ILOCK_TOKEN=""
   }
   _sync_worktree_after_cas() {
     [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$BASE_BRANCH" ] || return 1
@@ -768,18 +811,18 @@ EOF
           _bak="$(dirname "$_p")/.amrb-bak.$$"
           if ! mv "$_p" "$_bak" 2>/dev/null; then rm -f "$_tmp"; _rc=1; continue; fi
           if [ "$(git hash-object -- "$_bak" 2>/dev/null)" != "$_want" ]; then
-            mv -f "$_bak" "$_p" 2>/dev/null || true   # 동시 교체를 캡처함 — 원복·보존
+            _am_restore "$_bak" "$_p" || true   # 동시 교체를 캡처함 — 원복·보존 (no-clobber)
             rm -f "$_tmp"; _rc=1; continue
           fi
           # 리뷰 16차 P1: 폐기 직전 open-FD 검사 — 열린 FD의 늦은 write를 orphan
           # inode로 잃지 않는다. 열려 있으면 원복·보존 (REF_ONLY 격하).
           if _fd_busy "$_bak"; then
-            mv -f "$_bak" "$_p" 2>/dev/null || true
+            _am_restore "$_bak" "$_p" || true
             rm -f "$_tmp"; _rc=1; continue
           fi
           # unlink 금지 — 검사 직후 열린 FD의 늦은 write도 격리 inode에 보존된다.
           if ! _am_discard "$_bak" "$_p"; then
-            mv -f "$_bak" "$_p" 2>/dev/null || true
+            _am_restore "$_bak" "$_p" || true
             rm -f "$_tmp"; _rc=1; continue
           fi
           # 캡처~복원 사이 새로 생긴 파일은 덮지 않는다 (ln no-clobber) — 실패 시 보존.
@@ -793,14 +836,14 @@ EOF
           _bak="$(dirname "$_p")/.amrb-bak.$$"
           if ! mv "$_p" "$_bak" 2>/dev/null; then _rc=1; continue; fi
           if [ "$(git hash-object -- "$_bak" 2>/dev/null)" != "$_want" ]; then
-            mv -f "$_bak" "$_p" 2>/dev/null || true   # 동시 교체를 캡처함 — 원복·보존
+            _am_restore "$_bak" "$_p" || true   # 동시 교체를 캡처함 — 원복·보존 (no-clobber)
             _rc=1
           elif _fd_busy "$_bak"; then
             # 리뷰 16차 P1: 열린 FD 감지 — 늦은 write 유실 방지, 원복·보존.
-            mv -f "$_bak" "$_p" 2>/dev/null || true
+            _am_restore "$_bak" "$_p" || true
             _rc=1
           elif ! _am_discard "$_bak" "$_p"; then
-            mv -f "$_bak" "$_p" 2>/dev/null || true
+            _am_restore "$_bak" "$_p" || true
             _rc=1
           fi
           ;;

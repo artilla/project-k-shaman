@@ -1341,3 +1341,59 @@ MOCK
   git -C "$d" clean -fd >/dev/null 2>&1 || true
   [ -f "$qfile" ]
 }
+
+# P1(6차): 획득 실패(타 프로세스의 index.lock 존재) 직후의 신호 — 5차의 "획득 전
+# 경로 등록"은 핸들러의 rm -f가 "남의" index.lock을 지웠다. 소유는 내용 토큰으로
+# 판정하므로, 어느 시점의 신호에서도 foreign lock은 삭제되지 않아야 한다.
+@test "execute: signal after failed index.lock acquisition preserves the foreign lock (token ownership)" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_fl.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/fl.flag" ]; then touch "$TEST_HOME/fl.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_fl.sh"
+
+  # index.lock 획득(ln) 직전에: (1) foreign lock을 먼저 만들어 획득을 실패시키고
+  # (2) auto_merge 셸에 TERM을 보낸다 — 트랩은 ln 종료 직후(경로·토큰 등록 상태,
+  # 획득 실패 분기 진입 전)에 실행된다. 정확히 5차 결함의 창이다.
+  local realln
+  realln="$(command -v ln)"
+  mkdir -p "$TEST_HOME/flbin"
+  cat > "$TEST_HOME/flbin/ln" <<MOCK
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    *".git/index.lock")
+      if [ ! -f "$TEST_HOME/fl.sent" ]; then
+        touch "$TEST_HOME/fl.sent"
+        printf 'foreign-process-lock' > "$d/.git/index.lock"
+        kill -TERM "\$PPID" 2>/dev/null
+        sleep 1
+      fi
+      ;;
+  esac
+done
+exec "$realln" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/flbin/ln"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/flbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_fl.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -ne 0 ]
+  [ -f "$TEST_HOME/fl.sent" ]
+  # 남의 lock은 내용 그대로 보존된다 — rm 되지 않았다
+  [ -e "$d/.git/index.lock" ]
+  [ "$(cat "$d/.git/index.lock")" = "foreign-process-lock" ]
+  # 우리 쪽 잔여물(token 임시 파일·임시 index)은 없다
+  [ -z "$(find "$d/.git" -maxdepth 1 -name 'index.amrb*' 2>/dev/null)" ]
+}
