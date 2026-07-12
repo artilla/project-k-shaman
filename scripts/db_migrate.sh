@@ -126,7 +126,9 @@ ADVISORY_KEY=721363011
 # applied <version> — 0=적용됨, 1=미적용. query 실패는 즉시 중단 (pending으로 위장 금지).
 applied() {
   local out
-  if ! out="$(psql -X -v ON_ERROR_STOP=1 -tAc "select count(*) from schema_migrations where version = '$1'" 2>&1)"; then
+  # 리뷰 16차 P1(4차): ledger 참조는 전부 schema-qualified — migration 내용의
+  # SET LOCAL search_path가 unqualified 참조를 다른 schema로 돌려도 영향 없음.
+  if ! out="$(psql -X -v ON_ERROR_STOP=1 -tAc "select count(*) from \"${PGSCHEMA}\".schema_migrations where version = '$1'" 2>&1)"; then
     echo "❌ ledger 조회 실패(version=$1): $out" >&2
     exit 3
   fi
@@ -139,7 +141,7 @@ if [ "$MODE" = "status" ]; then
   # 읽기 권한만 가진 계정/감사 상황에서 계약 위반이다. ledger가 없으면 만들지
   # 않고 전부 pending으로 보고한다.
   echo "── DB: ${PGDATABASE} @ ${PGHOST}:${PGPORT} (schema: ${PGSCHEMA})"
-  if ! _ledger="$(psql -X -v ON_ERROR_STOP=1 -tAc "select to_regclass('schema_migrations') is not null" 2>&1)"; then
+  if ! _ledger="$(psql -X -v ON_ERROR_STOP=1 -tAc "select to_regclass('\"${PGSCHEMA}\".schema_migrations') is not null" 2>&1)"; then
     echo "❌ ledger 존재 확인 실패: $_ledger" >&2
     exit 3
   fi
@@ -155,7 +157,8 @@ fi
 # 리뷰 15차 P1: CREATE TABLE IF NOT EXISTS도 동시 실행에서 pg_type 충돌로 실패할 수
 # 있다 — advisory lock 아래에서 수행해 부트스트랩 자체를 직렬화한다.
 # 리뷰 16차 P1: schema 파라미터가 public이 아니면 스키마도 여기서 보장한다.
-_bootstrap_ddl="CREATE TABLE IF NOT EXISTS schema_migrations (
+# 리뷰 16차 P1(4차): ledger DDL도 schema-qualified (search_path 무관).
+_bootstrap_ddl="CREATE TABLE IF NOT EXISTS \"${PGSCHEMA}\".schema_migrations (
   version TEXT PRIMARY KEY,
   applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )"
@@ -193,6 +196,18 @@ for f in db/migrations/*.sql; do
     echo "❌ $v: 빈 마이그레이션 파일 — 적용할 수 없습니다." >&2
     exit 1
   fi
+  # 리뷰 16차 P1(4차): 공개된 001_init은 역사적 BEGIN/COMMIT을 포함한다 — 파일
+  # bytes는 불변으로 유지하고(원격과 byte-identical), "알려진 checksum에 한정한"
+  # legacy bootstrap 경로로만 해당 두 라인을 실행 시점에 제거한다. checksum이
+  # 내용을 고정하므로 이 변환은 결정적이며, bytes가 다르면(변조/드리프트) 이
+  # 경로를 타지 않고 서버가 transaction control을 거부한다 (fail-closed).
+  if [ "$v" = "001_init" ]; then
+    _fsha="$( (shasum -a 256 "$f" 2>/dev/null || sha256sum "$f" 2>/dev/null) | awk '{print $1; exit}')"
+    if [ "$_fsha" = "0c135ce5f5ccc05e574667c853aa297ddca36cbfd09c8e2fe9c2b0d102d5d5d3" ]; then
+      echo "   ℹ️  001_init: 알려진 공개 bytes(checksum 일치) — legacy BEGIN/COMMIT 라인을 제거해 단일 transaction으로 적용합니다."
+      _content="$(printf '%s' "$_content" | grep -Ev '^(BEGIN|COMMIT);$')"
+    fi
+  fi
   _t1=""; _t2=""
   while :; do
     _t1="do_${RANDOM}${RANDOM}${RANDOM}"
@@ -205,14 +220,14 @@ for f in db/migrations/*.sql; do
   {
     printf 'SELECT pg_advisory_xact_lock(%s);\n' "$ADVISORY_KEY"
     printf 'DO $mig$ BEGIN\n'
-    printf "  IF EXISTS (SELECT 1 FROM schema_migrations WHERE version = '%s') THEN\n" "$v"
+    printf "  IF EXISTS (SELECT 1 FROM \"%s\".schema_migrations WHERE version = '%s') THEN\n" "$PGSCHEMA" "$v"
     printf "    RAISE EXCEPTION 'migration %% is already applied', '%s';\n" "$v"
     printf '  END IF;\n'
     printf 'END $mig$;\n'
     printf 'DO $%s$ BEGIN EXECUTE $%s$\n' "$_t1" "$_t2"
     printf '%s' "$_content"
     printf '\n$%s$; END $%s$;\n' "$_t2" "$_t1"
-    printf "INSERT INTO schema_migrations (version) VALUES ('%s') ON CONFLICT (version) DO NOTHING;\n" "$v"
+    printf "INSERT INTO \"%s\".schema_migrations (version) VALUES ('%s') ON CONFLICT (version) DO NOTHING;\n" "$PGSCHEMA" "$v"
   } > "$_wrap" || { rm -f "$_wrap"; echo "❌ 래퍼 스크립트 작성 실패." >&2; exit 3; }
   # 단일 transaction 안에서: advisory lock → applied 재확인(guard) → SQL(EXECUTE)
   # → ledger 기록. 동시 runner의 패자는 lock 대기 후 guard의 예외로 중단된다.
