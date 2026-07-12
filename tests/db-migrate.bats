@@ -24,6 +24,10 @@ _as_pg() {
 }
 
 setup_file() {
+  # macOS: 로케일이 비어 있으면 postmaster가 기동 중 멀티쓰레드가 되어 시작 자체가
+  # 실패한다 (CoreFoundation 로케일 초기화) — 비대화형/자동화 환경에서 재현.
+  # C 로케일로 고정한다 (Linux에는 무해).
+  export LC_ALL="${LC_ALL:-C}"
   PGBIN="$(_pg_bin)" || skip "PostgreSQL 서버 바이너리 없음 — migration 회귀 skip"
   if [ "$(id -u)" = "0" ] && ! id postgres >/dev/null 2>&1; then
     skip "root인데 postgres 사용자 없음 — skip"
@@ -140,4 +144,85 @@ SQL
   _psql "insert into events (event_type, payload) values ('t', ('{\"d\":\"' || repeat('a',20000) || '\"}')::jsonb)"
   run _psql "insert into events (event_type, payload) values ('t', ('{\"d\":\"' || repeat('a',33000) || '\"}')::jsonb)"
   [ "$status" -ne 0 ]
+}
+
+# ── 리뷰 16차 P1 회귀 ──────────────────────────────────────────────────────────
+
+@test "DB7: embedded top-level COMMIT cannot break atomicity - no partial commit, lock not released mid-file" {
+  # 내부 COMMIT은 --single-transaction을 중도 종결시켜, 이후 문장이 실패하면
+  # 앞부분만 commit된 채 남았다 (001의 역사적 BEGIN/COMMIT과 같은 패턴).
+  local bad="$REPO_ROOT/db/migrations/998_txn_zz_test.sql"
+  cat > "$bad" <<'SQL'
+CREATE TABLE IF NOT EXISTS partial_a (id INT);
+COMMIT;
+CREATE TABLE IF NOT EXISTS partial_b (id INT);
+SELECT 1/0;
+SQL
+  run env ENV_FILE="$ENVF" "$REPO_ROOT/scripts/db_migrate.sh"
+  rm -f "$bad"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"중화"* ]]
+  # 부분 commit 없음 — 내부 COMMIT 앞의 객체도 남지 않는다
+  [ "$(_psql "select count(*) from information_schema.tables where table_name in ('partial_a','partial_b')")" = "0" ]
+  [ "$(_psql "select count(*) from schema_migrations where version like '998%'")" = "0" ]
+}
+
+@test "DB8: --status is strictly read-only - no ledger bootstrap on a fresh DB" {
+  run env ENV_FILE="$ENVF" "$REPO_ROOT/scripts/db_migrate.sh" --status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"pending"* ]]
+  # status가 schema_migrations를 만들지 않았다
+  [ "$(_psql "select to_regclass('public.schema_migrations') is null")" = "t" ]
+  # apply 후에는 applied로 보고
+  run env ENV_FILE="$ENVF" "$REPO_ROOT/scripts/db_migrate.sh"
+  [ "$status" -eq 0 ]
+  run env ENV_FILE="$ENVF" "$REPO_ROOT/scripts/db_migrate.sh" --status
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"001_init (applied)"* ]]
+}
+
+@test "DB9: DATABASE_URL schema parameter is honored - objects and ledger land in that schema" {
+  echo "DATABASE_URL=postgres://postgres:x@127.0.0.1:${PGT_PORT}/${TEST_DB}?schema=appdata&connection_limit=20" > "$ENVF"
+  run env ENV_FILE="$ENVF" "$REPO_ROOT/scripts/db_migrate.sh"
+  [ "$status" -eq 0 ]
+  [ "$(_psql "select count(*) from information_schema.tables where table_schema='appdata' and table_name='users'")" = "1" ]
+  [ "$(_psql "select count(*) from information_schema.tables where table_schema='appdata' and table_name='schema_migrations'")" = "1" ]
+  [ "$(_psql "select count(*) from information_schema.tables where table_schema='public' and table_name='users'")" = "0" ]
+  # 위험 식별자는 거부 (fail-closed)
+  echo "DATABASE_URL=postgres://postgres:x@127.0.0.1:${PGT_PORT}/${TEST_DB}?schema=app;drop" > "$ENVF"
+  run env ENV_FILE="$ENVF" "$REPO_ROOT/scripts/db_migrate.sh"
+  [ "$status" -eq 2 ]
+}
+
+@test "DB10: soft-delete is a state invariant - re-writing personal fields or inserting deleted rows is rejected" {
+  run env ENV_FILE="$ENVF" "$REPO_ROOT/scripts/db_migrate.sh"
+  [ "$status" -eq 0 ]
+  _psql "insert into users (provider, provider_subject) values ('kakao','u1')"
+  _psql "update users set consent_personalization=true, consented_at=now(), birth_profile_hash='h', nickname='n' where id=1"
+  _psql "update users set deleted_at=now() where id=1"
+  # 정상 삭제 경로: 트리거 스크럽 후 불변식 통과
+  [ "$(_psql "select (nickname is null and birth_profile_hash is null and not consent_personalization) from users where id=1")" = "t" ]
+  # (a) 삭제된 행에 개인 필드 재기입 — 거부
+  run _psql "update users set last_topic='love' where id=1"
+  [ "$status" -ne 0 ]
+  run _psql "update users set nickname='back' where id=1"
+  [ "$status" -ne 0 ]
+  # (b) deleted_at이 설정된 채 개인 필드를 담은 INSERT — 거부
+  run _psql "insert into users (provider, provider_subject, nickname, deleted_at) values ('kakao','u2','n2',now())"
+  [ "$status" -ne 0 ]
+  # 개인 필드 없는 삭제 상태 INSERT는 허용 (불변식 위반 아님)
+  _psql "insert into users (provider, provider_subject, deleted_at) values ('kakao','u3',now())"
+}
+
+@test "DB11: a failing migration whose error text contains 'ALREADY_APPLIED' is a failure, not a skip" {
+  local bad="$REPO_ROOT/db/migrations/997_lie_zz_test.sql"
+  cat > "$bad" <<'SQL'
+DO $x$ BEGIN RAISE EXCEPTION 'ALREADY_APPLIED impostor'; END $x$;
+SQL
+  run env ENV_FILE="$ENVF" "$REPO_ROOT/scripts/db_migrate.sh"
+  rm -f "$bad"
+  # 과거: 출력 문자열 매칭으로 skip 처리되어 rc=0으로 위장 — 지금은 실패(rc=1)
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"skip  997"* ]]
+  [ "$(_psql "select count(*) from schema_migrations where version like '997%'")" = "0" ]
 }
