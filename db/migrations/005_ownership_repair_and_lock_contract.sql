@@ -31,6 +31,16 @@ SET search_path FROM CURRENT
 AS $fn$
 BEGIN
   IF NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL THEN
+    -- 8차 2회 P1(#9): soft-delete의 "유일 진입점"을 DB가 강제한다.
+    -- 직접 UPDATE users는 users 행을 먼저 잠근 뒤 이 트리거가 child를 갱신해
+    -- users→child 순서가 되는데, 직접 child UPDATE는 PG가 child 행을 먼저 잠근
+    -- 뒤 guard 트리거가 users를 잠가 child→users 순서다 — 역전이 남는다.
+    -- app_soft_delete_user()는 child를 먼저 잠그고 users를 나중에 잠가 두 경로의
+    -- 순서를 일치시킨다. 그 진입점을 통과했다는 증거(transaction-local GUC)가
+    -- 없으면 삭제 전이를 거부한다 — 계약이 규약이 아니라 스키마 강제가 된다.
+    IF current_setting('app.soft_delete_user', true) IS DISTINCT FROM OLD.id::text THEN
+      RAISE EXCEPTION 'users.id=%: soft-delete는 app_soft_delete_user(%)로만 수행할 수 있습니다 — 직접 UPDATE는 잠금 순서 계약(child→users)을 깨 deadlock을 유발합니다 (write contract)', OLD.id, OLD.id;
+    END IF;
     NEW.nickname := NULL;
     NEW.birth_info_enc := NULL;
     NEW.birth_profile_hash := NULL;
@@ -266,24 +276,28 @@ CREATE TRIGGER trg_purchases_user_id_immutable
   BEFORE UPDATE OF user_id ON purchases
   FOR EACH ROW EXECUTE FUNCTION purchases_user_id_immutable();
 
--- ── 8) UPDATE 경로 잠금 순서 write contract + deadlock retry 계약 (7차 P1-5) ────
+-- ── 8) 잠금 순서 write contract — 규약이 아니라 스키마 강제 (7차 P1-5 → 8차 #9) ──
 -- 문제(실측, PG16): PostgreSQL은 child row를 잠근 "뒤" BEFORE UPDATE 트리거를
--- 실행한다. 따라서 events/sessions UPDATE 경로는 child→users 순서가 되고,
--- 삭제 경로(users 행 잠금 → 스크럽 트리거의 child 갱신)는 users→children
--- 순서라 역전 deadlock이 남는다:
---   * event row lock → user delete → event no-op update
---   * session row lock → user delete → session no-op update
--- 트리거 내부 선언만으로는 제거할 수 없다 — 잠금은 트리거보다 먼저 잡힌다.
+-- 실행한다. 따라서 직접 child UPDATE 경로는 항상 child→users 순서다(바꿀 수
+-- 없다 — 잠금이 트리거보다 먼저다). 반면 직접 `UPDATE users SET deleted_at`은
+-- users 행을 먼저 잠근 뒤 스크럽 트리거가 child를 갱신해 users→child 순서가
+-- 되어 역전 deadlock이 남았다.
 --
--- 계약 (docs/decisions/0004 §write-contract):
---   (a) events/sessions 행을 UPDATE(또는 FOR UPDATE 잠금)하는 모든 writer는
---       DML "전"에 app_lock_user_rows(...)로 관련 사용자 행(FOR SHARE)을 먼저
---       잠근다 — 전 경로가 users→children 순서로 고정되어 역전이 사라진다.
---       (트리거의 FOR SHARE 재획득은 이미 보유한 잠금이라 대기가 없다.)
---   (b) soft delete는 직접 UPDATE가 아니라 app_soft_delete_user(...)로 수행한다.
---       계약을 지키지 않은 writer와의 잔여 deadlock은 서버가 감지해 한쪽을
---       중단시키며, 이 함수의 bounded retry(subtransaction rollback 후 재시도)가
---       삭제 쪽에서 이를 흡수한다 — 명시적 deadlock retry 계약.
+-- 7차의 helper-only 계약은 "비준수 writer가 있으면 여전히 deadlock"이라 계약이
+-- 강제되지 않았다 (8차 #9). 해결은 두 축이다:
+--   (a) 삭제 경로를 child→users로 "뒤집는다": app_soft_delete_user()가 대상
+--       사용자의 child 행(events·sessions·streaks·user_fortunes)을 결정적 순서
+--       (id 오름차순)로 먼저 잠그고, 그 다음에 users 행을 잠근다 — 직접 child
+--       UPDATE 경로와 동일한 순서가 되어 역전 자체가 사라진다.
+--   (b) 그 진입점을 "유일"하게 만든다: 스크럽 트리거가 transaction-local 증거
+--       (GUC app.soft_delete_user)를 요구하므로, 직접 UPDATE로는 삭제 전이가
+--       아예 불가능하다 (위 1절). 이제 비준수 writer가 존재할 수 없다.
+-- bounded deadlock retry는 남겨 둔다 — 순서가 일치하면 발생하지 않지만, 외부
+-- 도구가 임의 순서로 여러 행을 잠그는 경우에 대한 최후 흡수 계층이다.
+--
+-- app_lock_user_rows: child 행을 "여러 사용자"에 걸쳐 갱신하는 writer용 보조 —
+-- 사용자 행을 id 오름차순으로 먼저 잠가 writer 간 상호 deadlock을 막는다.
+-- (삭제와의 순서 정합은 (a)가 이미 보장하므로 필수는 아니다.)
 CREATE OR REPLACE FUNCTION app_lock_user_rows(VARIADIC p_users BIGINT[]) RETURNS void
 LANGUAGE plpgsql
 SET search_path FROM CURRENT
@@ -291,23 +305,40 @@ AS $fn$
 DECLARE
   _u BIGINT;
 BEGIN
-  -- 결정적 잠금 순서(id 오름차순) — 다중 사용자 잠금 간의 상호 deadlock 방지.
   FOR _u IN SELECT DISTINCT t.u FROM unnest(p_users) AS t(u) WHERE t.u IS NOT NULL ORDER BY t.u LOOP
     PERFORM 1 FROM users WHERE id = _u FOR SHARE;
   END LOOP;
 END $fn$;
 
+-- soft-delete의 유일 진입점 (스크럽 트리거가 이 함수를 통과했음을 요구한다).
+-- 반환: TRUE=이번 호출로 삭제됨, FALSE=이미 삭제된 사용자(멱등).
 CREATE OR REPLACE FUNCTION app_soft_delete_user(p_user BIGINT) RETURNS boolean
 LANGUAGE plpgsql
 SET search_path FROM CURRENT
 AS $fn$
 DECLARE
   _try INT := 0;
+  _hit BOOLEAN;
 BEGIN
   LOOP
     BEGIN
+      -- (a) child-first 잠금 — 직접 child UPDATE 경로와 동일한 순서.
+      PERFORM 1 FROM events e
+        WHERE e.user_id = p_user
+           OR e.session_id IN (SELECT s.id FROM sessions s WHERE s.user_id = p_user)
+        ORDER BY e.id
+        FOR NO KEY UPDATE;
+      PERFORM 1 FROM sessions s WHERE s.user_id = p_user ORDER BY s.id FOR NO KEY UPDATE;
+      PERFORM 1 FROM streaks st WHERE st.user_id = p_user ORDER BY st.user_id FOR NO KEY UPDATE;
+      PERFORM 1 FROM user_fortunes f WHERE f.user_id = p_user ORDER BY f.user_id FOR NO KEY UPDATE;
+      -- (b) 진입점 증거 — transaction-local. 트리거가 이 값을 검사한다.
+      PERFORM set_config('app.soft_delete_user', p_user::text, true);
       UPDATE users SET deleted_at = now() WHERE id = p_user AND deleted_at IS NULL;
-      RETURN FOUND;
+      _hit := FOUND;
+      -- 증거는 이 삭제에만 유효하게 — 같은 transaction의 이후 직접 UPDATE가
+      -- 남은 GUC로 트리거를 통과하지 못하도록 즉시 해제한다.
+      PERFORM set_config('app.soft_delete_user', '', true);
+      RETURN _hit;
     EXCEPTION WHEN deadlock_detected THEN
       -- subtransaction rollback으로 이 시도의 잠금은 해제됨 — bounded 재시도.
       _try := _try + 1;
