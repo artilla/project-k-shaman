@@ -593,10 +593,25 @@ if [ "$ELIGIBLE" -eq 0 ]; then
       sleep 0.1
     done
   }
+  # 리뷰 16차 P1(8차 2회, #8): 해제도 "관찰한 그 lock"에 결속한다. 종전의
+  # pid 읽기 → rm 구조는 그 사이 lock이 교체되면(내 lock이 stale로 회수되고 다른
+  # writer가 새 lock을 세운 경우) 남의 lock을 지워 상호배제를 붕괴시켰다.
+  # 회수(acquire)와 같은 기법: 원자적 rename으로 먼저 들어낸 뒤 내용을 확인해
+  # 내 것일 때만 폐기하고, 아니면 그대로 되돌려 놓는다.
   _am_tw_release() {
-    if [ "$(cat "$_TW_LOCK/pid" 2>/dev/null)" = "$$" ]; then
-      rm -rf "$_TW_LOCK" 2>/dev/null || true
+    local _rel="$_TW_LOCK.rel.$$" _p
+    [ -d "$_TW_LOCK" ] || return 0
+    mv "$_TW_LOCK" "$_rel" 2>/dev/null || return 0   # 이미 사라졌거나 남이 들고 있음
+    _p="$(cat "$_rel/pid" 2>/dev/null || true)"
+    if [ "$_p" = "$$" ]; then
+      rm -rf "$_rel" 2>/dev/null || true
+      return 0
     fi
+    # 내 것이 아니었다 — 원복한다 (그 사이 새 lock이 섰으면 덮지 않고 보존).
+    if [ -e "$_TW_LOCK" ] || ! mv "$_rel" "$_TW_LOCK" 2>/dev/null; then
+      echo "[WARN] writer lock 원복 실패 — 확인 필요: ${_rel}" >&2
+    fi
+    return 0
   }
 
   # 리뷰 13차 P1 + 14차 P1: CAS 후 워크트리 동기화. 모든 dirty 항목이 "정확히 merge
@@ -648,8 +663,10 @@ if [ "$ELIGIBLE" -eq 0 ]; then
         echo "늦은 write도 이 inode에 남는다 (리뷰 16차 P1)."
         echo "- 복구: manifest.tsv(시각, merge OID, 원경로, 격리 경로, worktree toplevel)에서"
         echo "  찾아 mv로 복원 — 원경로는 5열의 worktree 기준 상대 경로다 (공유 trash 식별)."
+        echo "- 불변식: manifest에 행이 있으면 그 격리 파일은 반드시 존재한다 (기록은 rename 후)."
+        echo "- '*.claim'만 남고 행이 없는 파일 = 격리는 됐으나 기록 실패/중단된 것 — 내용으로 확인 후 복원."
         echo "- 보존: 해당 rollback의 감사 로그(ROLLED_BACK) 확인 후 수동 삭제 가능 (자동 삭제 없음)."
-        echo "- manifest에 MOVE-FAILED 표시가 있으면 그 행의 파일은 격리되지 않고 원위치에 있다."
+        echo "- rename 실패 시에는 행을 남기지 않는다 — 그 파일은 격리되지 않고 원위치에 있다."
       } > "$1/README.md" 2>/dev/null || true
     fi
     return 0
@@ -671,24 +688,26 @@ if [ "$ELIGIBLE" -eq 0 ]; then
       if (set -C; : > "$_dst.claim") 2>/dev/null; then break; fi
       _i=$((_i+1)); [ "$_i" -ge 10 ] && return 1
     done
-    # 리뷰 16차 P1-10(6차): manifest는 rename "전"에 기록한다 — 기록 실패 시
-    # 파일은 아직 원위치라 원복 자체가 필요 없다 (기록 실패 후의 원복 mv가 그
-    # 사이 원경로에 생긴 concurrent 파일을 덮던 창 제거). rename이 실패하면
-    # manifest에 정정 행을 남긴다 (best effort — 파일은 원위치 그대로).
+    # 리뷰 16차 P1(8차 2회, #8): manifest 행은 rename "후"에 기록한다.
+    # 6차의 record-then-rename은 기록과 rename 사이에 강제 종료되면 "격리 완료"를
+    # 뜻하는 성공 행만 남고 실제 격리 파일은 그 자리에 없는 상태를 만들었다 —
+    # manifest가 거짓을 말한다 (실측). 반대로 rename-then-record에서 그 사이에
+    # 죽으면 파일은 격리 디렉터리에 "안전하게" 존재하고 행만 없다 — 파일 유실이
+    # 없고, 남아 있는 .claim 마커로 미기록 격리본을 식별해 복구할 수 있다.
+    # 즉 "행이 있으면 파일이 있다"를 불변식으로 삼는다 (거짓 성공 금지).
     # 리뷰 16차 P2(7차): trash는 common git dir 하나를 "여러 worktree"가 공유
-    # 한다 — 상대 원경로만으로는 어느 worktree의 파일인지 식별할 수 없다.
-    # 5열에 worktree toplevel(절대 경로)을 기록해 복원 목적지를 유일하게 만든다.
+    # 한다 — 5열에 worktree toplevel(절대 경로)을 기록해 원경로를 유일하게 만든다.
     _wt="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-    if ! printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)" \
-        "${MERGE_COMMIT:-unknown}" "$2" "$_dst" "$_wt" >> "$_dir/manifest.tsv" 2>/dev/null; then
-      rm -f "$_dst.claim"
+    if ! mv "$1" "$_dst" 2>/dev/null; then
+      rm -f "$_dst.claim"          # 파일은 원위치 그대로 — 호출자가 원복·보존
       return 1
     fi
-    if ! mv "$1" "$_dst" 2>/dev/null; then
-      printf '%s\t%s\t%s\t%s\t%s\tMOVE-FAILED\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)" \
-        "${MERGE_COMMIT:-unknown}" "$2" "$_dst" "$_wt" >> "$_dir/manifest.tsv" 2>/dev/null || true
-      rm -f "$_dst.claim"
-      return 1
+    if ! printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)" \
+        "${MERGE_COMMIT:-unknown}" "$2" "$_dst" "$_wt" >> "$_dir/manifest.tsv" 2>/dev/null; then
+      # 파일은 이미 격리됐다(유실 없음) — 기록만 실패. .claim을 남겨 미기록
+      # 격리본으로 식별 가능하게 하고 경고한다.
+      echo "[WARN] quarantine manifest 기록 실패 — 파일은 격리됨: ${_dst} (원경로: ${_wt}/${2}); .claim 마커로 표시" >&2
+      return 0
     fi
     rm -f "$_dst.claim"
   }
