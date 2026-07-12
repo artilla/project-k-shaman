@@ -3,9 +3,11 @@
 #
 # 소유권 계약 (리뷰 15차 P1 + 16차 P1):
 #   - transaction: 각 마이그레이션은 runner가 --single-transaction으로 감싼다.
-#     SQL 파일은 BEGIN/COMMIT을 쓰지 않는다. 파일 내 최상위 BEGIN/COMMIT/ROLLBACK은
-#     단일 transaction을 중도 종결시켜 부분 commit을 만들 수 있으므로(16차 P1)
-#     runner가 중화(제거)하고 경고를 남긴다 — 001의 역사적 BEGIN/COMMIT 포함.
+#     SQL 파일은 transaction control(BEGIN/COMMIT/ROLLBACK/END/ABORT/START·PREPARE
+#     TRANSACTION)을 쓰지 않는다 — 내부 COMMIT은 단일 transaction을 중도 종결시켜
+#     부분 commit·advisory lock 조기 해제를 만든다(16차 P1). runner는 SQL을 수정해
+#     실행하지 않고, 문맥 인지 스캐너(문자열·주석·dollar-quote 제외)로 정확히
+#     검출해 실행 전에 거부한다 (fail-closed).
 #   - ledger: version 기록(INSERT INTO schema_migrations)은 runner가 같은
 #     transaction에서 수행한다. SQL 파일이 marker를 빠뜨려도 재실행되지 않는다.
 #   - 동시 실행: pg_advisory_xact_lock으로 직렬화. 패자는 승자 commit 후 guard
@@ -75,7 +77,9 @@ _query=""
 case "$_dbq" in *\?*) _query="${_dbq#*\?}" ;; esac
 PGSCHEMA="public"
 if [ -n "$_query" ]; then
-  _sch="$(printf '%s' "$_query" | tr '&' '\n' | sed -n 's/^schema=//p' | head -1)"
+  # 리뷰 16차 P2: sed|head는 긴 중복 파라미터에서 SIGPIPE(rc=141)로 무진단 종료했다
+  # (set -o pipefail) — 입력을 끝까지 소비하는 awk 단일 패스로 추출.
+  _sch="$(printf '%s' "$_query" | tr '&' '\n' | awk -F= '$1=="schema" && !f {v=$2; f=1} END {if (f) print v}')"
   if [ -n "$_sch" ]; then
     case "$_sch" in
       [A-Za-z_]*) ;;
@@ -90,7 +94,10 @@ fi
 
 export PGUSER PGPASSWORD PGHOST PGPORT PGDATABASE
 export PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-10}"
-export PGOPTIONS="-c client_min_messages=warning -c search_path=${PGSCHEMA}"
+# 리뷰 16차 P1: 식별자 quoting — unquoted 식별자는 서버가 소문자로 접는다.
+# schema=AppData가 실제로는 appdata에 적용되면서 로그에는 AppData로 표시됐다.
+# 검증된 식별자를 quote해 대소문자 그대로(애플리케이션/Prisma와 동일 의미) 사용.
+export PGOPTIONS="-c client_min_messages=warning -c search_path=\"${PGSCHEMA}\""
 
 # 리뷰 15차 P2: 흔한 psql 위치(macOS libpq keg)를 PATH 폴백으로 추가.
 if ! command -v psql >/dev/null 2>&1; then
@@ -152,7 +159,7 @@ if [ "$PGSCHEMA" = "public" ]; then
 else
   psql -X -v ON_ERROR_STOP=1 -q --single-transaction \
     -c "SELECT pg_advisory_xact_lock(${ADVISORY_KEY})" \
-    -c "CREATE SCHEMA IF NOT EXISTS ${PGSCHEMA}" \
+    -c "CREATE SCHEMA IF NOT EXISTS \"${PGSCHEMA}\"" \
     -c "$_bootstrap_ddl" >/dev/null || { echo "❌ schema/ledger 부트스트랩 실패." >&2; exit 3; }
 fi
 
@@ -163,20 +170,106 @@ for f in db/migrations/*.sql; do
     continue
   fi
   echo "── apply $v"
-  # 리뷰 16차 P1(부분 commit): SQL 파일 내부의 최상위 BEGIN/COMMIT/ROLLBACK은
+  # 리뷰 16차 P1(부분 commit, 재수정): SQL 파일 내부의 최상위 transaction control은
   # --single-transaction을 중도 종결시킨다 — 내부 COMMIT 시점에 그때까지의 변경이
   # 실제로 commit되고 advisory xact lock도 풀려, 이후 문장이 실패하면 "부분 적용
-  # + ledger 미기록 + 직렬화 붕괴"가 된다 (001의 역사적 BEGIN/COMMIT이 그 사례).
-  # 계약대로 transaction은 runner가 소유한다 — 독립 라인의 txn 제어문을 중화하고
-  # 경고를 남긴다 (파일은 무수정 보존).
-  _sql_src="$f"
-  _tmp_sql=""
-  if grep -Eiq '^[[:space:]]*(BEGIN|COMMIT|ROLLBACK)[[:space:]]*;[[:space:]]*$' "$f"; then
-    echo "   ⚠️  $v: 파일 내 최상위 BEGIN/COMMIT/ROLLBACK 감지 — transaction은 runner 소유이므로 중화하고 단일 transaction으로 적용합니다."
-    _tmp_sql="$(mktemp "${TMPDIR:-/tmp}/dbmig.XXXXXX")" || { echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
-    grep -Eiv '^[[:space:]]*(BEGIN|COMMIT|ROLLBACK)[[:space:]]*;[[:space:]]*$' "$f" > "$_tmp_sql" \
-      || { rm -f "$_tmp_sql"; echo "❌ $v: txn 제어문 중화 실패." >&2; exit 3; }
-    _sql_src="$_tmp_sql"
+  # + ledger 미기록 + 직렬화 붕괴"가 된다.
+  # 1차 수정(독립 행 정규식 중화)의 두 결함을 반영해 재설계:
+  #   (a) `COMMIT; -- comment` 같은 변형을 놓쳐 부분 commit이 재현됐고,
+  #   (b) 반대로 문맥(예: 문자열/주석)을 모르는 삭제는 원본과 다른 SQL을 실행했다.
+  # → SQL을 "수정해서 실행"하지 않는다. 문자열('')·식별자("")·주석(--, /* */ 중첩)·
+  #   dollar-quote($tag$)를 인지하는 스캐너가 문장 첫 키워드를 검사해, 지원하지
+  #   않는 transaction control이 있으면 실행 전에 정확히 거부한다 (fail-closed).
+  #   한계: BEGIN ATOMIC(비 dollar-quote 함수 본문, PG14+)은 오탐 거부 — 이 저장소
+  #   계약상 함수 본문은 dollar-quote를 쓴다.
+  if ! _tc_out="$(awk '
+    { src = src $0 "\n" }
+    END {
+      n = length(src); i = 1; stmt = ""; ln = 1; sln = 1; bad = 0
+      while (i <= n) {
+        c = substr(src, i, 1); two = substr(src, i, 2)
+        if (two == "--") { while (i <= n && substr(src,i,1) != "\n") i++; continue }
+        if (two == "/*") {
+          d = 1; i += 2
+          while (i <= n && d > 0) {
+            t = substr(src, i, 2)
+            if (t == "/*") { d++; i += 2; continue }
+            if (t == "*/") { d--; i += 2; continue }
+            if (substr(src,i,1) == "\n") ln++
+            i++
+          }
+          continue
+        }
+        if (c == "\x27") {
+          i++
+          while (i <= n) {
+            if (substr(src,i,2) == "\x27\x27") { i += 2; continue }
+            if (substr(src,i,1) == "\x27") { i++; break }
+            if (substr(src,i,1) == "\n") ln++
+            i++
+          }
+          stmt = stmt "S"; continue
+        }
+        if (c == "\"") {
+          i++
+          while (i <= n) {
+            if (substr(src,i,2) == "\"\"") { i += 2; continue }
+            if (substr(src,i,1) == "\"") { i++; break }
+            if (substr(src,i,1) == "\n") ln++
+            i++
+          }
+          stmt = stmt "I"; continue
+        }
+        if (c == "$") {
+          j = i + 1; tag = ""
+          while (j <= n) {
+            ch = substr(src, j, 1)
+            if (ch == "$") break
+            if (ch !~ /[A-Za-z0-9_]/) { j = 0; break }
+            tag = tag ch; j++
+          }
+          if (j > 0 && substr(src, j, 1) == "$") {
+            dq = "$" tag "$"
+            rest = substr(src, j + 1)
+            k = index(rest, dq)
+            if (k > 0) {
+              seg = substr(src, i, (j - i + 1) + k - 1 + length(dq))
+              ln += gsub(/\n/, "", seg)
+              i = j + k + length(dq)
+              stmt = stmt "D"; continue
+            }
+          }
+          stmt = stmt c; i++; continue
+        }
+        if (c == ";") { bad += check(stmt, sln); stmt = ""; i++; sln = ln; continue }
+        if (c == "\n") ln++
+        if (stmt == "" && c ~ /[ \t\r\n]/) { sln = ln; i++; continue }
+        stmt = stmt c; i++
+      }
+      bad += check(stmt, sln)
+      exit (bad > 0 ? 1 : 0)
+    }
+    function check(s, l,   w1, w2) {
+      gsub(/^[ \t\r\n]+/, "", s)
+      if (s == "") return 0
+      if (match(s, /^[A-Za-z]+/) == 0) return 0
+      w1 = toupper(substr(s, 1, RLENGTH))
+      s2 = substr(s, RLENGTH + 1)
+      gsub(/^[ \t\r\n]+/, "", s2)
+      w2 = ""
+      if (match(s2, /^[A-Za-z]+/) > 0) w2 = toupper(substr(s2, 1, RLENGTH))
+      if (w1 == "BEGIN" || w1 == "COMMIT" || w1 == "END" || w1 == "ROLLBACK" || w1 == "ABORT") {
+        printf "  line %d: %s ...\n", l, w1; return 1
+      }
+      if ((w1 == "START" || w1 == "PREPARE") && w2 == "TRANSACTION") {
+        printf "  line %d: %s TRANSACTION ...\n", l, w1; return 1
+      }
+      return 0
+    }
+  ' "$f")"; then
+    echo "❌ $v: 파일에 최상위 transaction control 문장이 있습니다 — transaction은 runner가 소유하므로 지원하지 않습니다. 해당 문장을 제거하세요 (실행하지 않음, fail-closed):" >&2
+    printf '%s\n' "$_tc_out" >&2
+    exit 1
   fi
   # 단일 transaction 안에서: advisory lock → applied 재확인(guard) → SQL → ledger 기록.
   # 동시 runner의 패자는 lock 대기 후 guard의 예외로 transaction이 중단된다.
@@ -190,9 +283,8 @@ for f in db/migrations/*.sql; do
   _out="$(psql -X -v ON_ERROR_STOP=1 -q --single-transaction \
       -c "SELECT pg_advisory_xact_lock(${ADVISORY_KEY})" \
       -c "$_guard" \
-      -f "$_sql_src" \
+      -f "$f" \
       -c "INSERT INTO schema_migrations (version) VALUES ('$v') ON CONFLICT (version) DO NOTHING" 2>&1)" || _rc=$?
-  [ -n "$_tmp_sql" ] && rm -f "$_tmp_sql"
   if [ "$_rc" -ne 0 ]; then
     # 리뷰 16차 P1(오류 오판): 출력 문자열 매칭으로 skip을 판정하지 않는다 —
     # 마이그레이션 SQL의 임의 오류 메시지에 'ALREADY_APPLIED'가 포함되면 실패한
