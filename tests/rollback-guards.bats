@@ -242,17 +242,20 @@ $B"
   git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
 }
 
-@test "R13: foreign commit injected after validation is not reverted (pinned OIDs, no HEAD TOCTOU)" {
+@test "R13: foreign commit injected after validation -> publish refused, nothing lost (isolated worktree, ff-only CAS)" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
 
-  # 검증(소유 목록 확정) 이후, 첫 revert 직전에 foreign commit을 주입하는 wrapper
+  # 검증(소유 목록 확정) 이후, 격리 worktree의 첫 revert 직전에 메인 HEAD에
+  # foreign commit을 주입하는 wrapper — 7차 P1-7 설계에서 revert는 격리
+  # worktree에서 계산되고, 공개는 HEAD 불변 재검증 + ff-only라 주입을 감지해
+  # 공개를 거부한다 (foreign도 소유 revert 결과도 잃지 않음, fail-closed).
   local realgit
   realgit="$(command -v git)"
   mkdir -p "$repo/gbin"
   cat > "$repo/gbin/git" <<WRAP
 #!/usr/bin/env bash
-if [ "\$1" = "revert" ] && [ "\$2" != "--abort" ] && [ ! -f "$repo/.injected" ]; then
+if [ "\$1" = "-C" ] && [ "\$3" = "revert" ] && [ "\$4" != "--abort" ] && [ ! -f "$repo/.injected" ]; then
   touch "$repo/.injected"
   echo late > "$repo/foreign.txt"
   "$realgit" add foreign.txt
@@ -263,20 +266,26 @@ WRAP
   chmod +x "$repo/gbin/git"
 
   run bash -c 'cd "$1" && PATH="$1/gbin:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
-  [ "$status" -eq 0 ]
-  # foreign commit과 산출물은 revert되지 않았다
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"HEAD가 이동"* ]]
+  # foreign commit과 산출물은 그대로 — 아무것도 revert/공개되지 않았다
   [ -f "$repo/foreign.txt" ]
-  run git -C "$repo" log --format=%s
+  run git -C "$repo" log --format=%s -1
   [[ "$output" == *"foreign: injected after validation"* ]]
-  # 소유 커밋은 되돌려졌다
-  grep -q "v1" "$repo/file.txt"
+  grep -q "v2" "$repo/file.txt"
+  # 계산 결과는 refs/rollback에 보존되어 수동 검토 가능
+  git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
+  # 종점 기록은 삭제되지 않았다
+  git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+  # 격리 worktree 잔여물 없음
+  [ "$(git -C "$repo" worktree list | wc -l | tr -d ' ')" = "1" ]
 }
 
-@test "R14: mid-sequence failure is resumable and abort-only recovery preserves concurrent dirty files" {
+@test "R14: conflict is all-or-nothing (main untouched, concurrent dirty preserved), pre-existing partial state resumes" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
   # C1(무관 파일)·A(file.txt v1→v2)는 owned, B(file.txt v2→v3)는 owned 아님 —
-  # A revert가 B의 내용과 충돌해 2번째에서 실패한다 (부분 실행 상태).
+  # A revert가 B의 내용과 충돌해 실패한다.
   local C1 A
   # 동시 dirty 주입 대상(어떤 owned revert도 건드리지 않는 파일)
   echo "stable" > "$repo/stable.txt"
@@ -294,14 +303,15 @@ WRAP
 $C1
 $A"
 
-  # 충돌 revert(A) 직전에 동시 tracked 변경을 주입하는 wrapper — 복구가
-  # reset --hard였다면 이 변경이 파괴된다 (5차 P1-7).
+  # 충돌 revert(A) 직전에 메인에 동시 tracked 변경을 주입하는 wrapper — 7차
+  # P1-7: revert는 격리 worktree에서 수행되므로 메인의 동시 변경을 파괴할 수단
+  # 자체가 없다 (5차의 reset --hard도, 6차의 --abort 오인도 성립 불가).
   local realgit
   realgit="$(command -v git)"
   mkdir -p "$repo/gbin2"
   cat > "$repo/gbin2/git" <<WRAP
 #!/usr/bin/env bash
-if [ "\$1" = "revert" ] && [ "\$3" = "$A" ]; then
+if [ "\$1" = "-C" ] && [ "\$3" = "revert" ] && [ "\$5" = "$A" ]; then
   echo "concurrent-dirty" >> "$repo/stable.txt"
 fi
 exec "$realgit" "\$@"
@@ -311,16 +321,20 @@ WRAP
   run bash -c 'cd "$1" && PATH="$1/gbin2:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
   [ "$status" -eq 3 ]
   [[ "$output" == *"revert 실패"* ]]
-  [[ "$output" == *"재실행하면"* ]]
-  # C1은 이미 되돌려졌고, 잔여 sequencer 상태 없음
+  [[ "$output" == *"all-or-nothing"* ]]
+  # 메인은 완전 무변경 — sequencer 상태도, 부분 revert 커밋도 없다
   [ ! -e "$repo/.git/REVERT_HEAD" ]
-  run git -C "$repo" log --format=%s -3
-  [[ "$output" == *'Revert "T200: c1"'* ]]
-  # abort-only 복구 — 동시 tracked 변경은 파괴되지 않았다
+  [ "$(git -C "$repo" log --format=%s | grep -c 'Revert "T200: c1"')" = "0" ]
+  # 동시 tracked 변경은 파괴되지 않았다
   grep -q "concurrent-dirty" "$repo/stable.txt"
+  grep -q "v3" "$repo/file.txt"
+  # 격리 worktree 잔여물 없음
+  [ "$(git -C "$repo" worktree list | wc -l | tr -d ' ')" = "1" ]
 
-  # 재실행(동시 dirty 정리 후): 거부되지 않고 C1은 건너뛴 채 A에서 같은 이유로 실패
+  # 구 버전/수동 부분 실행이 남긴 "post 이후 소유 역커밋"은 재개 경로로 인정:
+  # C1의 실제 역커밋을 만들어 두면, 재실행은 C1을 건너뛰고 A에서 같은 이유로 실패
   git -C "$repo" checkout -- stable.txt
+  git -C "$repo" revert --no-edit "$C1" >/dev/null 2>&1
   run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
   [ "$status" -eq 3 ]
   [[ "$output" != *"정합하지 않습니다"* ]]
@@ -354,7 +368,7 @@ This reverts commit ${owned}."
   git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
 }
 
-@test "R16: foreign staged path during revert conflict -> auto --abort refused, staged change preserved" {
+@test "R16: concurrent staged changes during revert conflict - same path AND foreign path both fully preserved (isolated index)" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
   # R12와 같은 충돌 구성: annotation 역순 → 첫 revert(A: v1→v2)가 최신 v3와 충돌.
@@ -368,20 +382,23 @@ This reverts commit ${owned}."
 $A
 $B"
 
-  # 충돌 발생 직후(스크립트의 --abort 전에) 무관한 경로를 stage하는 wrapper —
-  # 6차 P1-7: --abort는 index를 통째로 되돌려 이 staged 변경을 파괴한다.
+  # 격리 worktree의 revert가 충돌로 실패하는 순간, 메인 index에 (a) 실패 커밋과
+  # "같은 경로"(file.txt)의 새 내용과 (b) 무관 경로를 stage하는 wrapper —
+  # 7차 P1-7: 6차의 경로 비교는 (a)를 revert 잔상으로 오인해 --abort로 파괴했다.
+  # 격리 index 설계에서는 메인 index를 만질 수단이 없어 둘 다 보존된다.
   local realgit
   realgit="$(command -v git)"
   mkdir -p "$repo/gbin3"
   cat > "$repo/gbin3/git" <<WRAP
 #!/usr/bin/env bash
-if [ "\$1" = "revert" ] && [ "\$2" != "--abort" ]; then
+if [ "\$1" = "-C" ] && [ "\$3" = "revert" ] && [ "\$4" != "--abort" ]; then
   "$realgit" "\$@"
   rc=\$?
   if [ "\$rc" -ne 0 ] && [ ! -f "$repo/.r16" ]; then
     touch "$repo/.r16"
+    echo "same-path staged content" > "$repo/file.txt"
     echo "foreign staged content" > "$repo/foreign-staged.txt"
-    "$realgit" add foreign-staged.txt
+    "$realgit" add file.txt foreign-staged.txt
   fi
   exit \$rc
 fi
@@ -391,20 +408,47 @@ WRAP
 
   run bash -c 'cd "$1" && PATH="$1/gbin3:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
   [ "$status" -eq 3 ]
-  [[ "$output" == *"무관한 staged"* ]]
-  [[ "$output" == *"git revert --abort"* ]]
-  # 자동 abort가 실행되지 않았다 — sequencer 상태는 남고, foreign staged는 보존
-  [ -e "$repo/.git/REVERT_HEAD" ]
-  run git -C "$repo" diff --cached --name-only
-  [[ "$output" == *"foreign-staged.txt"* ]]
-  [ -f "$repo/foreign-staged.txt" ]
-  grep -q "foreign staged content" "$repo/foreign-staged.txt"
-
-  # 수동 절차(지시대로): 무관 staged를 치우고 abort → 정상 상태 복귀
-  git -C "$repo" reset -q -- foreign-staged.txt
-  git -C "$repo" revert --abort
+  [[ "$output" == *"revert 실패"* ]]
+  # 메인 index·worktree는 손대지 않았다 — 같은 경로 staged 내용까지 그대로다
   [ ! -e "$repo/.git/REVERT_HEAD" ]
-  grep -q "v3" "$repo/file.txt"
-  # 무관 파일은 여전히 존재 (untracked로 보존)
-  [ -f "$repo/foreign-staged.txt" ]
+  run git -C "$repo" diff --cached --name-only
+  [[ "$output" == *"file.txt"* ]]
+  [[ "$output" == *"foreign-staged.txt"* ]]
+  grep -q "same-path staged content" "$repo/file.txt"
+  grep -q "foreign staged content" "$repo/foreign-staged.txt"
+  # staged blob 내용도 보존됐다 (index에서 직접 확인)
+  [ "$(git -C "$repo" show :file.txt)" = "same-path staged content" ]
+  # 격리 worktree 잔여물 없음
+  [ "$(git -C "$repo" worktree list | wc -l | tr -d ' ')" = "1" ]
+}
+
+@test "R17: post tag moved to another cycle during revert -> publish refused from the pinned tag object (no stale rollback)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 7차 P1-6: annotation과 peeled target은 해석 시점에 고정한 tag object에서만
+  # 파생하고, 공개 직전 태그가 그 object 그대로인지 재검증한다 — 태그가 새
+  # cycle로 이동했으면 낡은 결과를 공개하지 않는다 (과거: 이전 annotation의
+  # 커밋을 revert하고 rc=0 + CAS 실패 경고만 출력).
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin4"
+  cat > "$repo/gbin4/git" <<WRAP
+#!/usr/bin/env bash
+if [ "\$1" = "-C" ] && [ "\$3" = "revert" ] && [ "\$4" != "--abort" ] && [ ! -f "$repo/.r17" ]; then
+  touch "$repo/.r17"
+  "$realgit" tag -f -a "cycle/T200-post" -m "owned-commits
+moved-to-new-cycle" HEAD >/dev/null 2>&1
+fi
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin4/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin4:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"태그가 그 사이 변경"* ]]
+  # 아무것도 공개되지 않았고, 이동된 태그는 그대로 남아 있다
+  grep -q "v2" "$repo/file.txt"
+  git -C "$repo" tag -l --format='%(contents)' cycle/T200-post | grep -q "moved-to-new-cycle"
+  # 계산 결과는 refs/rollback에 보존
+  git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
 }

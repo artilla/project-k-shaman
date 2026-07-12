@@ -62,8 +62,14 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   #   - merge commit(부모 2+)은 mainline 정보가 없어 자동 revert 불가 — 명시 거부
   PRE_OID="$(git rev-parse -q --verify "refs/tags/${TAG}^{commit}" || true)"
   POST_TAG="cycle/${ID}-post"
+  # 7차 P1-6: 태그 ref는 "한 번"만 OID로 해석해 고정하고(POST_TAGOBJ), peeled
+  # target(POST_OID)은 태그 "이름"이 아니라 그 고정 OID에서 파생한다 — 두 번의
+  # 이름 해석 사이에 태그가 이동하면 annotation(이전 태그)과 target(새 태그)이
+  # 서로 다른 시점에서 읽혀, 이전 소유 목록을 revert하고 새 cycle을 남긴 채
+  # rc=0을 반환했다 (실측).
   POST_TAGOBJ="$(git rev-parse -q --verify "refs/tags/${POST_TAG}" 2>/dev/null || true)"
-  POST_OID="$(git rev-parse -q --verify "refs/tags/${POST_TAG}^{commit}" 2>/dev/null || true)"
+  POST_OID=""
+  [ -n "$POST_TAGOBJ" ] && POST_OID="$(git rev-parse -q --verify "${POST_TAGOBJ}^{commit}" 2>/dev/null || true)"
   HEAD_OID="$(git rev-parse HEAD)"
   MODE_ROLLBACK=""
   if [ -z "$(git rev-list -n 1 "${PRE_OID}..HEAD" 2>/dev/null)" ]; then
@@ -170,86 +176,80 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
       done
     fi
 
-    # 실패·신호 복구: sequencer 상태(REVERT_HEAD·staged 역변경)는 --abort로만
-    # 정리한다 — 전역 reset --hard는 초기 clean 검사 이후 들어온 동시 tracked
-    # 변경까지 파괴했다 (5차 P1-7). abort로 정리가 안 되면 지시만 남기고 중단.
-    # 6차 P1-7: 충돌 후 index에는 revert 자신의 staged 역변경(실패 커밋의 변경
-    # 경로 부분집합)뿐 아니라, 그 사이 다른 프로세스가 올린 무관한 staged 경로가
-    # 있을 수 있다 — --abort는 index를 통째로 되돌려 이를 파괴한다. staged 경로가
-    # 실패 커밋의 변경 경로를 벗어나면 자동 abort를 거부하고 수동 지시만 남긴다.
-    _rb_recover() {  # $1=실패(중단)한 소유 커밋 OID ("": 판단 불가 → abort 시도)
-      _fc="${1:-}"
-      _gd="$(git rev-parse --git-dir 2>/dev/null || true)"
-      if [ -n "$_gd" ] && [ -e "${_gd}/REVERT_HEAD" ] && [ -n "$_fc" ]; then
-        _touched="$(git diff-tree --no-commit-id --name-only -r "$_fc" 2>/dev/null || true)"
-        _staged="$(git diff --cached --name-only 2>/dev/null || true)"
-        _foreign=""
-        while IFS= read -r _p; do
-          [ -n "$_p" ] || continue
-          printf '%s\n' "$_touched" | grep -Fxq -- "$_p" || _foreign="${_foreign}     ${_p}
-"
-        done <<RB_EOF
-$_staged
-RB_EOF
-        if [ -n "$_foreign" ]; then
-          echo "⚠️  revert 충돌 상태의 index에 이 롤백과 무관한 staged 경로가 있습니다 — 자동 'git revert --abort'가 이를 파괴할 수 있어 실행하지 않습니다 (fail-closed):" >&2
-          printf '%s' "$_foreign" >&2
-          echo "   무관한 staged 변경을 commit/stash로 치운 뒤 'git revert --abort'를 수동 실행하고, 스크립트를 재실행하세요 (이미 되돌린 커밋은 건너뜁니다)." >&2
-          return 0
-        fi
-      fi
-      git revert --abort >/dev/null 2>&1 || true
-      if [ -n "$_gd" ] && [ -e "${_gd}/REVERT_HEAD" ]; then
-        echo "⚠️  revert 중단 상태 자동 정리 실패 — 'git revert --abort'를 수동 실행하세요." >&2
-      fi
+    # 7차 P1-7: revert는 "격리 worktree/index"에서 수행한다. 6차의 경로 비교는
+    # 실패 커밋과 "같은 경로"에 올라온 동시 staged 변경을 revert 자신의 잔상으로
+    # 오인해 --abort로 파괴했다 — 경로 비교로는 해결되지 않는다. 격리 index에서는
+    # 공유 index를 건드릴 수단 자체가 없다: 충돌·신호·실패 시 격리 worktree만
+    # 버리고(메인 무변경, all-or-nothing), 성공 시에만 공개 전 재검증을 통과한
+    # 결과를 ff-only로 원자 공개한다.
+    _WT_BASE="$(mktemp -d "${TMPDIR:-/tmp}/rollback-wt.XXXXXX")" || { echo "❌ 격리 worktree temp 생성 실패." >&2; exit 3; }
+    _WT="${_WT_BASE}/wt"
+    _rb_cleanup_wt() {
+      git worktree remove --force "$_WT" >/dev/null 2>&1 || true
+      git worktree prune >/dev/null 2>&1 || true
+      rm -rf "$_WT_BASE" 2>/dev/null || true
     }
-    _rb_current=""
-    trap '_rb_recover "$_rb_current"; echo "❌ 신호로 중단됨 — revert 잔여 상태 정리를 시도했습니다. 재실행하면 이미 되돌린 커밋은 건너뜁니다." >&2; exit 130' INT TERM HUP
+    trap '_rb_cleanup_wt; echo "❌ 신호로 중단됨 — 격리 worktree만 정리했습니다 (메인 워크트리·index·HEAD는 변경되지 않았습니다)." >&2; exit 130' INT TERM HUP
+    if ! git worktree add --detach "$_WT" "$HEAD_OID" >/dev/null 2>&1; then
+      _rb_cleanup_wt
+      trap - INT TERM HUP
+      echo "❌ 격리 worktree 생성 실패 — 자동 롤백을 중단합니다 (fail-closed)." >&2
+      exit 3
+    fi
 
-    _rb_done=""
     _rb_failed=""
     for c in $OWNED; do
       case "$ALREADY" in
         *"$c"*)
           echo "ℹ️  ${c} — 이미 되돌려짐 (이전 부분 실행), 건너뜀."
-          _rb_done="${_rb_done}${c}
-"
           continue
           ;;
       esac
-      _rb_current="$c"
-      if git revert --no-edit "$c" >/dev/null 2>&1; then
-        _rb_done="${_rb_done}${c}
-"
-      else
+      if ! git -C "$_WT" revert --no-edit "$c" >/dev/null 2>&1; then
+        git -C "$_WT" revert --abort >/dev/null 2>&1 || true  # 격리 index — 파괴 대상 없음
         _rb_failed="$c"
-        _rb_recover "$c"
         break
       fi
-      _rb_current=""
     done
-    trap - INT TERM HUP
 
     if [ -n "$_rb_failed" ]; then
-      echo "❌ ${_rb_failed} revert 실패(충돌 등) — 잔여 상태 정리를 시도했습니다 (위 경고가 있으면 수동 정리 필요)." >&2
-      echo "   재실행하면 이미 되돌린 커밋은 건너뛰고 이어서 진행합니다 (재개 가능)." >&2
-      if [ -n "$_rb_done" ]; then
-        echo "   이미 되돌린 커밋(각각 revert-of-revert로 복구 가능):" >&2
-        printf '%s' "$_rb_done" | sed 's/^/     /' >&2
-      fi
-      echo "   남은 커밋 수동 선별 revert:" >&2
+      _rb_cleanup_wt
+      trap - INT TERM HUP
+      echo "❌ ${_rb_failed} revert 실패(충돌 등) — 격리 worktree에서 중단했습니다. 메인 워크트리·index·HEAD는 변경되지 않았습니다 (all-or-nothing)." >&2
+      echo "   소유 커밋 수동 선별 revert (최신 → 과거 순):" >&2
       for c in $OWNED; do
-        case "$_rb_done" in
-          *"$c"*) : ;;
-          *) echo "     git revert $c" >&2 ;;
-        esac
+        case "$ALREADY" in *"$c"*) : ;; *) echo "     git revert $c" >&2 ;; esac
       done
       exit 3
     fi
+    _NEW="$(git -C "$_WT" rev-parse HEAD)"
 
-    # 태그 삭제도 CAS — 해석 시점에 고정한 tag object OID가 그대로일 때만 지운다.
-    git update-ref -d "refs/tags/${POST_TAG}" "$POST_TAGOBJ" >/dev/null 2>&1 \
-      || echo "⚠️  ${POST_TAG} 태그가 그 사이 변경됨 — 삭제하지 않았습니다 (수동 확인)." >&2
+    # 공개 전 재검증 — 전부 성립할 때만 ff-only로 원자 공개 (fail-closed):
+    #   (1) HEAD가 검증 시점 그대로, (2) 추적 파일 clean(동시 staged/변경 보존 —
+    #   같은 경로 포함), (3) post 태그가 해석 시점의 tag object 그대로(태그가 새
+    #   cycle로 이동했으면 이 결과는 낡은 것 — 경고가 아니라 거부, 7차 P1-6).
+    _rb_publish_fail() {
+      git update-ref "refs/rollback/${ID}" "$_NEW" >/dev/null 2>&1 || true
+      _rb_cleanup_wt
+      trap - INT TERM HUP
+      echo "❌ $1 — 공개하지 않았습니다 (fail-closed; 메인 워크트리·index 무변경)." >&2
+      echo "   계산된 롤백 결과는 refs/rollback/${ID} 에 보존했습니다 — 검토 후 수동 병합하거나 재실행하세요." >&2
+      exit 3
+    }
+    [ "$(git rev-parse HEAD)" = "$HEAD_OID" ] || _rb_publish_fail "검증 후 HEAD가 이동했습니다"
+    [ -z "$(git status --porcelain --untracked-files=no)" ] || _rb_publish_fail "추적 파일에 동시 변경(staged 포함)이 생겼습니다"
+    [ "$(git rev-parse -q --verify "refs/tags/${POST_TAG}" 2>/dev/null || true)" = "$POST_TAGOBJ" ] || _rb_publish_fail "${POST_TAG} 태그가 그 사이 변경되었습니다"
+    git merge --ff-only "$_NEW" >/dev/null 2>&1 || _rb_publish_fail "fast-forward 공개 실패(동시 변경 감지)"
+    _rb_cleanup_wt
+    trap - INT TERM HUP
+    git update-ref -d "refs/rollback/${ID}" >/dev/null 2>&1 || true
+
+    # 태그 삭제 CAS — 공개 직전 재검증을 통과했으므로 실패는 공개~삭제 사이의
+    # 동시 이동뿐이다. 성공 오보 대신 수동 확인이 필요한 상태로 보고한다 (rc≠0).
+    if ! git update-ref -d "refs/tags/${POST_TAG}" "$POST_TAGOBJ" >/dev/null 2>&1; then
+      echo "❌ revert 공개는 완료됐지만 ${POST_TAG} 태그가 그 사이 변경되어 삭제하지 못했습니다 — 태그 상태를 수동 확인하세요." >&2
+      exit 3
+    fi
     echo "rolled back $ID by revert (owned commits only; history preserved; 미추적 산출물은 보존됨)"
     exit 0
   fi
