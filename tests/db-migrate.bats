@@ -161,10 +161,10 @@ SQL
 
 # ── 리뷰 16차 P1 회귀 ──────────────────────────────────────────────────────────
 
-@test "DB7: top-level transaction control is rejected before execution - comment variants included, nothing runs" {
-  # 리뷰 16차 P1 재수정: `COMMIT; -- comment`는 독립 행 정규식을 우회해
-  # rc=1이면서도 앞뒤 테이블이 실제로 남는 부분 commit을 만들었다.
-  # 이제 문맥 인지 스캐너가 실행 "전"에 정확히 검출해 거부한다 — 아무것도 실행 안 함.
+@test "DB7: embedded transaction control is refused by the server itself - full rollback, no partial commit" {
+  # 리뷰 16차 P1 재재수정: 원자성 경계는 수제 파서가 아니라 서버다. 파일 내용은
+  # DO 블록의 EXECUTE(SPI)로 실행되고, `COMMIT; -- comment` 같은 어떤 변형이든
+  # 서버가 원자 컨텍스트에서 거부한다 → 앞선 문장까지 전부 rollback.
   cat > "$TROOT/db/migrations/998_txn_zz_test.sql" <<'SQL'
 CREATE TABLE IF NOT EXISTS partial_a (id INT);
 COMMIT; -- innocuous-looking comment
@@ -173,8 +173,8 @@ SELECT 1/0;
 SQL
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"transaction control"* ]]
-  # 실행 자체가 거부되므로 어떤 객체도 생기지 않는다 (부분 commit 불가능)
+  [[ "$output" == *"transaction"* ]]
+  # 부분 commit 불가능 — 내부 COMMIT "앞"의 객체도 남지 않는다 (전체 rollback)
   [ "$(_psql "select count(*) from information_schema.tables where table_name in ('partial_a','partial_b')")" = "0" ]
   [ "$(_psql "select count(*) from schema_migrations where version like '998%'")" = "0" ]
 
@@ -184,7 +184,7 @@ commit ;
 SQL
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"transaction control"* ]]
+  [ "$(_psql "select count(*) from schema_migrations where version like '998%'")" = "0" ]
 }
 
 @test "DB8: --status is strictly read-only - no ledger bootstrap on a fresh DB" {
@@ -213,10 +213,21 @@ SQL
   # 소문자 스키마가 대신 만들어지지 않았고, public에도 없다
   [ "$(_psql "select count(*) from information_schema.schemata where schema_name='appdata'")" = "0" ]
   [ "$(_psql "select count(*) from information_schema.tables where table_schema='public' and table_name='users'")" = "0" ]
+  # 리뷰 16차 P1-8: custom schema에 설치된 삭제 트리거는 호출자의 search_path가
+  # 달라도(기본 public) 동작해야 한다 — 함수가 SET search_path FROM CURRENT로 고정됨.
+  _psql "insert into \"AppData\".users (provider, provider_subject, nickname) values ('kakao','sub1','nick')"
+  _psql "update \"AppData\".users set deleted_at=now() where id=1"
+  [ "$(_psql "select (nickname is null and provider_subject like 'deleted:%') from \"AppData\".users where id=1")" = "t" ]
   # 위험 식별자는 거부 (fail-closed)
   echo "DATABASE_URL=postgres://postgres:x@127.0.0.1:${PGT_PORT}/${TEST_DB}?schema=app;drop" > "$ENVF"
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 2 ]
+  # 리뷰 16차 P2: 63자 초과 schema는 서버가 잘라 다른 이름이 된다 — 명시 거부
+  _long="s$(printf 'a%.0s' $(seq 1 70))"
+  echo "DATABASE_URL=postgres://postgres:x@127.0.0.1:${PGT_PORT}/${TEST_DB}?schema=${_long}" > "$ENVF"
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"63자"* ]]
   # 긴 중복 파라미터도 무진단 종료(SIGPIPE rc=141) 없이 첫 값으로 처리된다
   {
     printf 'DATABASE_URL=postgres://postgres:x@127.0.0.1:%s/%s?schema=public' "$PGT_PORT" "$TEST_DB"
@@ -233,14 +244,15 @@ SQL
   _psql "insert into users (provider, provider_subject, last_login_at) values ('kakao','u1', now())"
   _psql "update users set consent_personalization=true, consented_at=now(), birth_profile_hash='h', nickname='n' where id=1"
   _psql "insert into sessions (user_id) values (1)"
-  _psql "insert into events (event_type, user_id) values ('visit', 1)"
+  _psql "insert into events (event_type, user_id, payload) values ('visit', 1, '{\"pii\":\"maybe\"}'::jsonb)"
   _psql "insert into purchases (user_id, product_code, amount_krw) values (1, 'p1', 1000)"
   _psql "update users set deleted_at=now() where id=1"
   # C1: provider_subject 익명화 / C4: last_login_at 스크럽 (+ 기존 스크럽 집합)
   [ "$(_psql "select (provider_subject like 'deleted:%' and last_login_at is null and nickname is null and birth_profile_hash is null and not consent_personalization) from users where id=1")" = "t" ]
-  # C2: events는 user_id 절단, payload(행)는 유지
+  # C2(강화): events는 user_id 절단 + payload 스크럽 — 행(집계 축)은 유지
   [ "$(_psql "select count(*) from events where event_type='visit'")" = "1" ]
   [ "$(_psql "select count(*) from events where user_id=1")" = "0" ]
+  [ "$(_psql "select payload::text from events where event_type='visit'")" = "{}" ]
   # C3: purchases는 연결 유지한 채 보존
   [ "$(_psql "select count(*) from purchases where user_id=1")" = "1" ]
   # (a) 삭제된 행에 개인 필드 재기입 — 거부 (CHECK 불변식)
@@ -307,4 +319,62 @@ SQL
   # 함수 본문이 원본 그대로 적용됐다 (수정 실행 없음)
   [ "$(_psql "select zz_probe() like 'COMMIT;%'")" = "t" ]
   [ "$(_psql "select count(*) from information_schema.tables where table_name='zz_ok'")" = "1" ]
+}
+
+@test "DB13: psql meta-commands and COPY FROM STDIN in a migration cannot execute - refused server-side" {
+  # 리뷰 16차 P1: \i 외부 파일 포함·\! 셸 실행은 scanner가 못 보는 경로로
+  # transaction control을 반입했다. 이제 파일 내용이 dollar-quote 리터럴로
+  # 서버에 전달되므로 psql이 meta command를 해석할 기회 자체가 없다.
+  cat > "$TROOT/evil-include.sql" <<'SQL'
+COMMIT;
+CREATE TABLE smuggled (id INT);
+SQL
+  cat > "$TROOT/db/migrations/995_meta_zz_test.sql" <<SQL
+CREATE TABLE IF NOT EXISTS meta_a (id INT);
+\i $TROOT/evil-include.sql
+\! touch $TROOT/pwned
+SQL
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  # 셸 실행·외부 포함이 일어나지 않았고, 부분 적용도 없다
+  [ ! -f "$TROOT/pwned" ]
+  [ "$(_psql "select count(*) from information_schema.tables where table_name in ('meta_a','smuggled')")" = "0" ]
+  [ "$(_psql "select count(*) from schema_migrations where version like '995%'")" = "0" ]
+  rm -f "$TROOT/db/migrations/995_meta_zz_test.sql"
+
+  # COPY FROM STDIN — 서버가 PL/pgSQL 컨텍스트에서 거부
+  cat > "$TROOT/db/migrations/995_copy_zz_test.sql" <<'SQL'
+CREATE TABLE IF NOT EXISTS copy_a (id INT);
+COPY copy_a FROM STDIN;
+1
+\.
+SQL
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [ "$(_psql "select count(*) from information_schema.tables where table_name='copy_a'")" = "0" ]
+  [ "$(_psql "select count(*) from schema_migrations where version like '995%'")" = "0" ]
+}
+
+@test "DB14: concurrent soft-delete and child INSERT serialize on the parent row - no orphan links survive" {
+  # 리뷰 16차 P1-3: EXISTS 조회는 부모 행을 잠그지 않아, 미커밋 삭제 UPDATE 동안
+  # 자식 INSERT가 이전 active 스냅숏을 보고 통과했다 — FOR SHARE 잠금으로 삭제
+  # 커밋을 기다렸다가 재평가되어 거부된다.
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "insert into users (provider, provider_subject) values ('kakao','u1')"
+  # 세션 A: 삭제 UPDATE를 열고 2초간 미커밋 유지
+  ( PGOPTIONS='-c client_min_messages=warning' "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" \
+      -c "BEGIN; UPDATE users SET deleted_at=now() WHERE id=1; SELECT pg_sleep(2); COMMIT;" >/dev/null 2>&1 ) &
+  local killer=$!
+  sleep 0.7
+  # 세션 B: 삭제 미커밋 동안 자식 INSERT — FOR SHARE 대기 후 재평가로 거부돼야 한다
+  run _psql "insert into sessions (user_id) values (1)"
+  [ "$status" -ne 0 ]
+  run _psql "insert into events (event_type, user_id) values ('visit', 1)"
+  [ "$status" -ne 0 ]
+  wait "$killer" 2>/dev/null || true
+  # 삭제 완료 후 어떤 연결도 남지 않았다
+  [ "$(_psql "select count(*) from sessions where user_id=1")" = "0" ]
+  [ "$(_psql "select count(*) from events where user_id=1")" = "0" ]
+  [ "$(_psql "select (deleted_at is not null) from users where id=1")" = "t" ]
 }

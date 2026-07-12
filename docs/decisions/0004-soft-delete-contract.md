@@ -1,10 +1,12 @@
 # 0004. 사용자 삭제(soft-delete) 계약 — 익명화·보존·재가입
 
-- 상태: 확정 (2026-07-12, owner 승인)
+- 상태: 확정 (2026-07-12, owner 승인; C2는 리뷰 16차 P1-9에 따라 fail-closed로 강화)
 - 근거: 리뷰 16차 P1-8 — "provider_subject·last_login_at·events 연결·purchases 연결이
   삭제 후에도 유지된다. 보존 자체는 가능하지만 익명화 여부·보존기간·재가입 처리
   계약을 먼저 확정해야 한다."
-- 구현: `db/migrations/003_soft_delete_invariant.sql` (트리거 + CHECK 불변식)
+- 구현: `db/migrations/004_soft_delete_contract.sql` (003은 공개본 불변 — 확장분은 004로 분리)
+- 익명 토큰 판정: `deleted:` 접두사가 아니라 정확 형식(`deleted:` + uuid 36자) 매칭 —
+  legacy provider_subject가 우연히 같은 접두사여도 오동작하지 않는다
 
 ## 결정
 
@@ -15,11 +17,15 @@
 다시 로그인하면 **완전히 새로운 사용자 행**이 생성된다. 이전 데이터와의 연결은
 불가능하다 (§12 "삭제 제공" 취지).
 
-### C2. events — user_id 절단, payload 유지
+### C2. events — user_id 절단 + payload 스크럽 (리뷰 16차 P1-9 반영)
 
-삭제 시 해당 사용자의 `events.user_id`를 NULL로 절단한다. payload는 유지한다 —
-payload에 개인정보를 넣지 않는 것이 기존 계약이다(크기 상한 32KiB + 스키마 검증,
-IP/UA 미저장 원칙). 절단된 events는 익명 통계 데이터로 보존기간 제한 없이 유지한다.
+삭제 시 해당 사용자의 `events.user_id`를 NULL로 절단하고 **payload를 `{}`로
+스크럽**한다. 당초 "payload 무익명정보" 전제로 payload 유지를 승인했으나,
+현재 `/api/event`는 임의 event 필드를 보존하고 payload schema 검증이 미구현이라
+그 전제가 성립하지 않는다 — fail-closed로 payload까지 지운다. event_type·
+created_at 등 집계 축은 보존되어 익명 통계(리텐션·퍼널 카운트)는 유지된다.
+후속: `/api/event` payload schema 검증이 구현되어 "개인정보 미포함"이 스키마
+수준에서 보장되면 별도 마이그레이션으로 payload 보존으로 완화할 수 있다.
 
 ### C3. purchases — 보존, 신규 유입 거부
 
