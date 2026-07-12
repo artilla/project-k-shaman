@@ -31,6 +31,15 @@
   강제된다 — 삭제와 동시(행 잠금 대기 후 재평가) 또는 삭제 후의 payload 재기입은
   거부된다 (4차 P1-8).
 
+- **legacy orphan 정책 (5차 P1-4)**: 002 시절의 삭제는 세션을 먼저 지워
+  session-only event의 소유 증거가 이미 끊겼다. 004는 소유 증거가 없는 이중
+  orphan(user_id·session_id 모두 NULL)의 payload를 **전부** 스크럽한다 —
+  fail-closed. 정당한 익명 orphan payload도 함께 지워지는 트레이드오프를
+  감수한다 (1회성 backfill; 이후의 orphan은 삭제 시점 트리거가 처리).
+- scrub의 session 링크 절단: 스크럽 시점에 `session_id`도 NULL — frozen CHECK가
+  재연결(UPDATE session_id)을 거부한다 (5차 P1-5). `scrubbed_at` 해제(non-NULL→
+  NULL)는 트리거가 거부한다 (5차 P1-2).
+
 event_type·created_at 등 집계 축은 보존되어 익명 통계는 유지된다.
 후속: `/api/event` payload schema 검증이 구현되어 "개인정보 미포함"이 스키마
 수준에서 보장되면 별도 마이그레이션으로 payload 보존으로 완화할 수 있다.

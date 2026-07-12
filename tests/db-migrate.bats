@@ -451,3 +451,87 @@ SQL
   run _psql "update purchases set user_id=4 where user_id=3"
   [ "$status" -ne 0 ]
 }
+
+@test "DB18: scrub marker cannot be cleared, session-only INSERT races serialize, scrubbed events cannot be re-linked" {
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "insert into users (provider, provider_subject) values ('kakao','u1')"
+  _psql "insert into events (event_type, user_id, payload) values ('visit', 1, '{\"pii\":\"x\"}'::jsonb)"
+  _psql "update users set deleted_at=now() where id=1"
+  # 5차 P1-2: scrubbed_at 해제(NULL 전이)로 frozen CHECK를 우회할 수 없다
+  run _psql "update events set scrubbed_at=NULL, payload='{\"pii\":\"restored\"}'::jsonb where event_type='visit'"
+  [ "$status" -ne 0 ]
+  run _psql "update events set scrubbed_at=NULL where event_type='visit'"
+  [ "$status" -ne 0 ]
+  # 5차 P1-5: scrubbed event를 활성 세션에 재연결할 수 없다 (session_id 절단 불변)
+  _psql "insert into users (provider, provider_subject) values ('kakao','u2')"
+  _psql "insert into sessions (user_id) values (2)"
+  run _psql "update events set session_id=(select id from sessions where user_id=2) where event_type='visit'"
+  [ "$status" -ne 0 ]
+  # 5차 P1-3: 미커밋 삭제 중 session-only INSERT — 세션 소유자 행 잠금으로 직렬화
+  _psql "insert into sessions (user_id) values (2)"
+  ( PGOPTIONS='-c client_min_messages=warning' "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" \
+      -c "BEGIN; UPDATE users SET deleted_at=now() WHERE id=2; SELECT pg_sleep(2); COMMIT;" >/dev/null 2>&1 ) &
+  local deleter=$!
+  sleep 0.7
+  run _psql "insert into events (event_type, session_id, payload) select 'raced', id, '{\"pii\":\"raced\"}'::jsonb from sessions where user_id=2 limit 1"
+  [ "$status" -ne 0 ]
+  wait "$deleter" 2>/dev/null || true
+  # 삭제 완료 후 pii payload를 가진 orphan은 존재하지 않는다
+  [ "$(_psql "select count(*) from events where payload::text like '%raced%'")" = "0" ]
+  # 익명 세션 경유 INSERT는 계속 허용
+  _psql "insert into sessions (user_id) values (NULL)"
+  _psql "insert into events (event_type, session_id) select 'anon', id from sessions where user_id is null limit 1"
+}
+
+@test "DB19: checksum and executed SQL come from one runner-owned snapshot - path swap after read cannot forge the legacy path" {
+  # 리뷰 16차 P1-1(5차): 변형 001을 읽힌 뒤 hash 직전에 정상 001로 atomic
+  # replace하는 TOCTOU — snapshot 결속 후에는 hash도 실행도 변형본 기준이라
+  # legacy 경로를 위조할 수 없고, 서버가 BEGIN/COMMIT을 거부한다.
+  cp "$TROOT/db/migrations/001_init.sql" "$PGT/pristine_001.sql"
+  # 변형본: BEGIN/COMMIT 유지 + 악성 객체 추가
+  awk '1; /^BEGIN;$/{print "CREATE TABLE evil_toctou (id INT);"}' "$PGT/pristine_001.sql" \
+    > "$TROOT/db/migrations/001_init.sql"
+  # hash 도구 호출 시점에 원본 경로를 정상본으로 원자 교체하는 wrapper
+  mkdir -p "$PGT/swapbin"
+  for tool in shasum sha256sum; do
+    real="$(command -v $tool 2>/dev/null || true)"
+    [ -n "$real" ] || continue
+    cat > "$PGT/swapbin/$tool" <<WRAP
+#!/usr/bin/env bash
+if [ ! -f "$PGT/swapped" ]; then
+  touch "$PGT/swapped"
+  cp "$PGT/pristine_001.sql" "$PGT/.p.tmp" && mv "$PGT/.p.tmp" "$TROOT/db/migrations/001_init.sql"
+fi
+exec "$real" "\$@"
+WRAP
+    chmod +x "$PGT/swapbin/$tool"
+  done
+  run env PATH="$PGT/swapbin:$PATH" ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  # 위조 실패 — legacy 경로 미진입, 변형 SQL 미실행, ledger 미기록
+  [[ "$output" != *"legacy BEGIN/COMMIT"* ]]
+  [ "$(_psql "select to_regclass('evil_toctou') is null")" = "t" ]
+  [ "$(_psql "select coalesce((select count(*) from schema_migrations where version='001_init'),0)" 2>/dev/null || echo 0)" = "0" ]
+}
+
+@test "DB20: legacy orphan events (002-era deletes) are scrubbed by 004 backfill - explicit fail-closed policy" {
+  # 002까지만 적용된 시점의 삭제는 sessions를 먼저 지워 session-only event가
+  # orphan으로 남았다 — 004는 소유 증거가 없는 이중 orphan payload를 전부 스크럽.
+  mkdir -p "$TROOT/hold"
+  mv "$TROOT/db/migrations/003_soft_delete_invariant.sql" "$TROOT/db/migrations/004_soft_delete_contract.sql" "$TROOT/hold/"
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "insert into users (provider, provider_subject) values ('kakao','u1')"
+  _psql "insert into sessions (user_id) values (1)"
+  _psql "insert into events (event_type, session_id, payload) select 'visit', id, '{\"pii\":\"legacy\"}'::jsonb from sessions where user_id=1"
+  # 002-era 삭제: 트리거가 세션을 지워 event가 orphan(session_id NULL)이 된다
+  _psql "update users set deleted_at=now() where id=1"
+  [ "$(_psql "select (session_id is null and payload::text like '%legacy%') from events where event_type='visit'")" = "t" ]
+  # 003·004 적용 — legacy 정책이 orphan payload를 스크럽한다
+  mv "$TROOT/hold/"*.sql "$TROOT/db/migrations/"
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [ "$(_psql "select payload::text from events where event_type='visit'")" = "{}" ]
+  [ "$(_psql "select (scrubbed_at is not null) from events where event_type='visit'")" = "t" ]
+}
