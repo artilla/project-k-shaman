@@ -424,16 +424,15 @@ SQL
   [[ "$output" == *"skip  994_hijack_zz_test"* ]]
 }
 
-@test "DB16: pristine 001 applies via checksum-pinned legacy path - tampered 001 is refused" {
-  # 리뷰 16차 P1(4차): 공개 001 bytes는 불변 — 알려진 checksum일 때만 legacy
-  # BEGIN/COMMIT 라인을 실행 시점에 제거한다. bytes가 다르면 그 경로를 타지
-  # 않고 서버가 transaction control을 거부한다.
+@test "DB16: published migrations are checksum-pinned - committed tamper of 001 is refused even without txn control" {
+  # 리뷰 16차 P1(8차 실측 회귀): 공개본 001에는 BEGIN/COMMIT이 없어 "서버의
+  # transaction control 거부"가 변조를 잡아주지 않는다 — runner가 공개본
+  # sha256 pin으로 직접 거부해야 한다 (커밋 여부와 무관, fail-closed).
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"legacy BEGIN/COMMIT"* ]]
   [ "$(_psql "select count(*) from schema_migrations where version='001_init'")" = "1" ]
 
-  # 변조된 001 (주석 한 줄 추가 → checksum 불일치) → fresh DB에서 거부
+  # 변조된 001 (무해한 주석 한 줄 추가, 커밋까지) → fresh DB에서 pin 불일치 거부
   TEST_DB2="${TEST_DB}b"
   _as_pg "'$PGBIN/createdb' -h 127.0.0.1 -p $PGT_PORT -U postgres $TEST_DB2"
   echo "DATABASE_URL=postgres://postgres:x@127.0.0.1:${PGT_PORT}/${TEST_DB2}?schema=public" > "$ENVF"
@@ -441,7 +440,7 @@ SQL
   _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 1 ]
-  [[ "$output" != *"legacy BEGIN/COMMIT"* ]]
+  [[ "$output" == *"공개본 checksum"* ]]
   PGOPTIONS='-c client_min_messages=warning' "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB2" -tAc \
     "select coalesce((select count(*) from schema_migrations),0)" 2>/dev/null | grep -qE '^0?$'
 }
@@ -507,24 +506,31 @@ SQL
   _psql "insert into events (event_type, session_id) select 'anon', id from sessions where user_id is null limit 1"
 }
 
-@test "DB19: committed tampered 001 cannot forge the legacy path - blob checksum mismatch, server rejects txn control" {
-  # 리뷰 16차 P1-1(5차→7차): 실행 원본이 커밋된 blob이므로 "읽기 후 경로 교체"
-  # 류의 TOCTOU는 성립 지점 자체가 없다. 남는 공격면은 "변형본을 커밋"하는 것 —
-  # 이 경우 checksum(blob bytes)이 공개 001과 달라 legacy 경로에 진입하지 못하고,
-  # 서버가 BEGIN/COMMIT을 원자 컨텍스트에서 거부한다.
-  cp "$TROOT/db/migrations/001_init.sql" "$PGT/pristine_001.sql"
-  # 변형본: BEGIN/COMMIT 유지 + 악성 객체 추가 — 커밋까지 한다
-  awk '1; /^BEGIN;$/{print "CREATE TABLE evil_toctou (id INT);"}' "$PGT/pristine_001.sql" \
-    > "$TROOT/db/migrations/001_init.sql"
+@test "DB19: the pin covers every published version (004 tamper refused mid-run) - unpublished 005 stays editable" {
+  # 리뷰 16차 P1(8차): pin은 001만이 아니라 공개된 전 version(001~004)을 덮는다.
+  # 변조 004(악성 객체 추가, 커밋)는 001~003 적용 후 004에서 거부되고, 아직
+  # 공개되지 않은 005는 pin이 없어 커밋된 수정이 정상 적용된다.
+  cat >> "$TROOT/db/migrations/004_soft_delete_contract.sql" <<'SQL'
+CREATE TABLE IF NOT EXISTS evil_004 (id INT);
+SQL
   _commit_migs
-  # 작업트리는 정상본으로 되돌려 놓아도(경로 위장) 실행·판정은 blob 기준이라 무관
-  # — 단, 작업트리≠HEAD는 그 자체로 거부 대상이므로 여기서는 blob과 일치시킨다.
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 1 ]
-  # 위조 실패 — legacy 경로 미진입, 변형 SQL 미실행, ledger 미기록
-  [[ "$output" != *"legacy BEGIN/COMMIT"* ]]
-  [ "$(_psql "select to_regclass('evil_toctou') is null")" = "t" ]
-  [ "$(_psql "select coalesce((select count(*) from schema_migrations where version='001_init'),0)" 2>/dev/null || echo 0)" = "0" ]
+  [[ "$output" == *"공개본 checksum"* ]]
+  [[ "$output" == *"004_soft_delete_contract"* ]]
+  # 001~003은 적용, 변조 004는 실행도 기록도 안 됨
+  [ "$(_psql "select count(*) from schema_migrations where version='003_soft_delete_invariant'")" = "1" ]
+  [ "$(_psql "select count(*) from schema_migrations where version like '004%'")" = "0" ]
+  [ "$(_psql "select to_regclass('evil_004') is null")" = "t" ]
+
+  # 004 원복 + 미공개 005에 무해한 수정(커밋) → 정상 적용
+  git -C "$TROOT" show HEAD~1:db/migrations/004_soft_delete_contract.sql \
+    > "$TROOT/db/migrations/004_soft_delete_contract.sql"
+  printf -- '-- unpublished edit (pin 없음)\n' >> "$TROOT/db/migrations/005_ownership_repair_and_lock_contract.sql"
+  _commit_migs
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [ "$(_psql "select count(*) from schema_migrations")" = "5" ]
 }
 
 @test "DB20: legacy orphan events (002-era deletes) are scrubbed by 004 backfill - explicit fail-closed policy" {
@@ -713,5 +719,48 @@ SQL
   # wrapper/snapshot/출력 temp가 남지 않았다
   [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
   # 서버에 이 runner의 잔존 backend가 없다 (transaction 종료 확인)
+  [ "$(_psql "select count(*) from pg_stat_activity where application_name like 'db_migrate.%'")" = "0" ]
+}
+
+@test "DB26: signal received outside the migration psql - no NEW migration is started afterwards" {
+  # 리뷰 16차 P1(8차): 신호가 migration psql "밖"(ledger 조회 등 foreground
+  # 단계)에서 오면 trap은 기록만 하고 제어가 계속 진행돼, 다음 migration을
+  # 통째로 적용·commit한 뒤에야 rc=143으로 끝났다 — 신호 이후에는 어떤
+  # migration도 새로 시작하지 않아야 한다.
+  cat > "$TROOT/db/migrations/990_first_zz_test.sql" <<'SQL'
+CREATE TABLE IF NOT EXISTS first_ok (id INT);
+SQL
+  cat > "$TROOT/db/migrations/991_second_zz_test.sql" <<'SQL'
+CREATE TABLE IF NOT EXISTS must_not_start (id INT);
+SQL
+  _commit_migs
+  # 991의 ledger 조회(applied)만 지연시키는 psql shim — 그 구간에 TERM을 넣는다
+  mkdir -p "$PGT/sigbin_${BATS_TEST_NUMBER}" "$TROOT/tmp"
+  cat > "$PGT/sigbin_${BATS_TEST_NUMBER}/psql" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in
+  *"version = '991_second_zz_test'"*) sleep 4 ;;
+esac
+exec "$PGBIN/psql" "\$@"
+SHIM
+  chmod +x "$PGT/sigbin_${BATS_TEST_NUMBER}/psql"
+  env PATH="$PGT/sigbin_${BATS_TEST_NUMBER}:$PATH" ENV_FILE="$ENVF" TMPDIR="$TROOT/tmp" \
+    "$RUNNER" > "$PGT/sig26_${BATS_TEST_NUMBER}.log" 2>&1 &
+  local rpid=$! i=0 rc=0
+  # 990 적용 완료(✓) 후 991의 지연된 ledger 조회 창에서 TERM
+  while [ "$i" -lt 80 ]; do
+    grep -q "✓ 990_first_zz_test" "$PGT/sig26_${BATS_TEST_NUMBER}.log" 2>/dev/null && break
+    sleep 0.1; i=$((i+1))
+  done
+  sleep 0.5
+  kill -TERM "$rpid"
+  wait "$rpid" || rc=$?
+  [ "$rc" -eq 143 ]
+  # 990은 적용됐고(신호 전 완료), 991은 시작조차 되지 않았다
+  [ "$(_psql "select count(*) from schema_migrations where version like '990%'")" = "1" ]
+  [ "$(_psql "select count(*) from schema_migrations where version like '991%'")" = "0" ]
+  [ "$(_psql "select to_regclass('must_not_start') is null")" = "t" ]
+  # temp 정리 + 잔존 backend 없음
+  [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
   [ "$(_psql "select count(*) from pg_stat_activity where application_name like 'db_migrate.%'")" = "0" ]
 }

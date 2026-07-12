@@ -208,6 +208,20 @@ trap '_MIG_SIG=HUP'  HUP
 trap '_mig_cleanup_tmps' EXIT
 _mig_sig_num() { case "$1" in INT) echo 2 ;; HUP) echo 1 ;; *) echo 15 ;; esac; }
 
+# 리뷰 16차 P1(8차): 신호가 migration psql "밖"(bootstrap·ledger 조회·wrapper
+# 작성 등 foreground 단계)에서 수신되면 trap은 기록만 하고 제어는 계속 진행돼,
+# 다음 migration을 통째로 적용·commit한 뒤에야 종료했다 — 신호 이후에는 어떤
+# migration도 새로 시작하지 않는다. 새 작업 시작 지점마다 이 검사를 통과해야
+# 한다 (통과 못 하면 temp 정리 후 즉시 종료; 진행 중이던 transaction은 없음).
+_mig_check_sig() {
+  [ -n "$_MIG_SIG" ] || return 0
+  local _snum
+  _snum="$(_mig_sig_num "$_MIG_SIG")"
+  _mig_cleanup_tmps
+  echo "❌ 신호(${_MIG_SIG}) 수신 — 새 migration을 시작하지 않고 중단합니다 (이미 적용된 migration은 유효, 진행 중 transaction 없음)." >&2
+  exit $((128 + _snum))
+}
+
 # 서버 쪽 종료 확인: 이 runner(application_name=$PGAPPNAME)의 다른 backend가
 # 사라질 때까지 bounded 대기 — 중간에 종료 요청(pg_terminate_backend)으로
 # escalate하고, 끝까지 남으면 실패(호출자가 경고)를 반환한다.
@@ -229,6 +243,7 @@ _mig_server_drain() {
 # 서버 확인·temp 정리 후 여기서 종료한다.
 _mig_run_psql() {
   local _pid _rc _i _snum
+  _mig_check_sig  # 8차: 신호가 이미 기록됐으면 psql을 아예 띄우지 않는다
   set -m
   psql -X -v ON_ERROR_STOP=1 -q --single-transaction -f "$1" > "$2" 2>&1 &
   _pid=$!
@@ -278,6 +293,7 @@ else
 fi
 
 for _name in $_MIG_NAMES; do
+  _mig_check_sig  # 8차: bootstrap·직전 migration 사이에 온 신호 — 새 작업 시작 금지
   v="${_name%.sql}"
   if applied "$v"; then
     echo "── skip  $v (이미 적용됨)"
@@ -320,16 +336,27 @@ for _name in $_MIG_NAMES; do
     echo "❌ $v: 빈 마이그레이션 파일 — 적용할 수 없습니다." >&2
     exit 1
   fi
-  # 리뷰 16차 P1(4차): 공개된 001_init은 역사적 BEGIN/COMMIT을 포함한다 — 파일
-  # bytes는 불변으로 유지하고(원격과 byte-identical), "알려진 checksum에 한정한"
-  # legacy bootstrap 경로로만 해당 두 라인을 실행 시점에 제거한다. checksum과
-  # 실행 내용 모두 위 snapshot에서 나오므로(5차 P1) 판정과 실행이 결속된다.
-  # bytes가 다르면 이 경로를 타지 않고 서버가 transaction control을 거부한다.
-  if [ "$v" = "001_init" ]; then
+  # 리뷰 16차 P1(8차, DB16 실측 회귀): 공개본(remote/master)의 001은 이미
+  # BEGIN/COMMIT이 제거된 판본이다 — 4차의 "checksum 한정 legacy strip"은 구판
+  # 전제였고, 복원 후에는 변조 001에 transaction control이 없어 "서버가 거부"
+  # 하던 최후 방어까지 사라져 변조본이 그대로 적용됐다 (실측). strip 경로는
+  # 제거하고, 공개된 마이그레이션의 bytes를 checksum으로 직접 pin한다:
+  # 커밋되었더라도 공개본과 다른 001~004는 적용하지 않는다 (fail-closed —
+  # 같은 version의 내용 변경은 P1-1과 동일한 계약 위반이다). 새 마이그레이션을
+  # 공개(push)할 때 그 sha256을 아래 목록에 추가한다.
+  _pin=""
+  case "$v" in
+    001_init)                  _pin="a1296198221932cf0313dec362ef9ff5d4336ab935cdf17f9f1981b9efeb4a4b" ;;
+    002_schema_contract_fixes) _pin="40965ac72a0442177abeff67bd53a0c6ec2e30be1e53bf19499f66a1aa6114c7" ;;
+    003_soft_delete_invariant) _pin="b7b7a364f1dc5418097e906f122c6eac221b676741381ca06e395b33c54855cb" ;;
+    004_soft_delete_contract)  _pin="94525fde054c473e87e06d060089f81e9475d65669cbe19953a12b5f591e66a4" ;;
+  esac
+  if [ -n "$_pin" ]; then
     _fsha="$( (shasum -a 256 "$_snap" 2>/dev/null || sha256sum "$_snap" 2>/dev/null) | awk '{print $1; exit}')"
-    if [ "$_fsha" = "a1296198221932cf0313dec362ef9ff5d4336ab935cdf17f9f1981b9efeb4a4b" ]; then
-      echo "   ℹ️  001_init: 알려진 공개 bytes(checksum 일치) — legacy BEGIN/COMMIT 라인을 제거해 단일 transaction으로 적용합니다."
-      _content="$(printf '%s' "$_content" | grep -Ev '^(BEGIN|COMMIT);$')"
+    if [ "$_fsha" != "$_pin" ]; then
+      rm -f "$_snap"
+      echo "❌ $v: 공개본 checksum과 다릅니다 (expected ${_pin}, got ${_fsha:-?}) — 공개된 마이그레이션의 내용 변경은 적용하지 않습니다 (fail-closed). 변경분은 새 version(00N_*.sql)으로 작성하세요." >&2
+      exit 1
     fi
   fi
   rm -f "$_snap"
