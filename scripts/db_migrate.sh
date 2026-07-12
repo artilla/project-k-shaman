@@ -196,7 +196,18 @@ for f in db/migrations/*.sql; do
   # 변형본을 읽고 정상 checksum으로 판정하는 TOCTOU가 성립했다. snapshot 파일은
   # runner만 쓰는 private temp이므로 이후 원본 경로가 어떻게 바뀌어도 무관하다.
   _snap="$(mktemp "${TMPDIR:-/tmp}/dbmig-snap.XXXXXX")" || { echo "❌ snapshot temp 생성 실패." >&2; exit 3; }
-  if ! cat "$f" > "$_snap"; then rm -f "$_snap"; echo "❌ $v: 파일 읽기 실패." >&2; exit 3; fi
+  _snap2="$(mktemp "${TMPDIR:-/tmp}/dbmig-snap.XXXXXX")" || { rm -f "$_snap"; echo "❌ snapshot temp 생성 실패." >&2; exit 3; }
+  if ! cat "$f" > "$_snap"; then rm -f "$_snap" "$_snap2"; echo "❌ $v: 파일 읽기 실패." >&2; exit 3; fi
+  # 리뷰 16차 P1(6차): 동일 inode의 in-place 동시 수정은 단일 읽기에 이전·새
+  # SQL이 섞인 torn read를 만든다 — 두 번 읽어 byte 단위로 일치할 때만 안정된
+  # snapshot으로 인정한다. 다르면 실행하지 않는다 (fail-closed).
+  if ! cat "$f" > "$_snap2"; then rm -f "$_snap" "$_snap2"; echo "❌ $v: 파일 읽기 실패(2차)." >&2; exit 3; fi
+  if ! cmp -s "$_snap" "$_snap2"; then
+    rm -f "$_snap" "$_snap2"
+    echo "❌ $v: 읽는 동안 파일이 변경되었습니다(불안정 읽기) — 적용하지 않습니다 (fail-closed)." >&2
+    exit 1
+  fi
+  rm -f "$_snap2"
   _content="$(cat "$_snap")"
   if [ -z "$_content" ]; then
     rm -f "$_snap"

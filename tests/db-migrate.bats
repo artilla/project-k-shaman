@@ -535,3 +535,76 @@ WRAP
   [ "$(_psql "select payload::text from events where event_type='visit'")" = "{}" ]
   [ "$(_psql "select (scrubbed_at is not null) from events where event_type='visit'")" = "t" ]
 }
+
+@test "DB21: session owner reassignment is banned (anon bind allowed), cross-owned events rejected" {
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "insert into users (provider, provider_subject) values ('kakao','u1')"   # id 1
+  _psql "insert into users (provider, provider_subject) values ('kakao','u2')"   # id 2
+  _psql "insert into sessions (user_id) values (1)"
+  local S1 SB SD
+  S1="$(_psql "select id from sessions where user_id=1")"
+  # 6차 P1-2: 소유자 재배정 금지 — 다른 사용자로도, NULL로도 (삭제 스캔 우회 차단)
+  run _psql "update sessions set user_id=2 where id='$S1'"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"재배정"* ]]
+  run _psql "update sessions set user_id=NULL where id='$S1'"
+  [ "$status" -ne 0 ]
+  [ "$(_psql "select user_id from sessions where id='$S1'")" = "1" ]
+  # 익명 세션의 로그인 바인딩(NULL→user)은 허용
+  _psql "insert into sessions (user_id) values (NULL)"
+  SB="$(_psql "select id from sessions where user_id is null")"
+  _psql "update sessions set user_id=2 where id='$SB'"
+  [ "$(_psql "select user_id from sessions where id='$SB'")" = "2" ]
+  # 삭제된 사용자로의 바인딩은 거부
+  _psql "insert into users (provider, provider_subject) values ('kakao','u3')"   # id 3
+  _psql "update users set deleted_at=now() where id=3"
+  _psql "insert into sessions (user_id) values (NULL)"
+  SD="$(_psql "select id from sessions where user_id is null")"
+  run _psql "update sessions set user_id=3 where id='$SD'"
+  [ "$status" -ne 0 ]
+  # 6차 P1-3: user와 session 소유자가 다른 event는 거부 (교차 귀속 = 삭제 스캔 사각)
+  run _psql "insert into events (event_type, user_id, session_id) values ('x', 2, '$S1')"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"교차 귀속"* ]]
+  # 익명 세션(소유자 NULL)에 특정 user 귀속도 거부 — 먼저 세션을 바인딩해야 한다
+  run _psql "insert into events (event_type, user_id, session_id) values ('x', 1, '$SD')"
+  [ "$status" -ne 0 ]
+  [ "$(_psql "select count(*) from events where event_type='x'")" = "0" ]
+  # 정합 귀속은 허용: 소유자 본인 귀속, user_id 없는 세션 귀속
+  _psql "insert into events (event_type, user_id, session_id) values ('ok', 1, '$S1')"
+  _psql "insert into events (event_type, session_id) values ('ok2', '$S1')"
+  [ "$(_psql "select count(*) from events where event_type in ('ok','ok2')")" = "2" ]
+}
+
+@test "DB22: in-place modification during the runner's read is detected (torn-read stability) - not applied, no ledger row" {
+  # 6차 P1-1: rename swap(DB19)과 달리 "같은 inode"에 대한 in-place 수정은
+  # snapshot 복사와 원자적으로 경쟁한다 — 이중 읽기 + cmp 안정성 검사가 감지해
+  # 적용하지 않아야 한다 (fail-closed). 첫 읽기 직후 파일에 SQL을 덧붙인다.
+  local realcat flag
+  realcat="$(command -v cat)"
+  flag="$PGT/torn_${BATS_TEST_NUMBER}.flag"
+  mkdir -p "$PGT/tornbin_${BATS_TEST_NUMBER}"
+  cat > "$PGT/tornbin_${BATS_TEST_NUMBER}/cat" <<WRAP
+#!/usr/bin/env bash
+"$realcat" "\$@"
+rc=\$?
+case "\$*" in
+  *db/migrations/002_*)
+    if [ ! -f "$flag" ]; then
+      touch "$flag"
+      printf 'CREATE TABLE torn_write (id INT);\n' >> "$TROOT/db/migrations/002_schema_contract_fixes.sql"
+    fi
+    ;;
+esac
+exit \$rc
+WRAP
+  chmod +x "$PGT/tornbin_${BATS_TEST_NUMBER}/cat"
+  run env PATH="$PGT/tornbin_${BATS_TEST_NUMBER}:$PATH" ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"불안정 읽기"* ]]
+  # 001은 정상 적용, 002는 실행도 기록도 되지 않았다
+  [ "$(_psql "select count(*) from schema_migrations where version='001_init'")" = "1" ]
+  [ "$(_psql "select count(*) from schema_migrations where version like '002%'")" = "0" ]
+  [ "$(_psql "select to_regclass('torn_write') is null")" = "t" ]
+}
