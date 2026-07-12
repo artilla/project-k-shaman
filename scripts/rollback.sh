@@ -54,31 +54,31 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     exit 3
   fi
 
-  # 가드 4 (리뷰 16차 P1 재재설계): post 태그는 "시간 경계"일 뿐 소유권 증거가
-  # 아니다 — pre~post 사이에 끼어든 무관 커밋(동시 수동 커밋 등)도 범위에 포함되어
-  # reset --hard가 함께 파괴했다. 따라서 커밋이 존재하는 범위에는 메인 워크트리에서
-  # 비가역 파괴(reset --hard)를 절대 쓰지 않는다:
-  #   (a) tag 이후 커밋 없음        → reset 경로 (워크트리/미추적 정리만)
-  #   (b) 격리 워크트리(.ralph/wt-*) → reset 경로 (워크트리 전체가 폐기 대상)
-  #   (c) 메인 + HEAD == cycle/<ID>-post (기록된 사이클 종점) → git revert 기반
-  #       롤백: 범위의 커밋을 역커밋으로 되돌린다. 히스토리가 보존되므로 범위에
-  #       무관 커밋이 섞여 있었어도 revert-of-revert로 복구 가능 (비가역 유실 없음).
-  #   (d) 그 외 → 거부 + 수동 revert 안내 (fail-closed, --yes 우회 불가)
+  # 가드 4 (리뷰 16차 P1 재재설계 + 5차): 소유권은 post 태그 annotation의
+  # "커밋 OID 목록"이다. 5차 보강:
+  #   - 태그는 이름이 아니라 "해석 시점에 고정한 OID"로만 다룬다 (재해석 TOCTOU 제거)
+  #   - 부분 실패 후 재실행 허용: post 이후의 커밋이 전부 "owned에 대한 우리 역커밋"
+  #     일 때만 이어서 진행하고, 이미 되돌린 OID는 건너뛴다 (고착 제거)
+  #   - merge commit(부모 2+)은 mainline 정보가 없어 자동 revert 불가 — 명시 거부
+  PRE_OID="$(git rev-parse -q --verify "refs/tags/${TAG}^{commit}" || true)"
   POST_TAG="cycle/${ID}-post"
+  POST_TAGOBJ="$(git rev-parse -q --verify "refs/tags/${POST_TAG}" 2>/dev/null || true)"
+  POST_OID="$(git rev-parse -q --verify "refs/tags/${POST_TAG}^{commit}" 2>/dev/null || true)"
+  HEAD_OID="$(git rev-parse HEAD)"
   MODE_ROLLBACK=""
-  if [ -z "$(git rev-list -n 1 "${TAG}..HEAD" 2>/dev/null)" ]; then
+  if [ -z "$(git rev-list -n 1 "${PRE_OID}..HEAD" 2>/dev/null)" ]; then
     MODE_ROLLBACK="reset"
   elif in_isolated_worktree; then
     MODE_ROLLBACK="reset"
-  elif git rev-parse -q --verify "refs/tags/${POST_TAG}^{commit}" >/dev/null \
-     && [ "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/${POST_TAG}^{commit}")" ] \
-     && git merge-base --is-ancestor "refs/tags/${TAG}" "refs/tags/${POST_TAG}" 2>/dev/null; then
+  elif [ -n "$POST_OID" ] \
+     && git merge-base --is-ancestor "$PRE_OID" "$POST_OID" 2>/dev/null \
+     && git merge-base --is-ancestor "$POST_OID" "$HEAD_OID" 2>/dev/null; then
     MODE_ROLLBACK="revert"
   else
-    echo "❌ ${TAG} 이후 커밋들이 기록된 사이클 종점(${POST_TAG})과 일치하지 않습니다 — 자동 롤백을 거부합니다 (--yes 우회 불가):" >&2
-    git log --format='%h %s' "${TAG}..HEAD" >&2
+    echo "❌ ${TAG} 이후 커밋들이 기록된 사이클 종점(${POST_TAG})과 정합하지 않습니다 — 자동 롤백을 거부합니다 (--yes 우회 불가):" >&2
+    git log --format='%h %s' "${PRE_OID}..HEAD" >&2
     echo "   이 티켓의 변경만 되돌리려면 해당 커밋을 선별 revert 하세요 (최신 → 과거 순):" >&2
-    git log --format='   git revert %h  # %s' "${TAG}..HEAD" >&2
+    git log --format='   git revert %h  # %s' "${PRE_OID}..HEAD" >&2
     exit 3
   fi
 
@@ -112,42 +112,72 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   fi
 
   if [ "$MODE_ROLLBACK" = "revert" ]; then
-    # 리뷰 16차 P1(4차): 소유 커밋 OID 고정 — post 태그 annotation에 run_loop이
-    # 기록한 목록"만" revert한다 (범위 revert 금지).
-    #   - 범위(pre..HEAD) 안의 무관 커밋은 건드리지 않는다 (P1-3)
-    #   - 검증 후 끼어든 foreign commit도 OID가 고정돼 있어 revert되지 않는다 (P1-4)
-    #   - 커밋 하나당 역커밋 하나 — 개별 revert-of-revert로 선택 복구 가능
+    # 소유 OID 고정 — post 태그(고정 OID) annotation에서 읽는다.
     OWNED="$(git tag -l --format='%(contents)' "$POST_TAG" 2>/dev/null | grep -E '^[0-9a-f]{40}$' || true)"
     if [ -z "$OWNED" ]; then
       echo "❌ ${POST_TAG}에 소유 커밋 목록(annotation)이 없습니다 — 자동 롤백 불가 (구 형식/수동 태그, fail-closed). 수동 선별 revert:" >&2
-      git log --format='   git revert %h  # %s' "${TAG}..HEAD" >&2
+      git log --format='   git revert %h  # %s' "${PRE_OID}..HEAD" >&2
       exit 3
     fi
-    RANGE_OIDS="$(git rev-list "${TAG}..HEAD" 2>/dev/null || true)"
+    RANGE_OIDS="$(git rev-list "${PRE_OID}..${POST_OID}" 2>/dev/null)" || {
+      echo "❌ 소유 범위 조회 실패 — 자동 롤백을 거부합니다 (fail-closed)." >&2; exit 3; }
     for c in $OWNED; do
       case "$RANGE_OIDS" in
         *"$c"*) : ;;
         *)
-          echo "❌ 소유 목록의 커밋 ${c}가 ${TAG}..HEAD 범위에 없습니다 — 기록 불일치, 자동 롤백을 거부합니다 (fail-closed)." >&2
+          echo "❌ 소유 목록의 커밋 ${c}가 ${TAG}..${POST_TAG} 범위에 없습니다 — 기록 불일치, 자동 롤백을 거부합니다 (fail-closed)." >&2
           exit 3
           ;;
       esac
+      # 리뷰 16차 P2(5차): merge commit은 mainline 정보 없이 자동 revert할 수 없다.
+      if [ "$(git rev-list --parents -n 1 "$c" 2>/dev/null | wc -w | tr -d ' ')" -gt 2 ]; then
+        echo "❌ 소유 커밋 ${c}는 merge commit입니다 — 자동 revert 불가, 수동으로 'git revert -m <mainline> ${c}'를 실행하세요 (fail-closed)." >&2
+        exit 3
+      fi
     done
 
-    # 실패·신호 복구 상태 머신 (리뷰 16차 P1-4): 어떤 경로로 중단돼도
-    # REVERT_HEAD·staged 역변경을 남기지 않는다 (가드 1이 시작 clean을 보장하므로
-    # reset --hard HEAD는 revert 잔여물만 제거한다).
+    # 5차 P1-7(재개 가능성): post 이후의 커밋은 전부 "owned에 대한 우리 역커밋"
+    # 이어야 한다 — 그 외(외부 커밋)는 기존대로 거부. 이미 되돌린 OID는 건너뛴다.
+    ALREADY=""
+    if [ "$POST_OID" != "$HEAD_OID" ]; then
+      for c in $(git rev-list "${POST_OID}..HEAD" 2>/dev/null); do
+        _rvof=""
+        for o in $OWNED; do
+          if git log -1 --format=%B "$c" | grep -q "This reverts commit ${o}"; then _rvof="$o"; break; fi
+        done
+        if [ -z "$_rvof" ]; then
+          echo "❌ ${POST_TAG} 이후에 소유 역커밋이 아닌 커밋(${c})이 있습니다 — 자동 롤백을 거부합니다 (fail-closed)." >&2
+          echo "   이 티켓의 소유 커밋만 수동 선별 revert 하세요:" >&2
+          for o in $OWNED; do echo "     git revert $o" >&2; done
+          exit 3
+        fi
+        ALREADY="${ALREADY}${_rvof}
+"
+      done
+    fi
+
+    # 실패·신호 복구: sequencer 상태(REVERT_HEAD·staged 역변경)는 --abort로만
+    # 정리한다 — 전역 reset --hard는 초기 clean 검사 이후 들어온 동시 tracked
+    # 변경까지 파괴했다 (5차 P1-7). abort로 정리가 안 되면 지시만 남기고 중단.
     _rb_recover() {
       git revert --abort >/dev/null 2>&1 || true
-      if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
-        git reset --hard HEAD >/dev/null 2>&1 || true
+      if [ -e "$(git rev-parse --git-dir 2>/dev/null)/REVERT_HEAD" ]; then
+        echo "⚠️  revert 중단 상태 자동 정리 실패 — 'git revert --abort'를 수동 실행하세요." >&2
       fi
     }
-    trap '_rb_recover; echo "❌ 신호로 중단됨 — revert 잔여 상태를 정리했습니다." >&2; exit 130' INT TERM HUP
+    trap '_rb_recover; echo "❌ 신호로 중단됨 — revert 잔여 상태를 정리했습니다. 재실행하면 이미 되돌린 커밋은 건너뜁니다." >&2; exit 130' INT TERM HUP
 
     _rb_done=""
     _rb_failed=""
     for c in $OWNED; do
+      case "$ALREADY" in
+        *"$c"*)
+          echo "ℹ️  ${c} — 이미 되돌려짐 (이전 부분 실행), 건너뜀."
+          _rb_done="${_rb_done}${c}
+"
+          continue
+          ;;
+      esac
       if git revert --no-edit "$c" >/dev/null 2>&1; then
         _rb_done="${_rb_done}${c}
 "
@@ -160,12 +190,13 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     trap - INT TERM HUP
 
     if [ -n "$_rb_failed" ]; then
-      echo "❌ ${_rb_failed} revert 실패(충돌 또는 커밋 훅) — 잔여 상태(REVERT_HEAD·staged)는 정리했습니다." >&2
+      echo "❌ ${_rb_failed} revert 실패(충돌 등) — 잔여 상태(REVERT_HEAD·staged)는 정리했습니다." >&2
+      echo "   재실행하면 이미 되돌린 커밋은 건너뛰고 이어서 진행합니다 (재개 가능)." >&2
       if [ -n "$_rb_done" ]; then
         echo "   이미 되돌린 커밋(각각 revert-of-revert로 복구 가능):" >&2
         printf '%s' "$_rb_done" | sed 's/^/     /' >&2
       fi
-      echo "   남은 커밋은 수동으로 선별 revert 하세요:" >&2
+      echo "   남은 커밋 수동 선별 revert:" >&2
       for c in $OWNED; do
         case "$_rb_done" in
           *"$c"*) : ;;
@@ -175,15 +206,21 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
       exit 3
     fi
 
-    git tag -d "$POST_TAG" >/dev/null 2>&1 || true
+    # 태그 삭제도 CAS — 해석 시점에 고정한 tag object OID가 그대로일 때만 지운다.
+    git update-ref -d "refs/tags/${POST_TAG}" "$POST_TAGOBJ" >/dev/null 2>&1 \
+      || echo "⚠️  ${POST_TAG} 태그가 그 사이 변경됨 — 삭제하지 않았습니다 (수동 확인)." >&2
     echo "rolled back $ID by revert (owned commits only; history preserved; 미추적 산출물은 보존됨)"
     exit 0
   fi
 
-  git reset --hard "$TAG" >/dev/null
-  git clean -fd >/dev/null
-  # 사이클 종점 기록은 reset으로 무효화됨 — 잔존 post 태그 제거 (오판 방지 위생).
-  git tag -d "$POST_TAG" >/dev/null 2>&1 || true
+  git reset --hard "$PRE_OID" >/dev/null
+  # 리뷰 16차 P1-8(5차): quarantine(state/auto_merge.trash.d)은 rollback의
+  # clean -fd에서도 살아남아야 한다 — 명시 제외 (.gitignore에도 등재).
+  git clean -fd -e "state/auto_merge.trash.d" >/dev/null
+  # 사이클 종점 기록은 reset으로 무효화됨 — 해석 시점 OID 고정 CAS로 제거.
+  if [ -n "$POST_TAGOBJ" ]; then
+    git update-ref -d "refs/tags/${POST_TAG}" "$POST_TAGOBJ" >/dev/null 2>&1 || true
+  fi
   echo "restored $ID to $TAG"
   exit 0
 fi

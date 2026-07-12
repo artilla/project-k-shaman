@@ -917,6 +917,13 @@ cycle_one() {
   echo "🎫 티켓: $ticket"
 
   local id; id=$(ticket_id_from_path "$ticket")
+  # 리뷰 16차 P1(5차): 사이클 소유 커밋의 "생성 시점 귀속" — 이 사이클(페르소나
+  # 세션·재프롬프트·telemetry)이 만드는 모든 커밋의 committer를 사이클 고유
+  # identity로 고정한다. author는 사용자 identity 그대로 유지된다. 소유 목록은
+  # 시간 창(rev-list 범위)이 아니라 이 committer로 판별하므로, 사이클 도중
+  # 끼어든 외부 sibling 커밋(기본 identity)은 owned에 들어가지 않는다.
+  export GIT_COMMITTER_NAME="ralph-cycle"
+  export GIT_COMMITTER_EMAIL="ralph-cycle-${id}@local"
   local cur_status; cur_status=$(field_of "$ticket" status)
   local safe; safe=$(field_of "$ticket" safe || true)
 
@@ -1456,9 +1463,17 @@ EOF
   # 기록하고, post 태그의 annotation에 남긴다. rollback은 이 목록"만" revert한다.
   # 한계(문서화): 세션 창 중 끼어든 외부 커밋은 구분 불가 — 메인 워크트리 사이클은
   # state/lock으로 단일 writer를 전제하며, per-OID revert라 오귀속도 개별 복구 가능.
-  local owned_oids=""
+  local owned_oids="" owned_capture_failed=0
   if [ "$GIT_REPO" = "1" ] && [ -n "$pre_head" ]; then
-    owned_oids="$(git rev-list "${pre_head}..HEAD" 2>/dev/null || true)"
+    # 리뷰 16차 P1(5차): 범위 전체가 아니라 "이 사이클 committer"의 커밋만 —
+    # 외부 sibling 커밋은 committer identity가 달라 제외된다.
+    # 리뷰 16차 P2(5차): rev-list 실패를 빈 목록으로 위장하지 않는다 — 실패 시
+    # post 태그를 만들지 않아 rollback이 fail-closed로 거부하게 한다.
+    if ! owned_oids="$(git rev-list --committer="ralph-cycle-${id}@local" "${pre_head}..HEAD" 2>/dev/null)"; then
+      owned_oids=""
+      owned_capture_failed=1
+      echo "⚠️  소유 커밋 목록 수집 실패(rev-list) — post 태그를 기록하지 않습니다 (자동 rollback 불가, fail-closed)."
+    fi
   fi
 
   # ────────── 10. 계측 (ADR-0046): 완료 타임스탬프 영속 ──────────
@@ -1521,9 +1536,9 @@ EOF
   # rollback.sh는 commit subject 문자열이 아니라 이 기록(cycle/<ID>-pre ~ -post
   # 범위)으로만 reset --hard를 허가한다 — subject 스푸핑("TXXX:"로 보이는 수동
   # 커밋)이나 혼입 변경의 오분류로 무관 커밋이 파괴되지 않는다.
-  if [ "$DRY_RUN" = "0" ] && [ "$GIT_REPO" = "1" ]; then
+  if [ "$DRY_RUN" = "0" ] && [ "$GIT_REPO" = "1" ] && [ "$owned_capture_failed" = "0" ]; then
     # annotation에 소유 커밋 OID 목록을 남긴다 — rollback은 이 목록만 revert한다
-    # (리뷰 16차 P1 4차: 시간 경계가 아니라 OID 고정 소유권).
+    # (리뷰 16차 P1 4차: 시간 경계가 아니라 OID 고정 소유권; 5차: committer 판별).
     if ! git tag -f -a "cycle/${id}-post" -m "owned-commits
 ${owned_oids}" HEAD >/dev/null 2>&1; then
       echo "⚠️  post-cycle tag 기록 실패 — 이 사이클은 rollback.sh의 자동 revert 경로를 쓸 수 없습니다 (수동 revert 안내만 가능)."

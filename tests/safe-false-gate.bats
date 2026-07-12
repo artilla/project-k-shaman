@@ -19,6 +19,7 @@ setup() {
   cp "$REPO_ROOT/scripts/approve.sh" "$TEST_HOME/scripts/approve.sh"
   cp "$REPO_ROOT/scripts/ticket_edit.sh" "$TEST_HOME/scripts/ticket_edit.sh"
   cp "$REPO_ROOT/scripts/ticket_body.sh" "$TEST_HOME/scripts/ticket_body.sh"
+  cp "$REPO_ROOT/scripts/rollback.sh" "$TEST_HOME/scripts/rollback.sh"
   # 리뷰 2차 P1-7: run_loop의 safe:false 승인 판정은 mission-control/approval.mjs 단일 소스.
   cp "$REPO_ROOT/mission-control/approval.mjs" "$TEST_HOME/mission-control/approval.mjs"
   cp "$REPO_ROOT/.gitignore" "$TEST_HOME/.gitignore"
@@ -1652,4 +1653,51 @@ EOF
   ! grep -q 'new body' "$TEST_HOME/docs/tickets/T690-test.md"
   grep -q '^status: skipped' "$TEST_HOME/docs/tickets/T690-test.md"
   [ ! -d "$TEST_HOME/state/ticket_write.lock.d" ]
+}
+
+@test "T70: cycle-owned commits are attributed by committer identity - sibling commits during the cycle are excluded" {
+  _make_ticket T700 true open
+
+  # headless mock: 정상 완료 커밋(사이클 committer 상속) + 사이클 "도중" 외부
+  # sibling 프로세스의 커밋(기본 identity)을 함께 만든다 — 과거에는 rev-list
+  # 범위 전체가 owned로 기록돼 rollback이 sibling 산출물까지 revert했다.
+  cat > "$TEST_HOME/scripts/run_headless.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+ticket=docs/tickets/T700-test.md
+[ -f "$ticket" ] || exit 0
+# 외부 sibling 커밋 (사이클 committer 환경 제거 — 별도 프로세스 시뮬레이션)
+echo "sibling work" > sibling.txt
+git add sibling.txt
+env -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL git commit -qm "docs: sibling concurrent work"
+# 페르소나 완료 커밋 (사이클 committer 상속)
+tmp=$(mktemp)
+awk '/^---$/{fm=!fm;print;next} fm && $1=="status:"{print "status: done";next}{print}' "$ticket" > "$tmp"
+mv "$tmp" "$ticket"
+git mv "$ticket" docs/tickets/DONE/T700-test.md
+git add -A
+git commit -qm "T700: done"
+exit 0
+EOF
+  chmod +x "$TEST_HOME/scripts/run_headless.sh"
+  _commit_all "add T700"
+
+  run bash -c 'cd "$1" && ./scripts/run_loop.sh T700' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+
+  # owned annotation에는 sibling 커밋이 없다
+  local sibling owned
+  sibling="$(git -C "$TEST_HOME" log --format=%H --grep='sibling concurrent work' -1)"
+  owned="$(git -C "$TEST_HOME" tag -l --format='%(contents)' cycle/T700-post)"
+  [[ "$owned" != *"$sibling"* ]]
+  [[ "$owned" == *"$(git -C "$TEST_HOME" log --format=%H --grep='^T700: done' -1)"* ]]
+
+  # rollback은 owned만 revert — sibling 산출물은 생존한다
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T700 --yes < /dev/null' _ "$TEST_HOME"
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_HOME/sibling.txt" ]
+  run git -C "$TEST_HOME" log --format=%s
+  [[ "$output" == *"docs: sibling concurrent work"* ]]
+  # 티켓 완료 커밋은 되돌려졌다 (티켓 파일이 open 위치로 복귀)
+  [ -f "$TEST_HOME/docs/tickets/T700-test.md" ]
 }

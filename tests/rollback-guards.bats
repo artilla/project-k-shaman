@@ -271,3 +271,60 @@ WRAP
   # 소유 커밋은 되돌려졌다
   grep -q "v1" "$repo/file.txt"
 }
+
+@test "R14: mid-sequence failure is resumable and abort-only recovery preserves concurrent dirty files" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # C1(무관 파일)·A(file.txt v1→v2)는 owned, B(file.txt v2→v3)는 owned 아님 —
+  # A revert가 B의 내용과 충돌해 2번째에서 실패한다 (부분 실행 상태).
+  local C1 A
+  # 동시 dirty 주입 대상(어떤 owned revert도 건드리지 않는 파일)
+  echo "stable" > "$repo/stable.txt"
+  git -C "$repo" add stable.txt
+  git -C "$repo" commit -q -m "T200: stable (not owned)"
+  echo "c1" > "$repo/other.txt"
+  git -C "$repo" add other.txt
+  git -C "$repo" commit -q -m "T200: c1"
+  C1="$(git -C "$repo" rev-parse HEAD)"
+  A="$(git -C "$repo" log --format=%H --grep='^T200: cycle change' -1)"
+  echo "v3" > "$repo/file.txt"
+  git -C "$repo" add file.txt
+  git -C "$repo" commit -q -m "T200: second (not owned)"
+  git -C "$repo" tag -f -a "cycle/T200-post" -m "owned-commits
+$C1
+$A"
+
+  # 충돌 revert(A) 직전에 동시 tracked 변경을 주입하는 wrapper — 복구가
+  # reset --hard였다면 이 변경이 파괴된다 (5차 P1-7).
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin2"
+  cat > "$repo/gbin2/git" <<WRAP
+#!/usr/bin/env bash
+if [ "\$1" = "revert" ] && [ "\$3" = "$A" ]; then
+  echo "concurrent-dirty" >> "$repo/stable.txt"
+fi
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin2/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin2:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"revert 실패"* ]]
+  [[ "$output" == *"재실행하면"* ]]
+  # C1은 이미 되돌려졌고, 잔여 sequencer 상태 없음
+  [ ! -e "$repo/.git/REVERT_HEAD" ]
+  run git -C "$repo" log --format=%s -3
+  [[ "$output" == *'Revert "T200: c1"'* ]]
+  # abort-only 복구 — 동시 tracked 변경은 파괴되지 않았다
+  grep -q "concurrent-dirty" "$repo/stable.txt"
+
+  # 재실행(동시 dirty 정리 후): 거부되지 않고 C1은 건너뛴 채 A에서 같은 이유로 실패
+  git -C "$repo" checkout -- stable.txt
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"정합하지 않습니다"* ]]
+  [[ "$output" == *"이미 되돌려짐"* ]]
+  # C1 역커밋은 한 번만 존재한다 (중복 revert 없음)
+  [ "$(git -C "$repo" log --format=%s | grep -c 'Revert "T200: c1"')" = "1" ]
+}
