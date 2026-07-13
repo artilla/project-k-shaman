@@ -560,14 +560,15 @@ HOOK
   [ "$(git -C "$repo" log --format=%s | grep -c 'Revert')" = "1" ]
 }
 
-@test "R21: branch switch at the ref-transaction call -> checkout binding refuses the wrong worktree (symref-verify or post-txn recheck)" {
+@test "R21: branch switch at the ref-transaction call -> worktree is never touched, published state honestly reported" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
-  # 8라운드 후속 P1(#1): branch CAS만으로는 "같은 OID의 다른 branch 전환"을 잡지
-  # 못했다 — 고정 branch는 rollback되는데 현재 checkout(other)의 worktree가
-  # rollback 내용으로 바뀌고 rc=0이었다 (실측). git>=2.46은 transaction 안의
-  # symref-verify가 공개 자체를 거부하고, 구 git은 공개 직후 결속 재검증이
-  # worktree 변경을 차단하고 rc!=0으로 정직 보고한다.
+  # 8라운드 후속 P1(#1) → 재리뷰 P1(#5): symref 검증을 ref transaction "안"에 넣는
+  # 설계는 Git에서 성립하지 않는다 (probe는 no-deref 없이 2.48에서 실패하고, HEAD
+  # symref 검증과 그 referent branch 갱신을 같은 transaction에 넣으면 "multiple
+  # updates for HEAD"로 거부된다). transaction은 ref 원자성만 담당하고, checkout
+  # 결속은 공개 직전/직후의 별도 검증 계층이 담당한다 — 결속이 깨지면 worktree를
+  # 아예 건드리지 않고 공개 상태를 정직하게 보고한다.
   git -C "$repo" branch other       # master와 같은 OID
   local realgit
   realgit="$(command -v git)"
@@ -576,7 +577,7 @@ HOOK
 #!/usr/bin/env bash
 if [ "\$1" = "update-ref" ] && [ "\$2" = "--stdin" ]; then
   c=0; [ -f "$repo/.r21" ] && c=\$(cat "$repo/.r21"); c=\$((c+1)); echo \$c > "$repo/.r21"
-  if [ "\$c" = "2" ]; then "$realgit" -C "$repo" symbolic-ref HEAD refs/heads/other; fi
+  if [ "\$c" = "1" ]; then "$realgit" -C "$repo" symbolic-ref HEAD refs/heads/other; fi
 fi
 exec "$realgit" "\$@"
 WRAP
@@ -584,22 +585,95 @@ WRAP
 
   run bash -c 'cd "$1" && PATH="$1/gbin7:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
   [ "$status" -eq 3 ]
-  # 어떤 git 버전이든: 현재 checkout(other)의 worktree는 절대 바뀌지 않는다
+  [[ "$output" != *"rolled back"* ]]
+  # 현재 checkout(other)의 worktree·index는 절대 바뀌지 않는다
   grep -q "v2" "$repo/file.txt"
   [ -z "$(git -C "$repo" status --porcelain --untracked-files=no)" ]
   run git -C "$repo" log --format=%s refs/heads/other
   [[ "$output" != *"Revert"* ]]
-  if printf 'start\nsymref-verify HEAD refs/heads/other\nabort\n' | git -C "$repo" update-ref --stdin >/dev/null 2>&1; then
-    # symref-verify 지원: transaction이 원자 거부 — master도 무변경, 태그 생존
-    run git -C "$repo" log --format=%s refs/heads/master
-    [[ "$output" != *"Revert"* ]]
-    git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
-  else
-    # 구 git fallback: 고정 branch 공개는 완료 — rc!=0 + 결속 실패를 정직 보고,
-    # 복구 참조 보존
-    [[ "$output" == *"결속되지"* ]]
-    git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
+  # 공개 여부와 무관하게 복구 근거가 남는다
+  git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
+}
+
+@test "R25: a whitespace-forged revert (same patch-id, different blob) is refused - tree identity, not patch-id" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 재리뷰 P1(#6): git patch-id --stable은 whitespace를 무시한다 — 정상 'v1' revert
+  # 대신 'v 1'을 만드는 같은-parent 커밋이 검증을 통과해 rc=0으로 공개됐다 (실측).
+  # 검증 축을 결과 tree의 경로별 (mode, blob OID) 정확 대조로 바꿨다.
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin11"
+  cat > "$repo/gbin11/git" <<'WRAP'
+#!/usr/bin/env bash
+REAL=__REALGIT__
+wt=""; prev=""
+for a in "$@"; do [ "$prev" = "-C" ] && wt="$a"; prev="$a"; done
+case " $* " in *" revert "*) is_r=1;; *) is_r=0;; esac
+case " $* " in *" --abort "*) is_r=0;; esac
+if [ "$is_r" = 1 ] && [ -n "$wt" ]; then
+  "$REAL" "$@"; rc=$?
+  if [ $rc -eq 0 ] && [ ! -f "$wt/.r25" ]; then
+    touch "$wt/.r25"
+    "$REAL" -C "$wt" reset -q --hard HEAD^
+    printf 'v 1\n' > "$wt/file.txt"        # whitespace만 다르다 — patch-id는 동일
+    "$REAL" -C "$wt" add file.txt
+    "$REAL" -C "$wt" -c user.email=e@e -c user.name=E \
+      commit -qm 'Revert "T200: cycle change"' >/dev/null 2>&1
   fi
+  exit $rc
+fi
+exec "$REAL" "$@"
+WRAP
+  sed -i '' "s|__REALGIT__|$realgit|" "$repo/gbin11/git" 2>/dev/null \
+    || sed -i "s|__REALGIT__|$realgit|" "$repo/gbin11/git"
+  chmod +x "$repo/gbin11/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin11:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"검증에 실패"* ]]
+  # 위조본은 공개되지 않았다 — 원본 그대로, 태그 생존
+  grep -q "^v2$" "$repo/file.txt"
+  run git -C "$repo" log --format=%s
+  [[ "$output" != *"Revert"* ]]
+  git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+}
+
+@test "R26: branch switch DURING read-tree -> the other branch's worktree is restored, not left modified" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 재리뷰 P1(#7): 공개 직후 결속 검사를 통과한 "뒤" checkout이 바뀌면, read-tree가
+  # 다른 branch의 worktree/index를 먼저 바꾼 뒤에야 실패했다 (실측). Git은 "HEAD 결속
+  # + worktree 갱신"의 원자 연산을 주지 않으므로, 동기화 직후 결속이 깨진 것을 탐지하면
+  # 우리가 적용한 two-tree merge를 역방향으로 되돌려 그 worktree를 원상복구한다.
+  git -C "$repo" branch other       # master와 같은 OID
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin12"
+  cat > "$repo/gbin12/git" <<WRAP
+#!/usr/bin/env bash
+case " \$* " in *" read-tree "*)
+  if [ ! -f "$repo/.r26" ]; then
+    touch "$repo/.r26"
+    "$realgit" -C "$repo" symbolic-ref HEAD refs/heads/other
+  fi
+;; esac
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin12/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin12:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"rolled back"* ]]
+  [[ "$output" == *"checkout branch가 바뀌었습니다"* ]]
+  # other의 worktree는 원상복구됐다 — rollback 내용이 남지 않는다
+  grep -q "^v2$" "$repo/file.txt"
+  [ -z "$(git -C "$repo" status --porcelain --untracked-files=no)" ]
+  # other ref 자체도 무변경 (공개는 고정 branch인 master에만 적용됐다)
+  [ "$(git -C "$repo" rev-parse refs/heads/other)" != "$(git -C "$repo" rev-parse refs/heads/master)" ]
+  run git -C "$repo" log --format=%s refs/heads/other
+  [[ "$output" != *"Revert"* ]]
+  git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
 }
 
 @test "R22: TERM while a signal-ignoring read-tree child runs -> KILL escalation, published state reported from real refs (rc=130)" {
@@ -640,12 +714,13 @@ WRAP
   git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
 }
 
-@test "R23: revert commit replaced by a same-count arbitrary commit -> per-commit parent/patch-id verification refuses" {
+@test "R23: revert commit replaced by a same-count arbitrary commit -> per-commit parent/tree-identity verification refuses" {
   local repo="$TEST_BASE/main"
   _make_repo "$repo"
   # 8라운드 후속 P1(#3): 개수만 세는 검증은 정상 revert를 같은 개수의 임의
   # 커밋으로 교체해도 통과시켰다 (실측: 임의 파일·foreign commit 공개). 이제
-  # 생성 직후 커밋별로 (1) parent 체인 (2) 소유 커밋의 역방향 patch-id를 검증한다.
+  # 생성 직후 커밋별로 (1) parent 체인 (2) 결과 tree의 경로별 (mode, blob) identity를
+  # 검증한다 (재리뷰 #6: patch-id는 whitespace를 무시해 위조를 통과시켰다).
   local realgit
   realgit="$(command -v git)"
   mkdir -p "$repo/gbin9"
@@ -675,7 +750,7 @@ WRAP
 
   run bash -c 'cd "$1" && PATH="$1/gbin9:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
   [ "$status" -eq 3 ]
-  [[ "$output" == *"patch-id 불일치"* || "$output" == *"검증에 실패"* ]]
+  [[ "$output" == *"tree identity 불일치"* || "$output" == *"검증에 실패"* ]]
   # 아무것도 공개되지 않았다 — 임의 커밋·파일 없음, 태그 생존
   grep -q "v2" "$repo/file.txt"
   [ ! -f "$repo/evil.txt" ]

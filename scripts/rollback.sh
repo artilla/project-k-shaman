@@ -155,6 +155,40 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
       fi
     done
 
+    # ── 8라운드 후속 재리뷰 P1(#6): revert 결과의 "정확한 identity" 검증 ──────────
+    # git patch-id --stable은 whitespace를 무시한다 — 정상 'v1' revert 대신 'v 1'을
+    # 만드는 같은-parent 커밋이 검증을 통과해 rc=0으로 공개됐다 (실측). 검증 축을
+    # patch-id에서 "결과 tree의 경로별 (mode, blob OID) 정확 대조"로 바꾼다:
+    #   (a) 후보 커밋이 parent 대비 바꾼 경로 ⊆ 소유 커밋 c가 바꾼 경로
+    #   (b) c가 바꾼 모든 경로에서 후보의 (mode, blob) == c^의 (mode, blob)
+    #       — 즉 c 직전 상태로 정확히 복원됐다 (c가 추가한 경로는 부재여야 한다)
+    # whitespace·mode·심볼릭 변조는 전부 blob OID/mode 불일치로 걸린다.
+    _rb_entry() {  # $1=commit-ish, $2=path → "<mode> <oid>" (부재면 빈 문자열)
+      git ls-tree --full-tree "$1" -- "$2" 2>/dev/null | awk '{print $1" "$3; exit}'
+    }
+    _rb_verify_revert() {  # $1=후보 커밋, $2=그 parent, $3=소유 커밋
+      local _np _cp _pp _e_new _e_base
+      git rev-parse -q --verify "${3}^{commit}" >/dev/null 2>&1 || return 1
+      git rev-parse -q --verify "${3}^" >/dev/null 2>&1 || return 1   # root commit은 대상 아님
+      _cp="$(git diff-tree -r --name-only --no-commit-id "${3}^" "$3" 2>/dev/null | sort)"
+      [ -n "$_cp" ] || return 1
+      _np="$(git diff-tree -r --name-only --no-commit-id "$2" "$1" 2>/dev/null | sort)"
+      # (a) 소유 커밋이 건드리지 않은 경로를 바꿨으면 우리 revert가 아니다
+      if [ -n "$(comm -23 <(printf '%s\n' "$_np") <(printf '%s\n' "$_cp") 2>/dev/null)" ]; then
+        return 1
+      fi
+      # (b) 경로별 정확 identity
+      while IFS= read -r _pp; do
+        [ -n "$_pp" ] || continue
+        _e_new="$(_rb_entry "$1" "$_pp")"
+        _e_base="$(_rb_entry "${3}^" "$_pp")"
+        [ "$_e_new" = "$_e_base" ] || return 1
+      done <<VERIFY_EOF
+$_cp
+VERIFY_EOF
+      return 0
+    }
+
     # 5차 P1-7(재개 가능성): post 이후의 커밋은 전부 "owned에 대한 우리 역커밋"
     # 이어야 한다 — 그 외(외부 커밋)는 기존대로 거부. 이미 되돌린 OID는 건너뛴다.
     ALREADY=""
@@ -170,9 +204,9 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
         _cbody="$(git log -1 --format=%B "$c" 2>/dev/null || true)"
         for o in $OWNED; do
           case "$_cbody" in *"This reverts commit ${o}"*) ;; *) continue ;; esac
-          _pid_o="$(git diff "$o" "$o^" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1; exit}' || true)"
-          _pid_c="$(git diff "$c^" "$c" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1; exit}' || true)"
-          if [ -n "$_pid_o" ] && [ "$_pid_o" = "$_pid_c" ]; then _rvof="$o"; fi
+          # #6: patch-id가 아니라 tree의 경로별 (mode, blob) 정확 대조로 판정한다 —
+          # whitespace만 다른 위조 역커밋을 "이미 되돌려짐"으로 인정하지 않는다.
+          if _rb_verify_revert "$c" "${c}^" "$o"; then _rvof="$o"; fi
           break
         done
         if [ -z "$_rvof" ]; then
@@ -258,22 +292,20 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
         _rb_failed="$c"
         break
       fi
-      # 8라운드 후속 P1(#3): 생성 "직후" 커밋별 검증 — 개수만 세는 검증은 정상
-      # revert를 같은 개수의 임의 커밋으로 교체해도 통과했다 (실측: 임의 파일과
-      # foreign commit이 공개됨). 검증 축 두 개:
+      # 8라운드 후속 P1(#3) + 재리뷰 P1(#6): 생성 "직후" 커밋별 검증. 개수만 세는
+      # 검증은 같은 개수의 임의 커밋 교체를 통과시켰고(8차), patch-id 검증은
+      # whitespace 변조('v1' → 'v 1')를 통과시켰다(재리뷰, 실측). 검증 축 두 개:
       #   (1) parent 고정: 생성 커밋의 parent == 직전 검증 커밋 (체인이 한 줄로
       #       고정된다 — 삽입/교체 즉시 탐지)
-      #   (2) patch-id: 생성 커밋의 diff == 소유 커밋의 역방향 diff (stable
-      #       patch-id 비교 — 내용이 정확히 "그 revert"임을 증명)
+      #   (2) tree identity: 생성 커밋이 바꾼 경로가 소유 커밋의 경로 집합 안에 있고,
+      #       그 경로마다 (mode, blob OID)가 c^와 정확히 일치 (whitespace·mode 변조 탐지)
       _rb_c_new="$(_rbgit rev-parse HEAD 2>/dev/null || true)"
       _rb_c_par="$(_rbgit rev-parse HEAD^ 2>/dev/null || true)"
-      _pid_own="$(git diff "$c" "$c^" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1; exit}' || true)"
-      _pid_new="$(git diff "${_rb_c_new}^" "$_rb_c_new" 2>/dev/null | git patch-id --stable 2>/dev/null | awk '{print $1; exit}' || true)"
       if [ -z "$_rb_c_new" ] || [ "$_rb_c_par" != "$_rb_prev" ] \
-         || [ -z "$_pid_own" ] || [ "$_pid_own" != "$_pid_new" ]; then
+         || ! _rb_verify_revert "$_rb_c_new" "$_rb_c_par" "$c"; then
         _rb_cleanup_wt
         trap - INT TERM HUP
-        echo "❌ ${c}의 revert로 생성된 커밋(${_rb_c_new:-?})이 검증에 실패했습니다 (parent 또는 patch-id 불일치 — 외부 개입 의심) — 공개하지 않았습니다 (fail-closed)." >&2
+        echo "❌ ${c}의 revert로 생성된 커밋(${_rb_c_new:-?})이 검증에 실패했습니다 (parent 또는 tree identity 불일치 — 외부 개입 의심) — 공개하지 않았습니다 (fail-closed)." >&2
         echo "   소유 커밋 수동 선별 revert: git revert ${c}" >&2
         exit 3
       fi
@@ -346,35 +378,25 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     #       포함한다. 구 git(< 2.46, symref-verify 없음)은 transaction 직전
     #       재확인으로 창을 최소화하고, 공개 직후·동기화 직전 결속 재검증이
     #       (아래) 잘못된 worktree 변경을 항상 차단한다.
-    _rb_symref=1
-    if ! _rb_probe_err="$(printf 'start\nsymref-verify HEAD %s\nabort\n' "$HEAD_REF" | LC_ALL=C git update-ref --stdin 2>&1 >/dev/null)"; then
-      case "$_rb_probe_err" in
-        *"unknown command"*) _rb_symref=0 ;;  # 구 git — fallback (아래 재검증이 방어)
-        *) _rb_publish_fail "checkout이 ${HEAD_REF}와 결속되지 않습니다 (symref 검증 실패: ${_rb_probe_err})" ;;
-      esac
-    fi
-    if [ "$_rb_symref" = "1" ]; then
-      _rb_txn_ok=1
-      git update-ref --stdin >/dev/null 2>&1 <<REF_TXN || _rb_txn_ok=0
-start
-symref-verify HEAD ${HEAD_REF}
-update ${HEAD_REF} ${_NEW} ${HEAD_OID}
-delete refs/tags/${POST_TAG} ${POST_TAGOBJ}
-prepare
-commit
-REF_TXN
-    else
-      [ "$(git symbolic-ref -q HEAD || true)" = "$HEAD_REF" ] \
-        || _rb_publish_fail "검증 후 checkout된 branch가 바뀌었습니다 (${HEAD_REF} → $(git symbolic-ref -q HEAD || echo detached))"
-      _rb_txn_ok=1
-      git update-ref --stdin >/dev/null 2>&1 <<REF_TXN || _rb_txn_ok=0
+    # 재리뷰 P1(#5): symref 검증을 ref transaction "안"에 넣는 설계는 Git에서 성립
+    # 하지 않는다 — probe는 no-deref가 없어 2.48에서 즉시 실패했고, 이를 고쳐도
+    # HEAD symref 검증과 그 referent branch 갱신을 같은 transaction에 넣으면 Git이
+    # "multiple updates for HEAD"로 거부한다. 그래서 transaction은 "ref 원자성"만
+    # 담당하고(branch CAS + 태그 삭제), checkout 결속은 아래의 별도 계층이 담당한다:
+    #   (i)   공개 직전 결속 사전 점검
+    #   (ii)  공개 직후 결속 재검증 — 깨졌으면 worktree를 아예 건드리지 않는다
+    #   (iii) 동기화 직후 결속 재검증 — 깨졌으면 우리가 만진 worktree를 원상복구한다
+    #         (엉뚱한 branch의 worktree를 "지속적으로" 바꾼 채 끝나지 않는다)
+    [ "$(git symbolic-ref -q HEAD || true)" = "$HEAD_REF" ] \
+      || _rb_publish_fail "검증 후 checkout된 branch가 바뀌었습니다 (${HEAD_REF} → $(git symbolic-ref -q HEAD || echo detached))"
+    _rb_txn_ok=1
+    git update-ref --stdin >/dev/null 2>&1 <<REF_TXN || _rb_txn_ok=0
 start
 update ${HEAD_REF} ${_NEW} ${HEAD_OID}
 delete refs/tags/${POST_TAG} ${POST_TAGOBJ}
 prepare
 commit
 REF_TXN
-    fi
     if [ "$_rb_txn_ok" != "1" ]; then
       # 어떤 old-value가 어긋났는지 진단해 보고한다 (모두 무변경 — 원자 거부)
       _rb_tag_now="$(git rev-parse -q --verify "refs/tags/${POST_TAG}" 2>/dev/null || true)"
@@ -439,11 +461,29 @@ REF_TXN
       echo "❌ ref 공개는 완료됐지만(${HEAD_REF} = ${_NEW}) 워크트리 동기화에 실패했습니다 — 로컬 변경과 충돌. 'git status' 확인 후 수동 동기화(git checkout -- <path>)가 필요합니다. 복구 참조: refs/rollback/${ID}" >&2
       exit 3
     fi
+
+    # (iii) 동기화 직후 결속 재검증 (재리뷰 P1(#7)): read-tree는 "그 시점의 ambient
+    # HEAD"가 가리키는 worktree에 적용된다. 사전 점검과 read-tree 사이에 같은 OID의
+    # 다른 branch로 전환되면 그 branch의 worktree/index를 바꾼 뒤에야 실패했다 (실측).
+    # Git은 "HEAD 결속 + worktree 갱신"의 원자 연산을 제공하지 않으므로, 결속이 깨진
+    # 것을 탐지하면 우리가 적용한 two-tree merge를 "역방향으로 되돌려" 그 worktree를
+    # 원상복구한다 — 엉뚱한 worktree를 바꾼 채로 끝나지 않는다.
+    if [ "$(git symbolic-ref -q HEAD 2>/dev/null || true)" != "$HEAD_REF" ]; then
+      _rb_undo_note="worktree 원상복구 완료"
+      git read-tree -m -u "$_NEW" "$HEAD_OID" 2>/dev/null || _rb_undo_note="worktree 원상복구 실패 — 'git status'로 직접 확인하세요"
+      git update-ref "refs/rollback/${ID}" "$_NEW" >/dev/null 2>&1 || true
+      _rb_cleanup_wt
+      trap - INT TERM HUP
+      echo "❌ 동기화 도중 checkout branch가 바뀌었습니다 (${HEAD_REF} → $(git symbolic-ref -q HEAD 2>/dev/null || echo detached)) — ${_rb_undo_note}. ref 공개는 완료됐습니다(${HEAD_REF} = ${_NEW}, ${POST_TAG} 삭제됨): ${HEAD_REF}를 checkout한 뒤 'git status'로 동기화하세요. 복구 참조: refs/rollback/${ID}" >&2
+      exit 3
+    fi
     _rb_cleanup_wt
 
-    # 종료 직전 최종 검증 (8라운드 후속 P1(#4)): 성공 보고의 근거는 "지금"의
-    # ref·checkout·tracked 정합이다 — 공개 후 끼어든 foreign commit이 있으면
-    # 성공 문구를 내지 않고 복구 참조를 삭제하지 않는다 (fail-closed).
+    # 종료 직전 최종 검증 (8라운드 후속 P1(#4) + 재리뷰 P1(#7)): 성공 보고의 근거는
+    # "지금"의 ref·checkout·tracked 정합이다. 복구 참조 삭제를 검증 "앞"에 두어,
+    # 검증 통과와 성공 출력 사이에 git 서브프로세스가 끼지 않게 한다 — 검증이
+    # 실패하면 복구 참조를 다시 남기고 성공 문구를 내지 않는다 (fail-closed).
+    git update-ref -d "refs/rollback/${ID}" >/dev/null 2>&1 || true
     _rb_final_fail() {
       git update-ref "refs/rollback/${ID}" "$_NEW" >/dev/null 2>&1 || true
       trap - INT TERM HUP
@@ -454,10 +494,11 @@ REF_TXN
       || _rb_final_fail "공개 후 ${HEAD_REF}에 예상 밖 커밋이 있습니다 (대상 ref ≠ 공개 결과)"
     [ "$(git symbolic-ref -q HEAD 2>/dev/null || true)" = "$HEAD_REF" ] \
       || _rb_final_fail "checkout branch가 공개 branch와 다릅니다"
+    [ "$(git rev-parse HEAD 2>/dev/null || true)" = "$_NEW" ] \
+      || _rb_final_fail "HEAD가 공개 결과와 다릅니다"
     [ -z "$(git status --porcelain --untracked-files=no)" ] \
       || _rb_final_fail "추적 파일이 clean하지 않습니다 (index/worktree 부정합)"
     trap - INT TERM HUP
-    git update-ref -d "refs/rollback/${ID}" >/dev/null 2>&1 || true
     echo "rolled back $ID by revert (owned commits only; history preserved; 미추적 산출물은 보존됨)"
     exit 0
   fi
