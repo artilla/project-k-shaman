@@ -498,8 +498,29 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   # 남아 이후 실행이 영구 거부됐다 (실측: 'pid unknown'). 이 trap은 아래에서 전체
   # trap(감사 로그 포함)으로 교체될 때까지의 임시 방어선이며, token이 내 것일 때만
   # lock을 치운다 (남의 lock 무접촉).
-  trap '[ "$(cat "$AM_LOCK/token" 2>/dev/null)" = "$AM_LOCK_TOKEN" ] && rm -rf "$AM_LOCK" 2>/dev/null; rm -rf "$AM_LOCK.acq.$$" 2>/dev/null || true' EXIT
-  trap '[ "$(cat "$AM_LOCK/token" 2>/dev/null)" = "$AM_LOCK_TOKEN" ] && rm -rf "$AM_LOCK" 2>/dev/null; rm -rf "$AM_LOCK.acq.$$" 2>/dev/null; exit 143' TERM INT HUP
+  #
+  # 3라운드 P1(#5): 해제는 check-then-delete가 아니다 — token 확인과 rm -rf 사이에
+  # canonical lock이 교체되면 새 foreign lock을 지웠다 (실측). _am_tw_release와
+  # 같은 계약으로: canonical을 내 소유의 임시 이름으로 rename한 "뒤" 이동된 객체의
+  # token을 재검증하고, 내 것일 때만 삭제하며, 어긋나면 원복한다.
+  _am_lock_release() {
+    local _rel="$AM_LOCK.rel.$$" _t
+    [ -d "$AM_LOCK" ] || return 0
+    _t="$(cat "$AM_LOCK/token" 2>/dev/null || true)"
+    [ "$_t" = "$AM_LOCK_TOKEN" ] || return 0        # foreign/무소유 — 무접촉
+    mv "$AM_LOCK" "$_rel" 2>/dev/null || return 0    # 이미 사라졌거나 남이 들고 있음
+    if [ "$(cat "$_rel/token" 2>/dev/null || true)" = "$AM_LOCK_TOKEN" ]; then
+      rm -rf "$_rel" 2>/dev/null || true
+      return 0
+    fi
+    # 읽기~rename 사이 교체됨(프로토콜 밖 개입) — 덮지 않고 원복한다.
+    if [ -e "$AM_LOCK" ] || ! mv "$_rel" "$AM_LOCK" 2>/dev/null; then
+      echo "[WARN] auto-merge lock 원복 실패 — 확인 필요: ${_rel}" >&2
+    fi
+    return 0
+  }
+  trap '_am_lock_release; rm -rf "$AM_LOCK.acq.$$" 2>/dev/null || true' EXIT
+  trap '_am_lock_release; rm -rf "$AM_LOCK.acq.$$" 2>/dev/null; exit 143' TERM INT HUP
   # 리뷰 11차 P1: token/pid 기록 실패를 획득 성공으로 처리하지 않는다 (rc=2로 구분,
   # 부분 생성물은 회수).
   # 재재리뷰 P1(#9): 획득은 pid·token이 "이미 담긴" 사전 구성 디렉터리의 원자
@@ -533,11 +554,14 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   fi
   if [ "$_acq_rc" -eq 1 ]; then
     _old_pid="$(cat "$AM_LOCK/pid" 2>/dev/null || true)"
-    # 재재리뷰 P1(#9): pid 파일이 없는 lock(구 형식/반쪽 잔존)은 영구 거부의
-    # 원인이었다 — 원자 rename 획득에서는 정상 lock에 항상 pid·token이 있으므로,
-    # pid 부재도 stale로 간주해 원자 회수한다 (회수 검증은 관찰값 결속 그대로).
-    if [ -z "$_old_pid" ] || ! kill -0 "$_old_pid" 2>/dev/null; then
-      echo "[WARN] stale auto-merge lock (pid ${_old_pid:-none} dead) — reclaiming atomically"
+    # 3라운드 P1(#1): pid 없는 lock은 "회수하지 않는다" — 기존 계약(동시 실행으로
+    # 간주, fail-closed 거부·무접촉)을 유지한다. 우리 프로토콜은 pid·token이 담긴
+    # 사전 구성 디렉터리의 원자 rename으로만 canonical lock을 만들므로 반쪽 lock을
+    # 스스로 남기지 않는다 — 남아 있다면 프로토콜 밖 산물이며, 이를 stale로 훔치면
+    # 알 수 없는 소유자와의 상호배제가 깨진다. stale 회수는 "pid가 있고 그 프로세스가
+    # 죽었음"이 관찰된 lock에만 적용한다.
+    if [ -n "$_old_pid" ] && ! kill -0 "$_old_pid" 2>/dev/null; then
+      echo "[WARN] stale auto-merge lock (pid ${_old_pid} dead) — reclaiming atomically"
       _stale_dir="${AM_LOCK}.reclaim.$$"
       if mv "$AM_LOCK" "$_stale_dir" 2>/dev/null; then
         # 리뷰 11차 P1: 회수를 "관찰한 그 lock"에 결속 — rename된 디렉터리의 pid가
@@ -716,40 +740,59 @@ if [ "$ELIGIBLE" -eq 0 ]; then
         echo "- '*.intent'는 원본을 건드리기 '전'에 기록된다 (time/merge/src/worktree/capture/dst)."
         echo "  복구 절차: dst에 payload가 있으면 그것을, 없고 capture에 있으면 그것을"
         echo "  <worktree>/<src>로 되돌린다 (no-clobber). 둘 다 없으면 원본은 원위치에 있다."
+        echo "  주의: dst는 0-byte 예약 placeholder일 수 있다 — capture에 내용이 있으면"
+        echo "  capture가 payload다 (placeholder는 삭제해도 된다)."
         echo "- intent는 payload가 원위치(원복 성공) 또는 manifest 행(격리 완료)으로 확정된"
         echo "  뒤에만 삭제된다 — capture 경로에 payload가 남아 있으면 intent도 남는다."
-        echo "- capture 경로는 파일별 고유(.amrb-bak.<pid>.<seq>.<rand>)다 — 같은 실행의"
-        echo "  다른 파일이 재사용하지 않는다."
+        echo "- manifest 행은 '완전한 5열 한 줄'만 유효하다 — committed 전환은 fsync +"
+        echo "  행 재확인(grep -Fx) 후에만 일어나므로, 깨진/부분 행은 무시하고 intent를"
+        echo "  따르라 (부분 행이 가리키는 dst가 없어도 payload는 intent 경로에 있다)."
+        echo "- capture 경로는 파일별 고유(.amrb-bak.<pid>.<seq>.<rand>)이며 noclobber로"
+        echo "  원자 예약된다 — dst도 같은 방식으로 예약된 placeholder를 rename이 대체한다."
         echo "- 행이 없고 intent만 있는 격리본 = 기록 전 중단 — 위 절차로 복원 후 intent 삭제."
         echo "- 보존: 해당 rollback의 감사 로그(ROLLED_BACK) 확인 후 수동 삭제 가능 (자동 삭제 없음)."
         echo "- rename 실패 시에는 행을 남기지 않는다 — 그 파일은 격리되지 않고 원위치에 있다."
       } > "$_rmd" 2>/dev/null; then
-      mv -f "$_rmd" "$1/README.md" 2>/dev/null || rm -f "$_rmd" 2>/dev/null || true
+      if ! mv -f "$_rmd" "$1/README.md" 2>/dev/null; then
+        echo "[WARN] quarantine README 갱신 실패: $1/README.md" >&2   # 3라운드 P2: 실패 무시 금지
+        rm -f "$_rmd" 2>/dev/null || true
+      fi
     else
+      echo "[WARN] quarantine README 작성 실패: $1/README.md" >&2
       rm -f "$_rmd" 2>/dev/null || true
     fi
     return 0
   }
-  # 재재리뷰 P2: 기록의 내구성 — manifest/intent는 복구의 유일한 근거이므로 기록
-  # 직후 디스크 반영을 시도한다 (sync <file> 미지원 환경은 전체 sync로 폴백,
-  # 실패해도 기록 자체는 유효 — best effort).
-  _am_fsync() { sync "$1" 2>/dev/null || sync 2>/dev/null || true; }
-  # 재재리뷰 P1(#10-b): capture(백업) 경로는 "파일별 고유"다 — 종전의 .amrb-bak.$$
-  # 하나를 같은 디렉터리의 모든 경로가 재사용해, 첫 파일에서 보존된 capture를 두
-  # 번째 파일의 mv가 덮어 내용이 유실됐다 (실측). pid+실행 내 시퀀스+RANDOM으로
-  # 자기충돌을 제거하고, 존재 검사로 외부 충돌도 회피한다.
+  # 재재리뷰 P2 → 3라운드 P2: 기록의 내구성 — manifest/intent는 복구의 유일한
+  # 근거이므로 기록 직후 디스크 반영을 확인한다 (sync <file> 미지원 환경은 전체
+  # sync로 폴백). 실패는 조용히 넘기지 않는다 — 경고를 남기고 rc를 전파해,
+  # 호출자가 committed 전환(intent 제거)을 하지 않게 한다.
+  _am_fsync() {
+    if sync "$1" 2>/dev/null || sync 2>/dev/null; then return 0; fi
+    echo "[WARN] fsync 실패 — 기록의 내구성을 확인할 수 없습니다: $1" >&2
+    return 1
+  }
+  # 재재리뷰 P1(#10-b) → 3라운드 P1(#6): capture(백업) 경로는 "파일별 고유"이며
+  # 존재 검사가 아니라 noclobber 생성으로 "원자 예약"한다 — 검사와 mv 사이에 생긴
+  # 동시 파일을 rename이 덮던 유실 제거 (실측). 예약 placeholder는 우리 소유이므로
+  # 이후 mv(rename)가 그것을 대체하는 것은 안전하다. 예약만 하고 capture하지 못한
+  # 경로는 _am_bak_unreserve로 해제한다.
   _AM_BAK=""
   _AM_BAK_SEQ=0
-  _am_bak_path() {  # $1=원경로 → _AM_BAK에 고유 capture 경로 설정
+  _am_bak_path() {  # $1=원경로 → _AM_BAK에 고유 capture 경로를 원자 예약
     local _d _i=0
     _d="$(dirname "$1")"
     while :; do
       _AM_BAK_SEQ=$((_AM_BAK_SEQ+1))
       _AM_BAK="$_d/.amrb-bak.$$.${_AM_BAK_SEQ}.${RANDOM}"
-      [ -e "$_AM_BAK" ] || return 0
+      if (set -C; : > "$_AM_BAK") 2>/dev/null; then return 0; fi
       _i=$((_i+1))
       [ "$_i" -ge 10 ] && { _AM_BAK=""; return 1; }
     done
+  }
+  _am_bak_unreserve() {  # $1=예약된 capture 경로 — payload가 담기기 "전"에만 호출
+    [ -n "$1" ] && rm -f "$1" 2>/dev/null
+    return 0
   }
   # ── quarantine 계약 (8라운드 후속 재리뷰 P1 #9·#10) ────────────────────────────
   # 순서: intent 기록 → 원본 capture(rename) → trash 격리(rename) → manifest → intent 제거
@@ -762,10 +805,11 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   # 불변식: manifest에 행이 있으면 그 격리 파일이 존재한다 (기록은 격리 rename 후).
   _AM_Q_DST=""
   _AM_Q_INTENT=""
+  _AM_Q_MOVED=0
   _am_intent_begin() {  # $1=capture(bak) 예정 경로, $2=원경로(worktree 상대)
     local _dir _wt _ts _i _d1 _d2 _cap
     _dir="$_AM_COMMON_TRASH"
-    _AM_Q_DST=""; _AM_Q_INTENT=""
+    _AM_Q_DST=""; _AM_Q_INTENT=""; _AM_Q_MOVED=0
     _am_trash_init "$_dir" || return 1
     # 리뷰 16차 P1-9(7차): device 검사는 fail-closed — stat이 한쪽이라도 실패하면
     # 빈 문자열끼리 "같다"로 판정되어 cross-volume mv(copy+unlink 강등, 늦은
@@ -781,39 +825,67 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     while :; do
       _AM_Q_DST="$_dir/$(date +%s).$$.${RANDOM}.$(basename "$2")"
       _AM_Q_INTENT="${_AM_Q_DST}.intent"
-      # noclobber 생성으로 목적지를 예약하고 동시에 복구 metadata를 기록한다.
+      # 3라운드 P1(#6): intent만이 아니라 "dst 자체"도 noclobber 생성으로 원자
+      # 예약한다 — intent 기록과 격리 mv 사이에 dst 경로에 생긴 동시 파일을
+      # rename이 덮던 유실 제거 (실측). placeholder는 우리 소유이므로 이후
+      # mv(rename)가 대체하는 것은 안전하다.
+      if ! (set -C; : > "$_AM_Q_DST") 2>/dev/null; then
+        _i=$((_i+1))
+        [ "$_i" -ge 10 ] && { _AM_Q_DST=""; _AM_Q_INTENT=""; return 1; }
+        continue
+      fi
       if (set -C; printf 'time\t%s\nmerge\t%s\nsrc\t%s\nworktree\t%s\ncapture\t%s\ndst\t%s\npid\t%s\nphase\tintent\n' \
             "$_ts" "${MERGE_COMMIT:-unknown}" "$2" "$_wt" "$_cap" "$_AM_Q_DST" "$$" > "$_AM_Q_INTENT") 2>/dev/null; then
-        _am_fsync "$_AM_Q_INTENT"   # 재재리뷰 P2: intent는 복구의 유일 근거 — 내구성 확보
+        if ! _am_fsync "$_AM_Q_INTENT"; then
+          # 재재리뷰 P2 → 3라운드 P2: 내구성 미확인 intent를 복구 근거로 삼지 않는다.
+          rm -f "$_AM_Q_INTENT" "$_AM_Q_DST" 2>/dev/null || true
+          _AM_Q_DST=""; _AM_Q_INTENT=""
+          return 1
+        fi
         return 0
       fi
+      rm -f "$_AM_Q_DST" 2>/dev/null || true   # intent 예약 실패 — dst 예약 해제 후 재시도
       _i=$((_i+1))
       [ "$_i" -ge 10 ] && { _AM_Q_DST=""; _AM_Q_INTENT=""; return 1; }
     done
   }
-  _am_intent_abort() {  # 원본을 원위치로 되돌린 뒤 호출 — 예약·복구 기록 해제
+  _am_intent_abort() {  # 원본(payload)이 원위치/capture로 확정된 뒤 호출 — 예약·복구 기록 해제
     [ -n "$_AM_Q_INTENT" ] && rm -f "$_AM_Q_INTENT" 2>/dev/null
-    _AM_Q_DST=""; _AM_Q_INTENT=""
+    # dst에 payload가 이동되지 않았다면 예약 placeholder를 해제한다.
+    [ "$_AM_Q_MOVED" -eq 0 ] && [ -n "$_AM_Q_DST" ] && rm -f "$_AM_Q_DST" 2>/dev/null
+    _AM_Q_DST=""; _AM_Q_INTENT=""; _AM_Q_MOVED=0
     return 0
   }
   _am_discard() {  # $1=캡처 파일, $2=원경로(기록용) — _am_intent_begin이 선행돼야 한다
-    local _dir _dst _ts _wt
+    local _dir _dst _ts _wt _row
     _dir="$_AM_COMMON_TRASH"
     _dst="$_AM_Q_DST"
     [ -n "$_dst" ] || return 1
+    # dst는 _am_intent_begin이 noclobber로 예약한 placeholder — rename이 그것을
+    # 대체한다 (3라운드 P1 #6: 예약 없이는 그 사이 생긴 동시 파일을 덮었다).
     if ! mv "$1" "$_dst" 2>/dev/null; then
       return 1   # 파일은 capture 경로 그대로 — 호출자가 원복·보존 (intent 유지)
     fi
+    _AM_Q_MOVED=1
     _ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
     _wt="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-    if ! printf '%s\t%s\t%s\t%s\t%s\n' "$_ts" \
-        "${MERGE_COMMIT:-unknown}" "$2" "$_dst" "$_wt" >> "$_dir/manifest.tsv" 2>/dev/null; then
+    # 3라운드 P1(#7): append가 "일부만" 쓰고 실패하면 깨진 행이 남는데 intent는
+    # 제거됐다 — 복구 불변식("행이 있으면 payload가 존재") 파괴. committed 전환의
+    # 근거는 append의 rc가 아니라 (a) fsync 성공 + (b) manifest에 이 행이 "완전한
+    # 한 줄"로 존재함(grep -Fx)의 재확인이다. 어느 하나라도 실패하면 intent를
+    # 유지한 채 실패로 처리한다 (깨진/부분 행은 README 계약상 무시된다 — 복구는
+    # intent가 근거).
+    _row="$(printf '%s\t%s\t%s\t%s\t%s' "$_ts" "${MERGE_COMMIT:-unknown}" "$2" "$_dst" "$_wt")"
+    if ! printf '%s\n' "$_row" >> "$_dir/manifest.tsv" 2>/dev/null \
+       || ! _am_fsync "$_dir/manifest.tsv" \
+       || ! grep -Fxq -- "$_row" "$_dir/manifest.tsv" 2>/dev/null; then
       # #10: 기록 실패의 되돌리기는 no-clobber여야 한다 — mv -f는 그 사이 capture
       # 경로에 생긴 동시 파일을 덮어 실제 내용을 유실시켰다 (실측). ln(목적지 존재
       # 시 실패)로 되돌리고, 불가하면 격리본을 intent와 함께 남겨 복구 근거를 보존한다.
       # 어느 쪽이든 "기록 실패 = 실패"다 (rollback 성공으로 취급하지 않는다).
       if ln "$_dst" "$1" 2>/dev/null; then
         rm -f "$_dst" 2>/dev/null || true
+        _AM_Q_MOVED=0
         return 1   # payload는 capture 경로로 복귀 — 호출자가 원경로로 원복한다
       fi
       # capture 경로가 동시 파일에 선점됐다 — 그 파일은 우리 것이 아니므로 손대지
@@ -822,11 +894,10 @@ if [ "$ELIGIBLE" -eq 0 ]; then
       echo "[WARN] quarantine manifest 기록 실패 — capture 경로(${1})가 동시 파일에 선점되어 되돌리지 않았습니다. 격리본을 intent와 함께 보존합니다: ${_dst} (${_dst}.intent 참조)" >&2
       return 2
     fi
-    _am_fsync "$_dir/manifest.tsv"   # 재재리뷰 P2: manifest 내구성 (기록 후, intent 제거 전)
-    # committed 전환: manifest 행 기록 완료 후 intent 제거 — intent가 남고 행이 없는
-    # 격리본 = 기록 전 중단(intent로 복구), 행이 있는 격리본 = committed.
+    # committed 전환: 행의 완전 기록·내구성 확인 후에만 intent 제거 — intent가 남고
+    # 행이 없는 격리본 = 기록 전 중단(intent로 복구), 행이 있는 격리본 = committed.
     rm -f "${_dst}.intent" 2>/dev/null || true
-    _AM_Q_DST=""; _AM_Q_INTENT=""
+    _AM_Q_DST=""; _AM_Q_INTENT=""; _AM_Q_MOVED=0
     return 0
   }
   # 리뷰 16차 P1-10(6차): 원복은 no-clobber — 캡처(rename)~원복 사이에 다른
@@ -982,15 +1053,15 @@ EOF
           if ! git cat-file blob "HEAD:${_p}" > "$_tmp" 2>/dev/null; then rm -f "$_tmp"; _rc=1; continue; fi
           _perm="$(stat -c '%a' "$_p" 2>/dev/null || stat -f '%Lp' "$_p" 2>/dev/null || true)"
           if [ -z "$_perm" ] || ! chmod "$_perm" "$_tmp" 2>/dev/null; then rm -f "$_tmp"; _rc=1; continue; fi
-          # 재재리뷰 P1(#10-b): capture 경로는 파일별 고유 — .amrb-bak.$$ 재사용이
-          # 첫 파일의 보존 capture를 두 번째 파일의 mv로 덮던 유실 제거.
+          # 재재리뷰 P1(#10-b) + 3라운드 P1(#6): capture 경로는 파일별 고유 + noclobber
+          # 원자 예약 — 검사~mv 사이의 동시 파일을 rename이 덮던 유실 제거.
           if ! _am_bak_path "$_p"; then rm -f "$_tmp"; _rc=1; continue; fi
           _bak="$_AM_BAK"
           # 8라운드 후속 재리뷰 P1(#9): 원본을 건드리기 "전"에 intent를 기록한다 —
           # capture 직후 KILL돼도 payload 위치를 가리키는 복구 근거가 디스크에 남는다.
           # (device 검사도 여기서 — 폐기 불가능한 상황이면 원본을 옮기지 않는다.)
-          if ! _am_intent_begin "$_bak" "$_p"; then rm -f "$_tmp"; _rc=1; continue; fi
-          if ! mv "$_p" "$_bak" 2>/dev/null; then _am_intent_abort; rm -f "$_tmp"; _rc=1; continue; fi
+          if ! _am_intent_begin "$_bak" "$_p"; then _am_bak_unreserve "$_bak"; rm -f "$_tmp"; _rc=1; continue; fi
+          if ! mv "$_p" "$_bak" 2>/dev/null; then _am_intent_abort; _am_bak_unreserve "$_bak"; rm -f "$_tmp"; _rc=1; continue; fi
           if [ "$(git hash-object -- "$_bak" 2>/dev/null)" != "$_want" ]; then
             # 재재리뷰 P1(#10-a): intent 해제는 원복이 "실제로 성공"했을 때만 —
             # 실패 시 payload가 capture 경로에 남으므로 intent가 그 위치를 계속
@@ -1020,12 +1091,12 @@ EOF
           # merge가 추가한 파일 — rename으로 원자 캡처 후, 내용이 merge blob일 때만
           # 폐기 (리뷰 15차 P1: ln~rm 창의 동시 atomic replace 삭제 제거).
           _want="$(git rev-parse -q --verify "${MERGE_COMMIT}:${_p}" 2>/dev/null)" || { _rc=1; continue; }
-          # #10-b: capture 경로는 파일별 고유
+          # #10-b + 3라운드 #6: capture 경로는 파일별 고유 + noclobber 원자 예약
           if ! _am_bak_path "$_p"; then _rc=1; continue; fi
           _bak="$_AM_BAK"
           # #9: intent를 원본 capture 전에 (device 검사 포함)
-          if ! _am_intent_begin "$_bak" "$_p"; then _rc=1; continue; fi
-          if ! mv "$_p" "$_bak" 2>/dev/null; then _am_intent_abort; _rc=1; continue; fi
+          if ! _am_intent_begin "$_bak" "$_p"; then _am_bak_unreserve "$_bak"; _rc=1; continue; fi
+          if ! mv "$_p" "$_bak" 2>/dev/null; then _am_intent_abort; _am_bak_unreserve "$_bak"; _rc=1; continue; fi
           if [ "$(git hash-object -- "$_bak" 2>/dev/null)" != "$_want" ]; then
             # #10-a: 원복 성공 시에만 intent 해제 — 실패 시 capture payload의 복구
             # 매핑(intent)을 보존한다.
@@ -1092,7 +1163,7 @@ EOF
   # INTERRUPTED:<phase>를 남겨 병합 잔존 여부를 감사 로그에서 알 수 있게 한다.
   # 리뷰 10차 P1: lock 해제는 token이 자신일 때만 (남의 lock 삭제 금지).
   AM_PHASE="pre-merge"
-  trap '_am_release_transients; [ "$AM_PHASE" != "done" ] && _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "INTERRUPTED:${AM_PHASE}"; [ "$(cat "$AM_LOCK/token" 2>/dev/null)" = "$AM_LOCK_TOKEN" ] && rm -rf "$AM_LOCK" 2>/dev/null; rm -rf "$AM_LOCK.acq.$$" 2>/dev/null || true' EXIT
+  trap '_am_release_transients; [ "$AM_PHASE" != "done" ] && _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "INTERRUPTED:${AM_PHASE}"; _am_lock_release; rm -rf "$AM_LOCK.acq.$$" 2>/dev/null || true' EXIT
   # 리뷰 11차 P1: TERM/INT/HUP 시 실행 중인 post-check 자식 그룹을 먼저 종료·reap한
   # 뒤에야 EXIT trap이 lock을 해제한다 (자식이 lock 해제 후에도 실행되던 문제).
   AM_CHECK_PID=""
