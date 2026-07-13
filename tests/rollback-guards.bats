@@ -559,3 +559,160 @@ HOOK
   [ "$(git -C "$repo" rev-list --count 'cycle/T200-pre..HEAD')" = "2" ]
   [ "$(git -C "$repo" log --format=%s | grep -c 'Revert')" = "1" ]
 }
+
+@test "R21: branch switch at the ref-transaction call -> checkout binding refuses the wrong worktree (symref-verify or post-txn recheck)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 8라운드 후속 P1(#1): branch CAS만으로는 "같은 OID의 다른 branch 전환"을 잡지
+  # 못했다 — 고정 branch는 rollback되는데 현재 checkout(other)의 worktree가
+  # rollback 내용으로 바뀌고 rc=0이었다 (실측). git>=2.46은 transaction 안의
+  # symref-verify가 공개 자체를 거부하고, 구 git은 공개 직후 결속 재검증이
+  # worktree 변경을 차단하고 rc!=0으로 정직 보고한다.
+  git -C "$repo" branch other       # master와 같은 OID
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin7"
+  cat > "$repo/gbin7/git" <<WRAP
+#!/usr/bin/env bash
+if [ "\$1" = "update-ref" ] && [ "\$2" = "--stdin" ]; then
+  c=0; [ -f "$repo/.r21" ] && c=\$(cat "$repo/.r21"); c=\$((c+1)); echo \$c > "$repo/.r21"
+  if [ "\$c" = "2" ]; then "$realgit" -C "$repo" symbolic-ref HEAD refs/heads/other; fi
+fi
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin7/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin7:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  # 어떤 git 버전이든: 현재 checkout(other)의 worktree는 절대 바뀌지 않는다
+  grep -q "v2" "$repo/file.txt"
+  [ -z "$(git -C "$repo" status --porcelain --untracked-files=no)" ]
+  run git -C "$repo" log --format=%s refs/heads/other
+  [[ "$output" != *"Revert"* ]]
+  if printf 'start\nsymref-verify HEAD refs/heads/other\nabort\n' | git -C "$repo" update-ref --stdin >/dev/null 2>&1; then
+    # symref-verify 지원: transaction이 원자 거부 — master도 무변경, 태그 생존
+    run git -C "$repo" log --format=%s refs/heads/master
+    [[ "$output" != *"Revert"* ]]
+    git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+  else
+    # 구 git fallback: 고정 branch 공개는 완료 — rc!=0 + 결속 실패를 정직 보고,
+    # 복구 참조 보존
+    [[ "$output" == *"결속되지"* ]]
+    git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
+  fi
+}
+
+@test "R22: TERM while a signal-ignoring read-tree child runs -> KILL escalation, published state reported from real refs (rc=130)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 8라운드 후속 P1(#2·#5): (a) 공개 직후의 신호가 shell boolean 미대입 창에서
+  # "메인 무변경"으로 오판됐다 — 판정은 실제 ref 상태로 한다. (b) read-tree
+  # child가 TERM을 무시하면 프로세스가 계속 살았다 — 별도 프로세스 그룹 +
+  # bounded 대기 + KILL + reap.
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin8"
+  cat > "$repo/gbin8/git" <<WRAP
+#!/usr/bin/env bash
+case " \$* " in *" read-tree "*)
+  trap '' TERM
+  kill -TERM \$PPID 2>/dev/null
+  sleep 30
+  exit 0
+;; esac
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin8/git"
+
+  local t0 t1
+  t0="$(date +%s)"
+  run bash -c 'cd "$1" && PATH="$1/gbin8:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  t1="$(date +%s)"
+  [ "$status" -eq 130 ]
+  # TERM 무시 child에 붙잡히지 않았다 (bounded reap — 30초 sleep보다 훨씬 이름)
+  [ $(( t1 - t0 )) -lt 20 ]
+  # 공개 여부는 실제 ref 상태로 정직 보고: branch는 rollback 결과, 태그 삭제
+  [[ "$output" == *"공개는 완료"* ]]
+  [[ "$output" == *"refs/rollback/T200"* ]]
+  run git -C "$repo" log --format=%s -1 refs/heads/master
+  [[ "$output" == *"Revert"* ]]
+  ! git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+  git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
+}
+
+@test "R23: revert commit replaced by a same-count arbitrary commit -> per-commit parent/patch-id verification refuses" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 8라운드 후속 P1(#3): 개수만 세는 검증은 정상 revert를 같은 개수의 임의
+  # 커밋으로 교체해도 통과시켰다 (실측: 임의 파일·foreign commit 공개). 이제
+  # 생성 직후 커밋별로 (1) parent 체인 (2) 소유 커밋의 역방향 patch-id를 검증한다.
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin9"
+  cat > "$repo/gbin9/git" <<'WRAP'
+#!/usr/bin/env bash
+REAL=__REALGIT__
+wt=""; prev=""
+for a in "$@"; do [ "$prev" = "-C" ] && wt="$a"; prev="$a"; done
+case " $* " in *" revert "*) is_r=1;; *) is_r=0;; esac
+case " $* " in *" --abort "*) is_r=0;; esac
+if [ "$is_r" = 1 ] && [ -n "$wt" ]; then
+  "$REAL" "$@"; rc=$?
+  if [ $rc -eq 0 ] && [ ! -f "$wt/.r23" ]; then
+    touch "$wt/.r23"
+    "$REAL" -C "$wt" reset -q --hard HEAD^
+    echo evil > "$wt/evil.txt"
+    "$REAL" -C "$wt" add evil.txt
+    "$REAL" -C "$wt" -c user.email=e@e -c user.name=E commit -qm "evil: same-count replacement" >/dev/null 2>&1
+  fi
+  exit $rc
+fi
+exec "$REAL" "$@"
+WRAP
+  sed -i '' "s|__REALGIT__|$realgit|" "$repo/gbin9/git" 2>/dev/null \
+    || sed -i "s|__REALGIT__|$realgit|" "$repo/gbin9/git"
+  chmod +x "$repo/gbin9/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin9:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"patch-id 불일치"* || "$output" == *"검증에 실패"* ]]
+  # 아무것도 공개되지 않았다 — 임의 커밋·파일 없음, 태그 생존
+  grep -q "v2" "$repo/file.txt"
+  [ ! -f "$repo/evil.txt" ]
+  run git -C "$repo" log --format=%s
+  [[ "$output" != *"evil"* ]]
+  git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+}
+
+@test "R24: foreign commit lands after publish, before worktree sync -> final verification withholds success (recovery ref kept)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 8라운드 후속 P1(#4): 공개(ref transaction) 후 branch에 foreign commit이
+  # 끼어들어도 read-tree 뒤 rc=0이었다 — HEAD에 foreign 포함 + tracked dirty를
+  # 성공으로 보고. 이제 종료 직전 "대상 ref == 공개 결과, checkout 정합,
+  # tracked clean"을 전부 확인하고, 실패 시 성공 문구를 내지 않는다.
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin10"
+  cat > "$repo/gbin10/git" <<WRAP
+#!/usr/bin/env bash
+case " \$* " in *" read-tree "*)
+  if [ ! -f "$repo/.r24" ]; then
+    touch "$repo/.r24"
+    "$realgit" -C "$repo" -c user.email=f@f -c user.name=F commit -q --allow-empty -m "foreign: post-publish"
+  fi
+;; esac
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin10/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin10:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"rolled back"* ]]
+  [[ "$output" == *"예상 밖 커밋"* ]]
+  # 복구 참조는 삭제되지 않았다 — 상태 확인·수동 정리를 위한 근거
+  git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
+  # foreign commit은 보존된다 (파괴 없음)
+  run git -C "$repo" log --format=%s -1
+  [[ "$output" == *"foreign: post-publish"* ]]
+}
