@@ -46,6 +46,94 @@ in_isolated_worktree() {
 
 TAG="cycle/${ID}-pre"
 if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+  # ── 3라운드 P1(#3) → 4라운드 P1(#5·#6): 시스템 writer lock ──────────────────────
+  # clean 판정부터 reset/revert 수행·최종 검증·성공 보고까지 "전 과정"을 시스템
+  # writer 프로토콜(state/ticket_write.lock.d — ticket_*.sh·auto_merge와 동일)
+  # 아래에서 수행한다. 4라운드 #6: reset 경로도 이 lock 없이는 clean 검사~
+  # reset --hard 사이에 들어온 tracked 변경을 파괴할 수 있었다 — 두 경로 모두
+  # 획득 후에만 진행한다.
+  # 한계(정직한 범위): lock은 프로토콜을 지키는 writer만 배제한다. 프로토콜 밖
+  # raw git 개입은 어떤 lock으로도 막을 수 없다 — 그 경우 최종 검증(fail-closed)이
+  # 성공 보고를 막는 것이 최선이며, 검증의 마지막 관측과 종료 사이의 잔여 창은
+  # 원리적으로 제거 불가능하다 (아래 최종 검증 주석 참조).
+  # 해제 계약(4라운드 #4·#6): rename 기반 해제는 확인~rename 창의 교체에서 foreign
+  # lock을 canonical 밖으로 이동시켰다 — inode(-ef) 결속 + 내용물 제거(token→pid→
+  # rmdir)로 교체한다. canonical은 rmdir 직전까지 점유 상태이므로 foreign lock이
+  # canonical을 떠나는 순간이 없고, 극단 창의 결과도 '누수(fail-closed)'이지
+  # 상호배제 공백이 아니다. EXIT trap이 모든 종료 경로의 해제를 덮는다.
+  _RB_WL="state/ticket_write.lock.d"
+  _RB_WL_TOKEN=""
+  _rb_wl_acquire() {
+    local _i=0 _p _pt _mp _mt _pre="$_RB_WL.acq.$$" _own="$_RB_WL.own.$$"
+    mkdir -p state 2>/dev/null || true
+    _rb_wl_mkpre() {
+      rm -rf "$_pre" 2>/dev/null || true
+      rm -f "$_own" 2>/dev/null || true
+      mkdir "$_pre" 2>/dev/null || return 1
+      _RB_WL_TOKEN="rb.$$.${RANDOM}${RANDOM}${RANDOM}"
+      echo "$$" > "$_pre/pid" 2>/dev/null || { rm -rf "$_pre" 2>/dev/null || true; return 1; }
+      printf '%s' "$_RB_WL_TOKEN" > "$_pre/token" 2>/dev/null || { rm -rf "$_pre" 2>/dev/null || true; return 1; }
+      # 소유 증거는 내용이 아니라 inode — rename 전에 하드링크 보관 (4라운드 #4).
+      ln "$_pre/token" "$_own" 2>/dev/null || { rm -rf "$_pre" 2>/dev/null || true; return 1; }
+    }
+    _rb_wl_mkpre || return 1
+    while :; do
+      if [ ! -e "$_RB_WL" ] && mv "$_pre" "$_RB_WL" 2>/dev/null; then
+        # rename 경합으로 기존 lock "안"에 중첩됐을 수 있다 — inode+pid+비중첩으로 확정.
+        if [ "$_RB_WL/token" -ef "$_own" ] \
+           && [ "$(cat "$_RB_WL/pid" 2>/dev/null || true)" = "$$" ] \
+           && [ ! -d "$_RB_WL/${_pre##*/}" ]; then
+          return 0
+        fi
+        rm -rf "$_RB_WL/${_pre##*/}" 2>/dev/null || true
+        _rb_wl_mkpre || return 1
+      fi
+      _p="$(cat "$_RB_WL/pid" 2>/dev/null || true)"
+      _pt="$(cat "$_RB_WL/token" 2>/dev/null || true)"
+      if [ -n "$_p" ] && ! kill -0 "$_p" 2>/dev/null; then
+        # stale 회수는 관찰한 pid+token "전체 identity"에 결속 (4라운드 #4 —
+        # 같은 dead pid를 담은 새 lock을 stale로 오인하지 않는다).
+        if mv "$_RB_WL" "$_RB_WL.reclaim.$$" 2>/dev/null; then
+          _mp="$(cat "$_RB_WL.reclaim.$$/pid" 2>/dev/null || true)"
+          _mt="$(cat "$_RB_WL.reclaim.$$/token" 2>/dev/null || true)"
+          if [ "$_mp" = "$_p" ] && [ "$_mt" = "$_pt" ]; then
+            rm -rf "$_RB_WL.reclaim.$$" 2>/dev/null || true
+            continue
+          fi
+          # 원복은 canonical이 비어 있을 때만 — 재점유 시 중첩(mv가 디렉터리 안으로
+          # 들어감) 금지, 이동본 보존·고지 (4라운드 #6).
+          if [ ! -e "$_RB_WL" ] && mv "$_RB_WL.reclaim.$$" "$_RB_WL" 2>/dev/null; then
+            :
+          else
+            echo "⚠️  writer lock 회수 원복 불가(canonical 재점유) — 이동본 보존: $_RB_WL.reclaim.$$" >&2
+            rm -rf "$_pre" 2>/dev/null || true
+            rm -f "$_own" 2>/dev/null || true
+            return 1
+          fi
+        fi
+      fi
+      _i=$((_i+1))
+      if [ "$_i" -ge 100 ]; then rm -rf "$_pre" 2>/dev/null || true; rm -f "$_own" 2>/dev/null || true; return 1; fi
+      sleep 0.1
+    done
+  }
+  _rb_wl_release() {
+    local _own="$_RB_WL.own.$$"
+    rm -rf "$_RB_WL.acq.$$" 2>/dev/null || true
+    if [ -f "$_own" ] && [ "$_RB_WL/token" -ef "$_own" ]; then
+      rm -f "$_RB_WL/token" "$_RB_WL/pid" 2>/dev/null || true
+      rmdir "$_RB_WL" 2>/dev/null \
+        || echo "⚠️  writer lock 디렉터리 정리 실패(예상 밖 잔여물) — 확인 필요: ${_RB_WL}" >&2
+    fi
+    rm -f "$_own" 2>/dev/null || true
+    return 0
+  }
+  trap '_rb_wl_release' EXIT
+  if ! _rb_wl_acquire; then
+    echo "❌ 시스템 writer lock(${_RB_WL}) 획득 실패 — clean 판정과 rollback을 직렬화할 수 없어 중단합니다 (fail-closed)." >&2
+    exit 3
+  fi
+
   # 가드 1: 추적 파일 미커밋 변경 → 거부.
   # 재리뷰 P1(#5): git status의 "실패"(rc≠0, 빈 출력)를 clean으로 오인하지 않는다 —
   # rc를 버리고 출력만 비교하던 세 지점(초기·공개 전·최종) 모두 rc 검사가 선행한다.
@@ -103,7 +191,12 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   # 가드 2·3: 메인 워크트리는 명시적 확인 필요 (격리 워크트리는 즉시 실행).
   if ! in_isolated_worktree; then
     if [ "$MODE_ROLLBACK" = "reset" ]; then
-      UNTRACKED="$(git clean -nd 2>/dev/null || true)"
+      # 4라운드 P2: clean preview 실패(rc≠0)를 '지워질 것 없음'으로 오인하지 않는다 —
+      # 미리보기 없이 파괴적 clean을 진행할 수 없다 (fail-closed).
+      if ! UNTRACKED="$(git clean -nd 2>/dev/null)"; then
+        echo "❌ git clean -nd(미리보기) 실패 — 삭제 대상을 확인할 수 없어 중단합니다 (fail-closed)." >&2
+        exit 3
+      fi
       if [ -n "$UNTRACKED" ]; then
         echo "⚠️  clean -fd로 삭제될 미추적 파일/디렉터리:" >&2
         printf '%s\n' "$UNTRACKED" >&2
@@ -322,14 +415,14 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
       local _cur
       _cur="$(git rev-parse -q --verify "$HEAD_REF" 2>/dev/null || true)"
       if [ -n "$_NEW" ] && [ "$_cur" = "$_NEW" ]; then
-        _rb_save_recovery
+        _rb_save_recovery || true
         echo "❌ 신호로 중단됨 — ref 공개는 이미 완료됐습니다(${HEAD_REF} = ${_NEW}, ${POST_TAG} 삭제됨). index/worktree는 이전 상태일 수 있습니다: 'git status' 확인 후 로컬 변경이 없으면 'git reset --hard HEAD'로 동기화하세요. $(_rb_rref_note)" >&2
       else
         # 재리뷰 P2: 메시지가 실제 tip을 보고한다 — 관측값과 다른 "무변경" 단정 금지.
         if [ "$_cur" = "$HEAD_OID" ] || [ -z "$_cur" ]; then
           echo "❌ 신호로 중단됨 — 격리 worktree만 정리했습니다 (메인 워크트리·index·HEAD는 변경되지 않았습니다)." >&2
         else
-          _rb_save_recovery
+          _rb_save_recovery || true
           echo "❌ 신호로 중단됨 — ${HEAD_REF}의 현재 tip은 ${_cur}입니다 (검증 시점 ${HEAD_OID}, 계산 결과 ${_NEW:-없음}): 'git status'와 ref 상태를 직접 확인하세요.$([ -n "$_NEW" ] && echo " $(_rb_rref_note)")" >&2
         fi
       fi
@@ -412,21 +505,21 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     # 등식이 성립하면 HEAD_OID.._NEW 전체가 위 루프에서 커밋별로 검증한 그
     # 체인이다 — 루프 이후의 교체·삽입은 여기서 탐지된다.
     if [ "$_NEW" != "$_rb_prev" ]; then
-      _rb_save_recovery
+      _rb_save_recovery || true
       _rb_cleanup_wt
       trap - INT TERM HUP
       echo "❌ 격리 rollback의 최종 HEAD(${_NEW})가 검증된 체인 종점(${_rb_prev})과 다릅니다 — 외부 개입, 공개하지 않았습니다 (fail-closed)." >&2
-      echo "   계산 결과는 ${_RB_RREF} 에 보존했습니다." >&2
+      echo "   $(_rb_rref_note)" >&2
       exit 3
     fi
     # 개수 검증은 유지한다 — 체인 검증의 이중 방어 (hook 무력화 포함 삼중).
     _rb_cnt="$(git rev-list --count "${HEAD_OID}..${_NEW}" 2>/dev/null || echo -1)"
     if [ "$_rb_cnt" != "$_rb_made" ]; then
-      _rb_save_recovery
+      _rb_save_recovery || true
       _rb_cleanup_wt
       trap - INT TERM HUP
       echo "❌ 격리 rollback 결과에 예상 밖 커밋이 있습니다 (revert ${_rb_made}건, 실제 ${_rb_cnt}건 — hook 등 외부 개입) — 공개하지 않았습니다 (fail-closed)." >&2
-      echo "   계산 결과는 ${_RB_RREF} 에 보존했습니다." >&2
+      echo "   $(_rb_rref_note)" >&2
       exit 3
     fi
 
@@ -435,83 +528,13 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     #   같은 경로 포함), (3) post 태그가 해석 시점의 tag object 그대로(태그가 새
     #   cycle로 이동했으면 이 결과는 낡은 것 — 경고가 아니라 거부, 7차 P1-6).
     _rb_publish_fail() {
-      _rb_save_recovery
+      _rb_save_recovery || true
       _rb_cleanup_wt
       trap - INT TERM HUP
       echo "❌ $1 — 공개하지 않았습니다 (fail-closed; 메인 워크트리·index 무변경)." >&2
-      echo "   계산된 롤백 결과는 ${_RB_RREF} 에 보존했습니다 — 검토 후 수동 병합하거나 재실행하세요." >&2
+      echo "   $(_rb_rref_note) — 검토 후 수동 병합하거나 재실행하세요." >&2
       exit 3
     }
-    # ── 3라운드 P1(#3): 성공 계약은 "검증 반복"이 아니라 writer lock이다 ─────────
-    # 공개(ref transaction)부터 worktree 동기화·최종 검증·성공 보고까지를 시스템
-    # writer 프로토콜(state/ticket_write.lock.d — ticket_*.sh·auto_merge와 동일)
-    # 아래에서 수행한다: 프로토콜을 지키는 writer는 이 창에 개입할 수 없으므로
-    # "검증 직후 커밋 주입 → rc=0" 시나리오가 계약상 배제된다. 프로토콜 밖 raw git
-    # 개입은 어떤 lock으로도 막을 수 없다 — 그 경우에도 최종 검증이 성공 문구를
-    # 막고 복구 참조를 남긴다 (fail-closed 유지). 해제는 rename→token 재검증
-    # 방식(check-then-delete 금지)이고, EXIT trap이 모든 종료 경로를 덮는다.
-    _RB_WL="state/ticket_write.lock.d"
-    _RB_WL_TOKEN=""
-    _rb_wl_acquire() {
-      local _i=0 _p _mp _pre="$_RB_WL.acq.$$"
-      mkdir -p state 2>/dev/null || true
-      _rb_wl_mkpre() {
-        rm -rf "$_pre" 2>/dev/null || true
-        mkdir "$_pre" 2>/dev/null || return 1
-        _RB_WL_TOKEN="rb.$$.${RANDOM}${RANDOM}${RANDOM}"
-        echo "$$" > "$_pre/pid" 2>/dev/null || { rm -rf "$_pre" 2>/dev/null || true; return 1; }
-        printf '%s' "$_RB_WL_TOKEN" > "$_pre/token" 2>/dev/null || { rm -rf "$_pre" 2>/dev/null || true; return 1; }
-      }
-      _rb_wl_mkpre || return 1
-      while :; do
-        if [ ! -e "$_RB_WL" ] && mv "$_pre" "$_RB_WL" 2>/dev/null; then
-          # rename 경합으로 기존 lock "안"에 중첩됐을 수 있다 — 소유는 내용으로만 확정.
-          if [ "$(cat "$_RB_WL/pid" 2>/dev/null || true)" = "$$" ] \
-             && [ "$(cat "$_RB_WL/token" 2>/dev/null || true)" = "$_RB_WL_TOKEN" ] \
-             && [ ! -d "$_RB_WL/${_pre##*/}" ]; then
-            return 0
-          fi
-          rm -rf "$_RB_WL/${_pre##*/}" 2>/dev/null || true
-          _rb_wl_mkpre || return 1
-        fi
-        _p="$(cat "$_RB_WL/pid" 2>/dev/null || true)"
-        if [ -n "$_p" ] && ! kill -0 "$_p" 2>/dev/null; then
-          # stale 회수는 관찰한 pid에 결속된 원자 rename으로 (pid 없는 lock은 무접촉)
-          if mv "$_RB_WL" "$_RB_WL.reclaim.$$" 2>/dev/null; then
-            _mp="$(cat "$_RB_WL.reclaim.$$/pid" 2>/dev/null || true)"
-            if [ "$_mp" = "$_p" ]; then
-              rm -rf "$_RB_WL.reclaim.$$" 2>/dev/null || true
-              continue
-            fi
-            mv "$_RB_WL.reclaim.$$" "$_RB_WL" 2>/dev/null || { rm -rf "$_pre" 2>/dev/null || true; return 1; }
-          fi
-        fi
-        _i=$((_i+1))
-        if [ "$_i" -ge 100 ]; then rm -rf "$_pre" 2>/dev/null || true; return 1; fi
-        sleep 0.1
-      done
-    }
-    _rb_wl_release() {
-      local _rel="$_RB_WL.rel.$$" _t
-      rm -rf "$_RB_WL.acq.$$" 2>/dev/null || true
-      [ -n "${_RB_WL_TOKEN:-}" ] || return 0          # 획득한 적 없음 — 무접촉
-      [ -d "$_RB_WL" ] || return 0
-      _t="$(cat "$_RB_WL/token" 2>/dev/null || true)"
-      [ "$_t" = "$_RB_WL_TOKEN" ] || return 0          # foreign lock — 무접촉
-      mv "$_RB_WL" "$_rel" 2>/dev/null || return 0
-      if [ "$(cat "$_rel/token" 2>/dev/null || true)" = "$_RB_WL_TOKEN" ]; then
-        rm -rf "$_rel" 2>/dev/null || true
-        _RB_WL_TOKEN=""
-        return 0
-      fi
-      if [ -e "$_RB_WL" ] || ! mv "$_rel" "$_RB_WL" 2>/dev/null; then
-        echo "⚠️  writer lock 원복 실패 — 확인 필요: ${_rel}" >&2
-      fi
-      return 0
-    }
-    trap '_rb_wl_release' EXIT
-    _rb_wl_acquire || _rb_publish_fail "시스템 writer lock(${_RB_WL}) 획득 실패 — 공개 창을 직렬화할 수 없습니다"
-
     # 공개 전 사전 점검 (빠른 실패용 — "판정"은 아래 ref transaction의 CAS다):
     #   여전히 같은 branch 위에 있고, 추적 파일이 clean해야 한다.
     [ "$(git symbolic-ref -q HEAD || true)" = "$HEAD_REF" ] \
@@ -572,7 +595,7 @@ REF_TXN
     if [ "$(git symbolic-ref -q HEAD 2>/dev/null || true)" != "$HEAD_REF" ] \
        || [ "$(git rev-parse -q --verify "$HEAD_REF" 2>/dev/null || true)" != "$_NEW" ] \
        || [ "$(git rev-parse HEAD 2>/dev/null || true)" != "$_NEW" ]; then
-      _rb_save_recovery
+      _rb_save_recovery || true
       _rb_cleanup_wt
       trap - INT TERM HUP
       echo "❌ ref 공개는 완료됐지만(${HEAD_REF} = ${_NEW}, ${POST_TAG} 삭제됨) 현재 checkout이 공개 branch와 결속되지 않습니다 — worktree를 건드리지 않았습니다. 해당 branch에서 'git status' 확인 후 동기화하세요. $(_rb_rref_note)" >&2
@@ -603,7 +626,7 @@ REF_TXN
         wait "$_rt_pid" 2>/dev/null || true
         _rb_cleanup_wt
         trap - INT TERM HUP
-        _rb_save_recovery
+        _rb_save_recovery || true
         # 재리뷰 P2: 신호 메시지는 "지금 관측한 tip"을 함께 보고한다 — 공개 시점
         # 값만 단정하지 않는다.
         _rb_cur_now="$(git rev-parse -q --verify "$HEAD_REF" 2>/dev/null || true)"
@@ -616,7 +639,7 @@ REF_TXN
     if [ "$_rt_rc" -ne 0 ]; then
       _rb_cleanup_wt
       trap - INT TERM HUP
-      _rb_save_recovery
+      _rb_save_recovery || true
       echo "❌ ref 공개는 완료됐지만(${HEAD_REF} = ${_NEW}) 워크트리 동기화에 실패했습니다 — 로컬 변경과 충돌. 'git status' 확인 후 수동 동기화(git checkout -- <path>)가 필요합니다. $(_rb_rref_note)" >&2
       exit 3
     fi
@@ -640,7 +663,7 @@ REF_TXN
           _rb_undo_note="worktree 원상복구를 시도했으나 잔여 변경이 남았습니다 — 'git status'로 직접 확인하세요"
         fi
       fi
-      _rb_save_recovery
+      _rb_save_recovery || true
       _rb_cleanup_wt
       trap - INT TERM HUP
       echo "❌ 동기화 도중 checkout branch가 바뀌었습니다 (${HEAD_REF} → $(git symbolic-ref -q HEAD 2>/dev/null || echo detached)) — ${_rb_undo_note}. ref 공개는 완료됐습니다(${HEAD_REF} = ${_NEW}, ${POST_TAG} 삭제됨): ${HEAD_REF}를 checkout한 뒤 'git status'로 동기화하세요. $(_rb_rref_note)" >&2
@@ -657,25 +680,35 @@ REF_TXN
       echo "ℹ️  선행 복구 참조 refs/rollback/${ID}(${_rb_stale})가 있습니다 — 이 실행은 삭제하지 않고 보존합니다. 해당 실행의 복구가 끝났는지 확인 후 수동 삭제하세요." >&2
     fi
 
-    # 종료 직전 최종 검증 (8라운드 후속 P1(#4) + 3라운드 P1(#3)): 성공 보고의
-    # 근거는 "writer lock 아래에서 관측한" ref·checkout·tracked 정합이다 — lock을
-    # 쥔 동안 프로토콜 writer는 개입할 수 없으므로 검증~출력 창의 주입은 계약상
-    # 배제되고, 프로토콜 밖 개입은 이 검증이 성공 문구를 막는다 (fail-closed).
-    # 성공 문구는 공개 시점 값 ${_NEW}를 명시한다. lock 해제는 성공 출력 "이후"
-    # (EXIT trap)다.
+    # 종료 직전 최종 검증 (8라운드 후속 P1(#4) + 3라운드 P1(#3) → 4라운드 P1(#5)):
+    # 성공 보고의 근거는 "writer lock 아래에서 관측한" ref·checkout·tracked 정합이다.
+    #   - 프로토콜 writer는 lock으로 배제된다 — 검증~출력 창의 규약 내 주입은
+    #     계약상 불가능하다.
+    #   - 프로토콜 밖 raw git 개입은 lock으로도, 어떤 검증 반복으로도 "차단"할 수
+    #     없다 (마지막 관측과 exit 사이의 창은 원리적으로 잔존). 이 검증이 보증하는
+    #     것은 정확히 "마지막 관측 시점의 정합"이며, 성공 문구도 그 관측값(${_NEW})
+    #     만을 주장한다.
+    #   - 4라운드 #5: 관측 순서가 악용되지 않도록 tip 재확인을 "마지막"에 둔다 —
+    #     종전에는 status가 마지막이라, status 응답과 동시에 주입된 커밋이 어떤
+    #     검사에도 걸리지 않았다 (실측). 이제 status "이후" ref·HEAD를 다시 읽는다.
     _rb_final_fail() {
-      _rb_save_recovery
+      _rb_save_recovery || true
       trap - INT TERM HUP
       echo "❌ $1 — 공개(${HEAD_REF} = ${_NEW})는 수행됐지만 성공으로 보고하지 않습니다. 'git status'로 상태를 확인하세요. $(_rb_rref_note)" >&2
       exit 3
     }
     _rb_final_verify() {
-      [ "$(git rev-parse -q --verify "$HEAD_REF" 2>/dev/null || true)" = "$_NEW" ] || return 1
       [ "$(git symbolic-ref -q HEAD 2>/dev/null || true)" = "$HEAD_REF" ] || return 2
+      [ "$(git rev-parse -q --verify "$HEAD_REF" 2>/dev/null || true)" = "$_NEW" ] || return 1
       [ "$(git rev-parse HEAD 2>/dev/null || true)" = "$_NEW" ] || return 3
       # 재리뷰 P1(#5): status 실패는 clean이 아니다 — 판정 불가로 실패.
       if ! _rb_fst="$(git status --porcelain --untracked-files=no 2>/dev/null)"; then return 4; fi
       [ -z "$_rb_fst" ] || return 5
+      # 4라운드 P1(#5): status가 "마지막 관측"이면 status 응답과 동시에 주입된
+      # 커밋이 어떤 검사에도 걸리지 않았다 (실측) — tip 정합을 status "이후"에
+      # 한 번 더 재관측한다.
+      [ "$(git rev-parse -q --verify "$HEAD_REF" 2>/dev/null || true)" = "$_NEW" ] || return 1
+      [ "$(git rev-parse HEAD 2>/dev/null || true)" = "$_NEW" ] || return 3
       return 0
     }
     _rb_v=0; _rb_final_verify || _rb_v=$?
@@ -695,7 +728,8 @@ REF_TXN
   git reset --hard "$PRE_OID" >/dev/null
   # 리뷰 16차 P1-8(5차): quarantine(state/auto_merge.trash.d)은 rollback의
   # clean -fd에서도 살아남아야 한다 — 명시 제외 (.gitignore에도 등재).
-  git clean -fd -e "state/auto_merge.trash.d" >/dev/null
+  # 4라운드 P1(#6): 이 실행이 쥔 writer lock 산출물도 clean이 지우면 안 된다.
+  git clean -fd -e "state/auto_merge.trash.d" -e "state/ticket_write.lock.d" -e "state/ticket_write.lock.d.*" >/dev/null
   # 사이클 종점 기록은 reset으로 무효화됨 — 해석 시점 OID 고정 CAS로 제거.
   if [ -n "$POST_TAGOBJ" ]; then
     git update-ref -d "refs/tags/${POST_TAG}" "$POST_TAGOBJ" >/dev/null 2>&1 || true
