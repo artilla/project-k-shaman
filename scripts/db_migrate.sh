@@ -260,11 +260,12 @@ _mig_probe() {  # $1=SQL, $2=제한(0.25s 스텝 수) → 결과는 $_MIG_PROBE_
   psql -X -tAc "$1" > "$_f" 2>/dev/null &
   _pid=$!
   set +m
-  while kill -0 "$_pid" 2>/dev/null && [ "$_i" -lt "$2" ]; do sleep 0.25; _i=$((_i+1)); done
-  if kill -0 "$_pid" 2>/dev/null; then
+  # 6라운드 P1(#7): probe도 그룹 기준 수명 검사 — leader-only 검사 금지
+  while kill -0 -- "-${_pid}" 2>/dev/null && [ "$_i" -lt "$2" ]; do sleep 0.25; _i=$((_i+1)); done
+  if kill -0 -- "-${_pid}" 2>/dev/null; then
     kill -TERM -- "-${_pid}" 2>/dev/null || true
     sleep 0.25
-    kill -0 "$_pid" 2>/dev/null && kill -KILL -- "-${_pid}" 2>/dev/null
+    kill -0 -- "-${_pid}" 2>/dev/null && kill -KILL -- "-${_pid}" 2>/dev/null
     wait "$_pid" 2>/dev/null || true
     rm -f "$_f"
     return 1
@@ -319,8 +320,10 @@ _mig_psql() {
       # KILL·포기 후 즉시 종료한다.
       _mig_deadline=$(( $(date +%s) + 5 ))
       kill -s "$_MIG_SIG" -- "-${_pid}" 2>/dev/null || true
-      while kill -0 "$_pid" 2>/dev/null && [ "$(date +%s)" -lt "$_mig_deadline" ]; do sleep 0.25; done
-      if kill -0 "$_pid" 2>/dev/null; then
+      # 6라운드 P1(#7): 수명 검사는 leader PID가 아니라 "프로세스 그룹" — leader가
+      # 먼저 죽으면 TERM 무시 자손에 KILL이 가지 않아 자손이 생존했다 (실측).
+      while kill -0 -- "-${_pid}" 2>/dev/null && [ "$(date +%s)" -lt "$_mig_deadline" ]; do sleep 0.25; done
+      if kill -0 -- "-${_pid}" 2>/dev/null; then
         kill -KILL -- "-${_pid}" 2>/dev/null || true
       fi
       wait "$_pid" 2>/dev/null || true
@@ -334,6 +337,13 @@ _mig_psql() {
     fi
     kill -0 "$_pid" 2>/dev/null || break
   done
+  # 6라운드 P1(#7): leader 정상 종료 후 그룹 잔존 자손 회수 — late write 방지
+  if kill -0 -- "-${_pid}" 2>/dev/null; then
+    kill -TERM -- "-${_pid}" 2>/dev/null || true
+    _i=0
+    while kill -0 -- "-${_pid}" 2>/dev/null && [ "$_i" -lt 8 ]; do sleep 0.25; _i=$((_i+1)); done
+    kill -0 -- "-${_pid}" 2>/dev/null && kill -KILL -- "-${_pid}" 2>/dev/null
+  fi
   _MIG_PHASE="run"
   _MIG_OUT="$(cat "$_qout" 2>/dev/null || true)"
   rm -f "$_qout"
@@ -686,6 +696,40 @@ for _name in $_MIG_NAMES; do
   # 이 시점의 종료는 "여기까지는 정상 적용, 나머지는 미적용"이다.
   _mig_check_sig
 done
+
+# ── 6라운드 P1(#6): ACL 구성 증거 ────────────────────────────────────────────────
+# ledger가 005를 applied로 기록하면 runner는 skip한다 — 그 사이 MIGRATION_APP_ROLES가
+# 바뀌어도 ACL은 재구성되지 않는데 종전에는 up-to-date(rc=0)로 보고했다 (실측:
+# late_app의 EXECUTE=false). 성공 보고의 전제로, 요청된 각 role이 진입점 EXECUTE와
+# schema USAGE를 "실제로" 갖는지 서버에서 확인한다. 진입점이 아직 없으면(005 미적용
+# 세트) 검증 대상이 없고, @self는 적용 주체라 자명하다.
+_mig_verify_acl() {
+  local _r
+  if ! _mig_psql -X -v ON_ERROR_STOP=1 -tAc "select to_regprocedure('\"${PGSCHEMA}\".app_soft_delete_user(bigint)') is not null"; then
+    echo "❌ ACL 검증 query 실패: ${_MIG_OUT}" >&2
+    exit 3
+  fi
+  [ "$_MIG_OUT" = "t" ] || return 0
+  [ -n "$_MIG_APP_ROLES" ] || return 0
+  _mig_roles_ifs="$IFS"; IFS=','
+  for _r in $_MIG_APP_ROLES; do
+    IFS="$_mig_roles_ifs"
+    if ! _mig_psql -X -v ON_ERROR_STOP=1 -tAc "select has_function_privilege('${_r}', '\"${PGSCHEMA}\".app_soft_delete_user(bigint)', 'EXECUTE') and has_schema_privilege('${_r}', '${PGSCHEMA}', 'USAGE')"; then
+      echo "❌ role '${_r}' ACL 검증 실패(role 부재 가능): ${_MIG_OUT}" >&2
+      exit 3
+    fi
+    if [ "$_MIG_OUT" != "t" ]; then
+      echo "❌ role '${_r}'에 진입점 EXECUTE/schema USAGE가 구성되어 있지 않습니다 — 005는 ledger상 이미 적용되어 재실행되지 않으므로, MIGRATION_APP_ROLES 변경은 새 ACL migration 또는 수동 GRANT로 반영해야 합니다 (fail-closed):" >&2
+      echo "   GRANT USAGE ON SCHEMA \"${PGSCHEMA}\" TO ${_r};" >&2
+      echo "   GRANT EXECUTE ON FUNCTION \"${PGSCHEMA}\".app_soft_delete_user(bigint) TO ${_r};" >&2
+      exit 1
+    fi
+    IFS=','
+  done
+  IFS="$_mig_roles_ifs"
+  return 0
+}
+_mig_verify_acl
 
 # 최종 성공 보고 — ledger를 서버에서 재확인한 값으로 보고한다 (fail-closed).
 #
