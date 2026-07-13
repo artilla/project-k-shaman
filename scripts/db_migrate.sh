@@ -197,7 +197,7 @@ _MANIFEST="001_init a1296198221932cf0313dec362ef9ff5d4336ab935cdf17f9f1981b9efeb
 002_schema_contract_fixes 40965ac72a0442177abeff67bd53a0c6ec2e30be1e53bf19499f66a1aa6114c7
 003_soft_delete_invariant b7b7a364f1dc5418097e906f122c6eac221b676741381ca06e395b33c54855cb
 004_soft_delete_contract 94525fde054c473e87e06d060089f81e9475d65669cbe19953a12b5f591e66a4
-005_ownership_repair_and_lock_contract b15e3fd3060b114f0acfcf9ab14d0a702cff74831d3738deeede7ec11cceb16e"
+005_ownership_repair_and_lock_contract baa9a3a50c7b4153e2f0c497cb7a9f264b08d09e2d027d707db1d39617a00103"
 _MANIFEST_MAX="005"
 
 _sha_of_blob() {  # $1=커밋 내 경로 → sha256 (blob bytes 그대로; 셸 변수 경유 없음)
@@ -554,11 +554,47 @@ for _name in $_MIG_NAMES; do
 done
 
 # 최종 성공 보고 — ledger를 서버에서 재확인한 값으로 보고한다 (fail-closed).
-# 신호: 이 구간은 phase=run이므로 trap이 즉시 128+N으로 종료한다 — "마지막
-# checkpoint 이후" 창이 없다 (8라운드 후속 P1: 그 창의 TERM이 rc=0 + 성공
-# 문구로 위장됐다).
+#
+# 재리뷰(추가사항): trap은 "포그라운드 명령이 끝난 뒤"에 실행되므로, 최종 ledger
+# 조회를 `$(psql ...)` 명령치환으로 돌리면 TERM을 받아도 psql이 끝날 때까지(실측
+# 5초) 기다린 뒤에야 종료했다 — rc=143은 맞지만 "즉시 종료" 계약은 아니었다.
+# 조회를 별도 프로세스 그룹의 background job으로 돌리고 wait로 기다린다: wait는
+# trap에 의해 즉시 깨어나므로, 신호를 받는 즉시 psql 그룹에 전달·reap하고 종료한다.
+_mig_query_bg() {  # $1=SQL → stdout(결과). 신호 수신 시 즉시 전달·reap 후 종료.
+  local _qout _pid _rc _i _snum
+  _mig_check_sig
+  _qout="$(mktemp "${TMPDIR:-/tmp}/dbmig-q.XXXXXX")" || { echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
+  _MIG_TMPS="$_MIG_TMPS $_qout"
+  _MIG_PHASE="psql"
+  set -m
+  psql -X -v ON_ERROR_STOP=1 -tAc "$1" > "$_qout" 2>&1 &
+  _pid=$!
+  set +m
+  while :; do
+    _rc=0
+    wait "$_pid" 2>/dev/null || _rc=$?
+    if [ -n "$_MIG_SIG" ]; then
+      kill -s "$_MIG_SIG" -- "-${_pid}" 2>/dev/null || true
+      _i=0
+      while kill -0 "$_pid" 2>/dev/null && [ "$_i" -lt 20 ]; do sleep 0.25; _i=$((_i+1)); done
+      kill -0 "$_pid" 2>/dev/null && kill -KILL -- "-${_pid}" 2>/dev/null
+      wait "$_pid" 2>/dev/null || true
+      _mig_server_drain || true
+      _snum="$(_mig_sig_num "$_MIG_SIG")"
+      _mig_cleanup_tmps
+      echo "❌ 신호(${_MIG_SIG}) 수신 — 즉시 중단합니다 (진행 중 transaction 없음; 이미 적용된 migration은 유효)." >&2
+      exit $((128 + _snum))
+    fi
+    kill -0 "$_pid" 2>/dev/null || break
+  done
+  _MIG_PHASE="run"
+  cat "$_qout"
+  rm -f "$_qout"
+  return "$_rc"
+}
+
 _mig_check_sig
-if ! _final_n="$(psql -X -v ON_ERROR_STOP=1 -tAc "select count(*) from \"${PGSCHEMA}\".schema_migrations" 2>&1)"; then
+if ! _final_n="$(_mig_query_bg "select count(*) from \"${PGSCHEMA}\".schema_migrations")"; then
   echo "❌ 최종 ledger 확인 실패: ${_final_n}" >&2
   exit 3
 fi

@@ -294,35 +294,62 @@ CREATE TRIGGER trg_purchases_user_id_immutable
 --     순서와 id 오름차순을 따른다 (ADR 0004).
 DROP FUNCTION IF EXISTS app_lock_user_rows(BIGINT[]);
 
--- 진입점의 권한 경계 (8라운드 후속 P1): 증거는 GUC가 아니라 role 정체성이다.
+-- 진입점의 권한 경계 (8라운드 후속 P1 → 재리뷰 P1 #1·#3·#4): 증거는 GUC가 아니라
+-- role 정체성이다.
 --   - shaman_softdelete: NOLOGIN 정의자 role. 스크럽 트리거는 deleted_at 전이
 --     시점의 current_user가 이 role일 것을 요구한다 (위 1절).
 --   - app_soft_delete_user()는 이 role 소유의 SECURITY DEFINER 함수 — 함수 안
---     에서만 current_user가 shaman_softdelete가 된다. membership이 없는 role은
---     SET ROLE로 사칭할 수 없다.
---   - app role에는 users.deleted_at UPDATE 권한을 주지 않는 것이 배포 계약이다
---     (컬럼 목록 grant — ADR 0004). 트리거 경계는 그 위의 스키마 강제층이다.
+--     에서만 current_user가 shaman_softdelete가 된다.
+--
+-- 재리뷰 #4 (기존 role 무조건 신뢰 금지): 같은 이름의 LOGIN role이나 member가
+-- 이미 있으면 그 member가 SET ROLE로 진입점을 우회해 직접 삭제할 수 있다 (실측).
+-- role을 인수하기 전에 속성(NOLOGIN)과 membership(비어 있음)을 검증하고, 위반이면
+-- 거부한다 (fail-closed — 배포가 role을 정리해야 한다).
 DO $role$
+DECLARE
+  _canlogin BOOLEAN;
+  _members  INT;
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'shaman_softdelete') THEN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'shaman_softdelete') THEN
+    SELECT r.rolcanlogin INTO _canlogin FROM pg_roles r WHERE r.rolname = 'shaman_softdelete';
+    SELECT count(*) INTO _members
+      FROM pg_auth_members m
+      JOIN pg_roles r ON r.oid = m.roleid
+     WHERE r.rolname = 'shaman_softdelete';
+    IF _canlogin THEN
+      RAISE EXCEPTION 'role shaman_softdelete가 LOGIN 속성을 가지고 있습니다 — soft-delete 정의자 role은 NOLOGIN이어야 합니다 (이 role로 직접 접속하면 진입점을 우회할 수 있습니다). ALTER ROLE shaman_softdelete NOLOGIN 후 재실행하세요 (fail-closed)';
+    END IF;
+    IF _members > 0 THEN
+      RAISE EXCEPTION 'role shaman_softdelete에 member가 % 명 있습니다 — member는 SET ROLE로 진입점을 우회해 직접 삭제할 수 있습니다. 모든 membership을 REVOKE한 뒤 재실행하세요 (fail-closed)', _members;
+    END IF;
+  ELSE
     BEGIN
       CREATE ROLE shaman_softdelete NOLOGIN;
     EXCEPTION WHEN duplicate_object THEN
-      NULL;  -- 동시 생성 경합 — 존재하면 충분하다
+      NULL;  -- 동시 생성 경합 — 존재하면 충분하다 (다음 실행이 위 검증을 수행)
     END;
   END IF;
 END $role$;
 
--- 정의자 role이 진입점·스크럽 트리거(SECURITY INVOKER — 정의자 컨텍스트에서
--- 실행됨)가 필요로 하는 최소 권한: 잠금(FOR NO KEY UPDATE/SHARE)은 UPDATE
--- 권한을, 자식 정리는 DELETE 권한을 요구한다.
+-- 재리뷰 #1: 정의자 role에 "스키마 USAGE"가 없으면 custom schema(예: AppData)에서
+-- SECURITY DEFINER 본문이 relation "events" does not exist로 실패한다 (실측 DB9).
+-- 대상 스키마는 runner가 search_path로 고정한 current_schema다.
+DO $usage$
+BEGIN
+  EXECUTE format('GRANT USAGE ON SCHEMA %I TO shaman_softdelete', current_schema);
+END $usage$;
+
+-- 정의자 role이 진입점·스크럽 트리거(정의자 컨텍스트에서 실행됨)가 필요로 하는
+-- 최소 권한: 잠금(FOR NO KEY UPDATE/SHARE)은 UPDATE 권한을, 자식 정리는 DELETE
+-- 권한을 요구한다.
 GRANT SELECT, UPDATE ON users, events TO shaman_softdelete;
 GRANT SELECT, UPDATE, DELETE ON sessions, streaks, user_fortunes TO shaman_softdelete;
 
 -- soft-delete의 유일 진입점 (스크럽 트리거가 role 경계로 강제한다).
 -- 반환: TRUE=이번 호출로 삭제됨, FALSE=이미 삭제된 사용자(멱등).
--- SECURITY DEFINER + 생성 시점 고정 search_path (SET search_path FROM CURRENT
--- — runner가 스키마를 search_path로 고정한 상태에서 생성된다).
+-- search_path는 아래 9)에서 pg_catalog, <schema>, pg_temp로 "고정"한다 —
+-- FROM CURRENT는 pg_temp를 명시하지 않아 호출자의 임시 객체가 먼저 해석됐다
+-- (재리뷰 #2, 실측).
 CREATE OR REPLACE FUNCTION app_soft_delete_user(p_user BIGINT) RETURNS boolean
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -361,5 +388,47 @@ BEGIN
   END LOOP;
 END $fn$;
 
--- 소유권 이전은 함수 생성 "후" — SECURITY DEFINER의 정의자 = 소유자.
+-- ── 9) 진입점 ACL·소유권·search_path 고정 (재리뷰 P1 #2·#3) ────────────────────
+--
+-- #3 (PUBLIC EXECUTE): 함수 ACL이 기본값이면 EXECUTE가 PUBLIC에 열려, 아무 테이블
+-- 권한도 없는 신규 CONNECT role이 app_soft_delete_user(1)로 사용자를 삭제할 수
+-- 있었다 (실측 — SECURITY DEFINER가 정의자 권한으로 전부 수행하므로). PUBLIC에서
+-- 회수하고 "명시적 app role"에만 부여한다.
+-- app role = 이 migration을 실행한 role(= DATABASE_URL의 애플리케이션 role).
+-- 추가 app role이 있으면 배포가 명시적으로 GRANT해야 한다 (ADR 0004).
+DO $acl$
+DECLARE
+  _app text := current_user;
+BEGIN
+  EXECUTE format('REVOKE ALL ON FUNCTION %I.app_soft_delete_user(bigint) FROM PUBLIC', current_schema);
+  EXECUTE format('GRANT EXECUTE ON FUNCTION %I.app_soft_delete_user(bigint) TO %I', current_schema, _app);
+END $acl$;
+
+-- #2 (search_path가 신뢰 경계가 아니었다): `SET search_path FROM CURRENT`가 캡처하는
+-- 값에는 pg_temp가 없다. PostgreSQL은 pg_temp가 "명시되지 않으면" 그것을 가장 먼저
+-- 탐색하므로, 호출자가 만든 pg_temp.events가 permanent table보다 먼저 해석됐다 —
+-- 일반 role 재현에서 사용자는 삭제됐지만 실제 events payload는 스크럽되지 않았다
+-- (실측). 정의자 컨텍스트에서 실행되는 모든 함수의 search_path를
+-- `pg_catalog, <schema>, pg_temp`로 고정한다: pg_temp가 마지막이므로 임시 객체가
+-- permanent 객체를 가릴 수 없고, unqualified 참조는 항상 <schema>로 해석된다.
+DO $sp$
+DECLARE
+  _s text := current_schema;
+  _f text;
+BEGIN
+  FOREACH _f IN ARRAY ARRAY[
+    'app_soft_delete_user(bigint)',
+    'users_scrub_on_delete()',
+    'reject_rows_for_deleted_user()',
+    'sessions_guard()',
+    'events_guard()',
+    'events_scrub_marker_immutable()',
+    'purchases_user_id_immutable()'
+  ] LOOP
+    EXECUTE format('ALTER FUNCTION %I.%s SET search_path = pg_catalog, %I, pg_temp', _s, _f, _s);
+  END LOOP;
+END $sp$;
+
+-- 소유권 이전은 ACL·search_path 설정을 "모두 마친 뒤" — SECURITY DEFINER의 정의자
+-- = 소유자다. (ALTER FUNCTION은 소유자 권한을 요구하므로, 이전 전에 설정을 끝낸다.)
 ALTER FUNCTION app_soft_delete_user(BIGINT) OWNER TO shaman_softdelete;

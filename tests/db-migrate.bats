@@ -1030,9 +1030,11 @@ SHIM
   _psql "insert into users (provider, provider_subject) values ('kakao','u1')"   # id 1
   _psql "insert into users (provider, provider_subject) values ('kakao','u2')"   # id 2
   _psql "insert into events (event_type, user_id, payload) values ('e', 1, '{\"p\":1}'::jsonb)"
-  # 일반 app role — users에 대한 (테이블 수준) UPDATE 권한까지 있는 최악 조건
+  # 일반 app role — users에 대한 (테이블 수준) UPDATE 권한까지 있는 최악 조건.
+  # 재리뷰 #3: 진입점 EXECUTE는 PUBLIC에서 회수됐다 — app role에 "명시적으로" 부여한다.
   _psql "create role zz_app36 login"
   _psql "grant select, update on users to zz_app36"
+  _psql "grant execute on function app_soft_delete_user(bigint) to zz_app36"
   _approle() {
     PGOPTIONS='-c client_min_messages=warning' \
       "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U zz_app36 -d "$TEST_DB" -tAc "$1"
@@ -1061,6 +1063,91 @@ SHIM
   [ "$(_psql "select (deleted_at is null) from users where id=2")" = "t" ]
 }
 
+@test "DB37: the entrypoint is not executable by PUBLIC - an unprivileged CONNECT role cannot delete" {
+  # 재리뷰 P1(#3): 함수 ACL이 기본값이라 EXECUTE가 PUBLIC에 열려 있었다 — 아무 테이블
+  # 권한도 없는 신규 CONNECT role이 app_soft_delete_user(1)을 호출해 사용자를 삭제할
+  # 수 있었다 (SECURITY DEFINER가 정의자 권한으로 전부 수행하므로, 실측).
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "insert into users (provider, provider_subject) values ('kakao','u1')"
+  # 테이블 권한이 전혀 없는 신규 role (CONNECT만)
+  _psql "create role zz_nobody login"
+  _psql "grant connect on database ${TEST_DB} to zz_nobody"
+  run env PGOPTIONS='-c client_min_messages=warning' \
+    "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U zz_nobody -d "$TEST_DB" -tAc \
+    "select app_soft_delete_user(1)"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"permission denied"* ]]
+  [ "$(_psql "select (deleted_at is null) from users where id=1")" = "t" ]
+  # PUBLIC에는 EXECUTE가 없다 (ACL로 직접 확인)
+  [ "$(_psql "select coalesce(has_function_privilege('public','app_soft_delete_user(bigint)','EXECUTE'), false)")" = "f" ]
+  # 명시적으로 부여하면 정상 동작한다 (배포 계약: app role에만 GRANT)
+  _psql "grant execute on function app_soft_delete_user(bigint) to zz_nobody"
+  [ "$(PGOPTIONS='-c client_min_messages=warning' "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U zz_nobody -d "$TEST_DB" -tAc "select app_soft_delete_user(1)")" = "t" ]
+  [ "$(_psql "select (deleted_at is not null) from users where id=1")" = "t" ]
+}
+
+@test "DB38: a caller's pg_temp table cannot shadow the scrub target - search_path is pinned with pg_temp last" {
+  # 재리뷰 P1(#2): `SET search_path FROM CURRENT`가 캡처하는 값에는 pg_temp가 없고,
+  # PostgreSQL은 명시되지 않은 pg_temp를 가장 먼저 탐색한다 — 호출자가 만든
+  # pg_temp.events가 permanent table보다 먼저 해석되어, 사용자는 삭제됐지만 실제
+  # events payload는 스크럽되지 않았다 (실측). search_path를
+  # pg_catalog, <schema>, pg_temp로 고정해 임시 객체가 가릴 수 없게 한다.
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "insert into users (provider, provider_subject) values ('kakao','u1')"
+  _psql "insert into events (event_type, user_id, payload) values ('e', 1, '{\"pii\":\"real\"}'::jsonb)"
+  _psql "create role zz_temp38 login"
+  _psql "grant select, insert, update, delete on users, events, sessions, streaks, user_fortunes to zz_temp38"
+  _psql "grant usage on schema public to zz_temp38"
+  _psql "grant temporary on database ${TEST_DB} to zz_temp38"
+  _psql "grant execute on function app_soft_delete_user(bigint) to zz_temp38"
+  # 같은 세션에서 pg_temp.events를 만든 뒤 진입점을 호출한다
+  PGOPTIONS='-c client_min_messages=warning' "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" \
+    -U zz_temp38 -d "$TEST_DB" -v ON_ERROR_STOP=1 -tAc \
+    "create temp table events (id bigint, user_id bigint, session_id bigint, payload jsonb, scrubbed_at timestamptz);
+     select app_soft_delete_user(1);" >/dev/null
+  # 삭제가 수행됐고, "진짜" events가 스크럽됐다 (pg_temp가 가리지 못했다)
+  [ "$(_psql "select (deleted_at is not null) from users where id=1")" = "t" ]
+  [ "$(_psql "select payload::text from public.events where event_type='e'")" = "{}" ]
+  [ "$(_psql "select (scrubbed_at is not null) from public.events where event_type='e'")" = "t" ]
+}
+
+@test "DB39: a pre-existing shaman_softdelete role with LOGIN or members is refused (no blind trust)" {
+  # 재리뷰 P1(#4): 같은 이름의 LOGIN role과 membership이 미리 존재해도 migration이
+  # 그대로 받아들였다 — 이후 member가 SET ROLE로 진입점을 우회해 직접 삭제할 수
+  # 있었다. role 속성(NOLOGIN)과 membership(비어 있음)을 검증하고 위반이면 거부한다.
+  # role은 클러스터 전역이라 앞선 테스트의 migration이 이미 만들었을 수 있다 —
+  # 존재하면 LOGIN으로 바꾸고, 없으면 LOGIN으로 만든다 (둘 다 "위반 상태" 재현).
+  _psql "do \$\$ begin
+           if exists (select 1 from pg_roles where rolname='shaman_softdelete') then
+             alter role shaman_softdelete login;
+           else
+             create role shaman_softdelete login;
+           end if;
+         end \$\$"
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"LOGIN"* ]]
+  # 005가 적용되지 않았다 (진입점도 설치되지 않았다)
+  [ "$(_psql "select count(*) from schema_migrations where version like '005%'")" = "0" ]
+
+  # NOLOGIN으로 고쳐도 member가 있으면 여전히 거부 (SET ROLE 우회 가능)
+  _psql "alter role shaman_softdelete nologin"
+  _psql "create role zz_member39 login"
+  _psql "grant shaman_softdelete to zz_member39"
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"member"* ]]
+  [ "$(_psql "select count(*) from schema_migrations where version like '005%'")" = "0" ]
+
+  # membership을 정리하면 정상 적용된다
+  _psql "revoke shaman_softdelete from zz_member39"
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [ "$(_psql "select count(*) from schema_migrations")" = "5" ]
+}
+
 @test "DB35: TERM in the final success-report window is not reported as rc=0 (phase-aware trap)" {
   # 8라운드 후속 P1: 마지막 checkpoint(_mig_check_sig) "이후" 최종 성공 보고
   # 창에 온 TERM이 flag만 기록되고 rc=0 + '✅ up-to-date'로 위장됐다 (실측).
@@ -1085,11 +1172,18 @@ SHIM
   done
   [ -f "$TROOT/tmp/final" ]
   sleep 0.3
+  local t0 t1
+  t0="$(date +%s)"
   kill -TERM "$rpid"
   wait "$rpid" || rc=$?
+  t1="$(date +%s)"
   # 신호가 rc=0 성공으로 위장되지 않고, 성공 문구도 출력되지 않는다
   [ "$rc" -eq 143 ]
   ! grep -q "up-to-date" "$PGT/sig35.log"
+  # 재리뷰(추가사항): "즉시 종료" 계약 — 포그라운드 psql의 5초 sleep을 끝까지
+  # 기다리지 않는다. 조회는 별도 프로세스 그룹의 background job이고 wait는 trap에
+  # 의해 즉시 깨어나므로, 신호 직후 psql 그룹을 종료하고 빠져나온다.
+  [ $(( t1 - t0 )) -lt 3 ]
   # 적용 자체는 전부 완료된 상태였다 (신호는 보고 창에만 개입했다)
   [ "$(_psql "select count(*) from schema_migrations")" = "5" ]
   [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
