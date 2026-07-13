@@ -144,15 +144,27 @@ ID로 `set_config`할 수 있어 **증거가 아니었다** (실측: 위조 후 
    role 소유의 **SECURITY DEFINER** 함수다. 스크럽 트리거는 `deleted_at` 전이
    시점의 `current_user = shaman_softdelete`를 요구한다 — 이 컨텍스트는 진입점
    함수 안에서만 성립하므로 직접 UPDATE는 superuser도 거부된다.
-2. **role 인수 검증 (#4)**: 같은 이름의 role이 이미 있으면 **속성과 membership을
-   검증**한다 — `LOGIN`이거나 member가 하나라도 있으면 migration이 **거부**된다
-   (fail-closed). member는 `SET ROLE`로 진입점을 우회할 수 있기 때문이다. 배포는
-   role을 정리한 뒤 재실행해야 한다.
-3. **함수 ACL (#3)**: 기본 ACL은 EXECUTE를 PUBLIC에 연다 — SECURITY DEFINER에서는
-   아무 테이블 권한도 없는 CONNECT role이 삭제를 수행할 수 있다는 뜻이다(실측).
-   005는 `REVOKE ALL ... FROM PUBLIC` 후 **migration 실행 role(= 애플리케이션
-   role)에만** EXECUTE를 부여한다. 추가 app role이 필요하면 배포가 명시적으로
-   `GRANT EXECUTE ON FUNCTION app_soft_delete_user(bigint) TO <role>` 한다.
+2. **role 인수 검증 (#4 + 재재리뷰 #2)**: role이 **존재하든, 이번에 만들었든,
+   생성 경합에서 졌든(duplicate_object)** — 어느 경로로든 생성 "이후"에 같은
+   기준으로 **재검증**한다. `LOGIN`이거나 허용되지 않은 member가 있으면 migration이
+   **거부**되고 transaction 전체가 rollback되어 ledger에 기록되지 않는다
+   (fail-closed — 경쟁 세션이 존재 확인 직후 LOGIN role을 만들어도 성공으로
+   기록되지 않는다). member 허용 예외는 둘뿐이다: **superuser**(이미 모든 경계
+   밖)와 **migration 실행 role 자신**(아래 운영 전제의 비-superuser 경로가
+   `OWNER TO`를 위해 요구한다 — 이 role은 정의상 신뢰된 배포 주체다). 그 외
+   member는 `SET ROLE`로 진입점을 우회할 수 있어 거부한다. `shaman_softdelete`가
+   **다른 role의 member인 것**(상위-role membership)도 거부한다 — 정의자
+   컨텍스트가 상속으로 최소 권한을 초과하면 안 된다 (재재리뷰 P2).
+3. **함수 ACL (#3 + 재재리뷰 #3)**: 기본 ACL은 EXECUTE를 PUBLIC에 연다 — SECURITY
+   DEFINER에서는 아무 테이블 권한도 없는 CONNECT role이 삭제를 수행할 수 있다는
+   뜻이다(실측). 005는 `REVOKE ALL ... FROM PUBLIC` 후 **runtime app role에만**
+   EXECUTE를 부여한다. 대상 role은 migration의 `current_user`가 아니라(live 연결이
+   `postgres`면 postgres만 grant되는 계약 불성립) 배포가 **`MIGRATION_APP_ROLES`**
+   (env 또는 `.env.local`, 쉼표 구분)로 명시한다 — runner가 식별자 검증 후
+   GUC(`shaman.app_roles`)로 주입하고, 005는 각 role의 존재를 확인(fail-closed)한
+   뒤 **EXECUTE와 함께 대상 스키마 USAGE도** 부여한다 (custom schema에서는
+   EXECUTE만으로 함수를 호출할 수 없다). 지정이 없으면 migration 실행 role로
+   fallback한다 (단일-role 배포).
 4. **search_path 고정 (#2)**: `SET search_path FROM CURRENT`는 pg_temp를 명시하지
    않는데, PostgreSQL은 명시되지 않은 pg_temp를 **가장 먼저** 탐색한다 — 호출자가
    만든 `pg_temp.events`가 실제 테이블을 가려, 사용자는 삭제됐지만 events payload는
@@ -167,8 +179,15 @@ schema에서 `relation "events" does not exist`로 실패한다).
 - app role 배포 계약: `users`에 대한 UPDATE는 **컬럼 목록 grant**로 부여하고
   `deleted_at`을 제외한다 — 권한층에서도 직접 DML이 차단된다 (트리거 경계는
   그 위의 스키마 강제층).
-- 운영 전제: migration 실행 role은 role 생성/소유권 이전 권한(superuser 또는
-  CREATEROLE + `shaman_softdelete` membership)이 필요하다.
+- 운영 전제 (재재리뷰 #3(a) — membership 전면 금지와 `CREATEROLE + membership`
+  경로의 모순 해소): migration 실행 role은 role 생성/소유권 이전 권한이 필요하다.
+  경로는 둘이다:
+  1. **superuser로 실행** (권장 — 현행 live 경로): membership 불요.
+  2. **비-superuser 경로**: CREATEROLE로 `shaman_softdelete`를 미리 만들고 **실행
+     role 자기 자신에게만** membership을 grant(PG16+는 `SET` 옵션 포함 — `OWNER
+     TO`가 SET ROLE 가능성을 요구한다)한 뒤 실행한다. 005의 role 검증은 "실행
+     role 자신·superuser"의 membership만 허용하므로 이 경로는 검증과 모순되지
+     않는다. 그 외 role에 membership을 주면 migration이 거부한다 (fail-closed).
 
 ## 남은 후속 (P2, 별도 티켓)
 

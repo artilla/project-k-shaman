@@ -104,6 +104,35 @@ if [ -n "$_query" ]; then
   fi
 fi
 
+# 재재리뷰 P1 #3(b): runtime app role 목록 — 005의 진입점 EXECUTE·schema USAGE
+# 대상이다 (migration 실행 role이 아니라 "애플리케이션이 접속하는 role").
+# env MIGRATION_APP_ROLES 우선, 없으면 ENV_FILE의 선언을 읽는다. 쉼표 구분,
+# 각 이름은 schema와 같은 식별자 규칙으로 검증한다 (SET LOCAL literal에 들어가므로
+# 검증 실패는 거부 — fail-closed). 비어 있으면 migration이 실행 role로 fallback.
+_MIG_APP_ROLES="${MIGRATION_APP_ROLES:-$(awk '!f && sub(/^MIGRATION_APP_ROLES=/, "") { v = $0; f = 1 } END { if (f) print v }' "$ENV_FILE" | tr -d '"' | tr -d "'")}"
+if [ -n "$_MIG_APP_ROLES" ]; then
+  case "$_MIG_APP_ROLES" in
+    *[!A-Za-z0-9_,]*)
+      echo "❌ MIGRATION_APP_ROLES에 허용되지 않는 문자가 있습니다 (role은 [A-Za-z_][A-Za-z0-9_]*, 구분자는 ','): '${_MIG_APP_ROLES}'" >&2
+      exit 2
+      ;;
+  esac
+  _mig_roles_ifs="$IFS"; IFS=','
+  for _mr in $_MIG_APP_ROLES; do
+    case "$_mr" in
+      "") IFS="$_mig_roles_ifs"; echo "❌ MIGRATION_APP_ROLES에 빈 role 이름이 있습니다: '${_MIG_APP_ROLES}'" >&2; exit 2 ;;
+      [A-Za-z_]*) : ;;
+      *) IFS="$_mig_roles_ifs"; echo "❌ MIGRATION_APP_ROLES role 이름이 유효한 식별자가 아닙니다: '${_mr}'" >&2; exit 2 ;;
+    esac
+    if [ "${#_mr}" -gt 63 ]; then
+      IFS="$_mig_roles_ifs"
+      echo "❌ MIGRATION_APP_ROLES role 이름이 63자를 초과합니다 (PostgreSQL 식별자 한계): '${_mr}'" >&2
+      exit 2
+    fi
+  done
+  IFS="$_mig_roles_ifs"
+fi
+
 export PGUSER PGPASSWORD PGHOST PGPORT PGDATABASE
 export PGCONNECT_TIMEOUT="${PGCONNECT_TIMEOUT:-10}"
 # 리뷰 16차 P1(7차): 신호 시 서버 쪽 종료 확인의 식별자 — 이 runner의 모든
@@ -122,8 +151,112 @@ if ! command -v psql >/dev/null 2>&1; then
 fi
 command -v psql >/dev/null 2>&1 || { echo "❌ psql 이 PATH에 없습니다 (brew install libpq 후 PATH 추가)." >&2; exit 2; }
 
+# ── 리뷰 16차 P1(7차) → 재재리뷰 P1 #1: 신호 계약 ────────────────────────────────
+# runner가 TERM/INT/HUP을 받으면 psql "프로세스 그룹" 전체에 신호를 전달하고,
+# bounded reap(전달 → 대기 → KILL) 후 서버 쪽 backend 종료까지 확인하고 나서
+# 종료한다.
+#
+# 재재리뷰 P1 #1: bash의 trap은 "포그라운드 자식이 끝난 뒤"에야 실행되고, command
+# substitution(`$( )`) 안의 자식은 부모가 subshell 종료까지 기다린다 — 최종 ledger
+# 조회를 명령치환으로 돌리던 _mig_query_bg, 그리고 초기 접속·bootstrap·applied()의
+# foreground psql이 전부 TERM 처리를 psql 종료 뒤로 미뤘다 (실측: DB35 elapsed≥5s).
+# 이제 runner의 "모든" psql은 단 하나의 helper(_mig_psql)를 거친다: 별도 프로세스
+# 그룹의 background job + wait(신호에 즉시 깨어남) + 출력은 파일 경유로 부모 셸
+# 변수(_MIG_OUT)에 담는다 — 명령치환·foreground 대기 구조가 어디에도 남지 않는다.
+_MIG_TMPS=""
+_mig_cleanup_tmps() { local _t; for _t in $_MIG_TMPS; do rm -f "$_t" 2>/dev/null || true; done; _MIG_TMPS=""; }
+_MIG_SIG=""
+_mig_sig_num() { case "$1" in INT) echo 2 ;; HUP) echo 1 ;; *) echo 15 ;; esac; }
+# 리뷰 16차 8라운드 후속 P1: handler는 phase-aware — psql이 실행 중(phase=psql)일
+# 때만 기록하고 전달·reap은 _mig_psql의 루프가 소유한다. 그 외 모든 구간(phase=run)
+# 은 진행 중 transaction이 없으므로 trap이 temp 정리 후 "즉시" 128+N으로 종료한다.
+_MIG_PHASE="run"
+_mig_on_sig() {
+  _MIG_SIG="$1"
+  [ "$_MIG_PHASE" = "psql" ] && return 0
+  local _snum
+  _snum="$(_mig_sig_num "$1")"
+  _mig_cleanup_tmps
+  echo "❌ 신호(${1}) 수신 — 즉시 중단합니다 (진행 중 transaction 없음; 이미 적용된 migration은 유효)." >&2
+  exit $((128 + _snum))
+}
+trap '_mig_on_sig TERM' TERM
+trap '_mig_on_sig INT'  INT
+trap '_mig_on_sig HUP'  HUP
+trap '_mig_cleanup_tmps' EXIT
+
+# 리뷰 16차 P1(8차): 신호 이후에는 어떤 작업도 새로 시작하지 않는다 — psql phase
+# 에서 기록된 신호가 정상 복귀 경로로 새어나온 경계를 막는 방어선.
+_mig_check_sig() {
+  [ -n "$_MIG_SIG" ] || return 0
+  local _snum
+  _snum="$(_mig_sig_num "$_MIG_SIG")"
+  _mig_cleanup_tmps
+  echo "❌ 신호(${_MIG_SIG}) 수신 — 새 작업을 시작하지 않고 중단합니다 (이미 적용된 migration은 유효, 진행 중 transaction 없음)." >&2
+  exit $((128 + _snum))
+}
+
+# 서버 쪽 종료 확인: 이 runner(application_name=$PGAPPNAME)의 다른 backend가
+# 사라질 때까지 bounded 대기 — 중간에 종료 요청(pg_terminate_backend)으로
+# escalate하고, 끝까지 남으면 실패(호출자가 경고)를 반환한다.
+_mig_server_drain() {
+  local _q="select count(*) from pg_stat_activity where application_name = '${PGAPPNAME}' and pid <> pg_backend_pid()" _n="" _i=0
+  while [ "$_i" -lt 20 ]; do
+    _n="$(psql -X -tAc "$_q" 2>/dev/null || echo "")"
+    [ "$_n" = "0" ] && return 0
+    if [ "$_i" -eq 8 ] && [ -n "$_n" ]; then
+      psql -X -tAc "select pg_terminate_backend(pid) from pg_stat_activity where application_name = '${PGAPPNAME}' and pid <> pg_backend_pid()" >/dev/null 2>&1 || true
+    fi
+    sleep 0.25; _i=$((_i+1))
+  done
+  [ "$(psql -X -tAc "$_q" 2>/dev/null || echo x)" = "0" ]
+}
+
+# 유일한 psql 실행 경로 — job control(set -m)로 별도 프로세스 그룹에 배치.
+# 인수는 psql에 그대로 전달, stdout+stderr는 $_MIG_OUT에 담긴다. 반환: psql rc.
+# 신호 수신 시 전달·bounded reap·서버 drain·temp 정리 후 여기서 128+N으로 종료한다.
+_MIG_OUT=""
+_mig_psql() {
+  local _qout _pid _rc _i _snum
+  _mig_check_sig  # 신호가 이미 기록됐으면 psql을 아예 띄우지 않는다
+  _qout="$(mktemp "${TMPDIR:-/tmp}/dbmig-q.XXXXXX")" || { echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
+  _MIG_TMPS="$_MIG_TMPS $_qout"
+  # 이 구간의 신호는 trap이 기록만 한다(phase=psql) — 전달·bounded reap·서버
+  # drain·종료는 아래 루프가 소유한다. 루프 밖으로 정상 복귀할 때 run으로 되돌린다.
+  _MIG_PHASE="psql"
+  set -m
+  psql "$@" > "$_qout" 2>&1 &
+  _pid=$!
+  set +m
+  while :; do
+    _rc=0
+    wait "$_pid" 2>/dev/null || _rc=$?
+    if [ -n "$_MIG_SIG" ]; then
+      kill -s "$_MIG_SIG" -- "-${_pid}" 2>/dev/null || true
+      _i=0
+      while kill -0 "$_pid" 2>/dev/null && [ "$_i" -lt 20 ]; do sleep 0.25; _i=$((_i+1)); done
+      if kill -0 "$_pid" 2>/dev/null; then
+        kill -KILL -- "-${_pid}" 2>/dev/null || true
+      fi
+      wait "$_pid" 2>/dev/null || true
+      if ! _mig_server_drain; then
+        echo "⚠️  서버에 이 runner의 backend가 아직 남아 있을 수 있습니다 — pg_stat_activity(application_name=${PGAPPNAME})를 확인하세요." >&2
+      fi
+      _snum="$(_mig_sig_num "$_MIG_SIG")"
+      _mig_cleanup_tmps
+      echo "❌ 신호(${_MIG_SIG})로 중단됨 — psql 프로세스 그룹에 신호를 전달하고 서버 backend 종료를 확인했습니다 (미완료 transaction은 서버가 rollback)." >&2
+      exit $((128 + _snum))
+    fi
+    kill -0 "$_pid" 2>/dev/null || break
+  done
+  _MIG_PHASE="run"
+  _MIG_OUT="$(cat "$_qout" 2>/dev/null || true)"
+  rm -f "$_qout"
+  return "$_rc"
+}
+
 # 접속 자체를 먼저 검증 — 이후의 모든 판정이 이 위에서만 유효하다 (fail-closed).
-if ! psql -X -tAc "select 1" >/dev/null 2>&1; then
+if ! _mig_psql -X -tAc "select 1"; then
   echo "❌ DB 접속 실패: ${PGDATABASE} @ ${PGHOST}:${PGPORT} — 상태를 판정할 수 없습니다 (fail-closed)." >&2
   exit 3
 fi
@@ -133,14 +266,14 @@ ADVISORY_KEY=721363011
 
 # applied <version> — 0=적용됨, 1=미적용. query 실패는 즉시 중단 (pending으로 위장 금지).
 applied() {
-  local out
   # 리뷰 16차 P1(4차): ledger 참조는 전부 schema-qualified — migration 내용의
   # SET LOCAL search_path가 unqualified 참조를 다른 schema로 돌려도 영향 없음.
-  if ! out="$(psql -X -v ON_ERROR_STOP=1 -tAc "select count(*) from \"${PGSCHEMA}\".schema_migrations where version = '$1'" 2>&1)"; then
-    echo "❌ ledger 조회 실패(version=$1): $out" >&2
+  # 재재리뷰 P1 #1: 명령치환 psql 금지 — _mig_psql(background+wait) 경유.
+  if ! _mig_psql -X -v ON_ERROR_STOP=1 -tAc "select count(*) from \"${PGSCHEMA}\".schema_migrations where version = '$1'"; then
+    echo "❌ ledger 조회 실패(version=$1): $_MIG_OUT" >&2
     exit 3
   fi
-  [ "$out" = "1" ]
+  [ "$_MIG_OUT" = "1" ]
 }
 
 # ── 리뷰 16차 P1(7차): 실행 원본은 "커밋된 Git blob" — immutable·content-addressed.
@@ -197,7 +330,7 @@ _MANIFEST="001_init a1296198221932cf0313dec362ef9ff5d4336ab935cdf17f9f1981b9efeb
 002_schema_contract_fixes 40965ac72a0442177abeff67bd53a0c6ec2e30be1e53bf19499f66a1aa6114c7
 003_soft_delete_invariant b7b7a364f1dc5418097e906f122c6eac221b676741381ca06e395b33c54855cb
 004_soft_delete_contract 94525fde054c473e87e06d060089f81e9475d65669cbe19953a12b5f591e66a4
-005_ownership_repair_and_lock_contract baa9a3a50c7b4153e2f0c497cb7a9f264b08d09e2d027d707db1d39617a00103"
+005_ownership_repair_and_lock_contract 023337f6aff2adbfcb04b4b10301ce03da40a244d4013d1da45b86bad3813396"
 _MANIFEST_MAX="005"
 
 _sha_of_blob() {  # $1=커밋 내 경로 → sha256 (blob bytes 그대로; 셸 변수 경유 없음)
@@ -267,10 +400,11 @@ if [ "$MODE" = "status" ]; then
   # pending으로 보여주면서 실제 apply는 거부하는 불일치가 있었다. (작업트리
   # 발산 자체는 위 preflight가 이미 거부하므로 두 경로의 목록이 항상 같다.)
   echo "── DB: ${PGDATABASE} @ ${PGHOST}:${PGPORT} (schema: ${PGSCHEMA}, commit: ${_SRC_COMMIT})"
-  if ! _ledger="$(psql -X -v ON_ERROR_STOP=1 -tAc "select to_regclass('\"${PGSCHEMA}\".schema_migrations') is not null" 2>&1)"; then
-    echo "❌ ledger 존재 확인 실패: $_ledger" >&2
+  if ! _mig_psql -X -v ON_ERROR_STOP=1 -tAc "select to_regclass('\"${PGSCHEMA}\".schema_migrations') is not null"; then
+    echo "❌ ledger 존재 확인 실패: $_MIG_OUT" >&2
     exit 3
   fi
+  _ledger="$_MIG_OUT"
   [ "$_ledger" = "t" ] || echo "   (schema_migrations 없음 — 아직 한 번도 적용되지 않은 DB)"
   for _name in $_MIG_NAMES; do
     v="${_name%.sql}"
@@ -279,102 +413,8 @@ if [ "$MODE" = "status" ]; then
   exit 0
 fi
 
-# ── 리뷰 16차 P1(7차): 신호 계약 — runner가 TERM/INT/HUP을 받으면 migration
-# psql "프로세스 그룹" 전체에 신호를 전달하고, bounded reap(전달 → 대기 → KILL)
-# 후 서버 쪽 backend 종료까지 확인하고 나서 종료한다. 과거에는 runner가
-# rc=143으로 죽은 뒤에도 child psql이 계속 실행되어 4초 뒤 commit했고 wrapper
-# temp도 남았다 (실측).
-_MIG_TMPS=""
-_mig_cleanup_tmps() { local _t; for _t in $_MIG_TMPS; do rm -f "$_t" 2>/dev/null || true; done; _MIG_TMPS=""; }
-_MIG_SIG=""
-_mig_sig_num() { case "$1" in INT) echo 2 ;; HUP) echo 1 ;; *) echo 15 ;; esac; }
-# 리뷰 16차 8라운드 후속 P1: "flag 기록 + 다음 checkpoint 검사" 방식은 마지막
-# checkpoint 이후(최종 성공 보고 창)에 온 신호를 rc=0 성공으로 위장했다 (실측).
-# handler를 phase-aware로: migration psql이 실행 중(phase=psql)일 때만 기록하고
-# 전달·reap은 _mig_run_psql의 루프가 소유한다. 그 외 모든 구간(phase=run —
-# preflight·ledger 조회·최종 보고 포함)은 진행 중 transaction이 없으므로 trap이
-# temp 정리 후 "즉시" 128+N으로 종료한다 — checkpoint 사이 창이 존재하지 않는다.
-_MIG_PHASE="run"
-_mig_on_sig() {
-  _MIG_SIG="$1"
-  [ "$_MIG_PHASE" = "psql" ] && return 0
-  local _snum
-  _snum="$(_mig_sig_num "$1")"
-  _mig_cleanup_tmps
-  echo "❌ 신호(${1}) 수신 — 즉시 중단합니다 (진행 중 transaction 없음; 이미 적용된 migration은 유효)." >&2
-  exit $((128 + _snum))
-}
-trap '_mig_on_sig TERM' TERM
-trap '_mig_on_sig INT'  INT
-trap '_mig_on_sig HUP'  HUP
-trap '_mig_cleanup_tmps' EXIT
-
-# 리뷰 16차 P1(8차): 신호 이후에는 어떤 migration도 새로 시작하지 않는다.
-# 8라운드 후속부터 phase=run 구간의 신호는 trap 자신이 즉시 종료하므로, 이
-# 검사는 "psql phase에서 기록된 신호가 정상 복귀 경로로 새어나온 경우"를 막는
-# 방어선이다 (예: wait 직후 신호 — 루프가 처리하기 전 정상 복귀한 경계).
-_mig_check_sig() {
-  [ -n "$_MIG_SIG" ] || return 0
-  local _snum
-  _snum="$(_mig_sig_num "$_MIG_SIG")"
-  _mig_cleanup_tmps
-  echo "❌ 신호(${_MIG_SIG}) 수신 — 새 migration을 시작하지 않고 중단합니다 (이미 적용된 migration은 유효, 진행 중 transaction 없음)." >&2
-  exit $((128 + _snum))
-}
-
-# 서버 쪽 종료 확인: 이 runner(application_name=$PGAPPNAME)의 다른 backend가
-# 사라질 때까지 bounded 대기 — 중간에 종료 요청(pg_terminate_backend)으로
-# escalate하고, 끝까지 남으면 실패(호출자가 경고)를 반환한다.
-_mig_server_drain() {
-  local _q="select count(*) from pg_stat_activity where application_name = '${PGAPPNAME}' and pid <> pg_backend_pid()" _n="" _i=0
-  while [ "$_i" -lt 20 ]; do
-    _n="$(psql -X -tAc "$_q" 2>/dev/null || echo "")"
-    [ "$_n" = "0" ] && return 0
-    if [ "$_i" -eq 8 ] && [ -n "$_n" ]; then
-      psql -X -tAc "select pg_terminate_backend(pid) from pg_stat_activity where application_name = '${PGAPPNAME}' and pid <> pg_backend_pid()" >/dev/null 2>&1 || true
-    fi
-    sleep 0.25; _i=$((_i+1))
-  done
-  [ "$(psql -X -tAc "$_q" 2>/dev/null || echo x)" = "0" ]
-}
-
-# migration psql 실행 — job control(set -m)로 별도 프로세스 그룹에 배치.
-# $1=wrapper SQL 파일, $2=출력 파일. 반환: psql rc. 신호 수신 시 전달·reap·
-# 서버 확인·temp 정리 후 여기서 종료한다.
-_mig_run_psql() {
-  local _pid _rc _i _snum
-  _mig_check_sig  # 8차: 신호가 이미 기록됐으면 psql을 아예 띄우지 않는다
-  # 이 구간의 신호는 trap이 기록만 한다(phase=psql) — 전달·bounded reap·서버
-  # drain·종료는 아래 루프가 소유한다. 루프 밖으로 정상 복귀할 때 run으로 되돌린다.
-  _MIG_PHASE="psql"
-  set -m
-  psql -X -v ON_ERROR_STOP=1 -q --single-transaction -f "$1" > "$2" 2>&1 &
-  _pid=$!
-  set +m
-  while :; do
-    _rc=0
-    wait "$_pid" 2>/dev/null || _rc=$?
-    if [ -n "$_MIG_SIG" ]; then
-      kill -s "$_MIG_SIG" -- "-${_pid}" 2>/dev/null || true
-      _i=0
-      while kill -0 "$_pid" 2>/dev/null && [ "$_i" -lt 20 ]; do sleep 0.25; _i=$((_i+1)); done
-      if kill -0 "$_pid" 2>/dev/null; then
-        kill -KILL -- "-${_pid}" 2>/dev/null || true
-      fi
-      wait "$_pid" 2>/dev/null || true
-      if ! _mig_server_drain; then
-        echo "⚠️  서버에 이 runner의 backend가 아직 남아 있을 수 있습니다 — pg_stat_activity(application_name=${PGAPPNAME})를 확인하세요." >&2
-      fi
-      _snum="$(_mig_sig_num "$_MIG_SIG")"
-      _mig_cleanup_tmps
-      echo "❌ 신호(${_MIG_SIG})로 중단됨 — migration psql 프로세스 그룹에 신호를 전달하고 서버 backend 종료를 확인했습니다 (미완료 transaction은 서버가 rollback)." >&2
-      exit $((128 + _snum))
-    fi
-    kill -0 "$_pid" 2>/dev/null || break
-  done
-  _MIG_PHASE="run"
-  return "$_rc"
-}
+# 신호 계약·psql 실행 경로(_mig_psql)는 위(접속 검증 앞)에서 정의됐다 —
+# 재재리뷰 P1 #1: apply 경로도 같은 helper 하나만 쓴다.
 
 # ledger 부트스트랩 (apply 전용 — 존재 보장, 이후 guard/INSERT가 의존).
 # 리뷰 15차 P1: CREATE TABLE IF NOT EXISTS도 동시 실행에서 pg_type 충돌로 실패할 수
@@ -385,15 +425,17 @@ _bootstrap_ddl="CREATE TABLE IF NOT EXISTS \"${PGSCHEMA}\".schema_migrations (
   version TEXT PRIMARY KEY,
   applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )"
+# 재재리뷰 P1 #1: bootstrap도 foreground psql이 아니라 _mig_psql 경유 — TERM이
+# psql 종료까지 지연되지 않는다.
 if [ "$PGSCHEMA" = "public" ]; then
-  psql -X -v ON_ERROR_STOP=1 -q --single-transaction \
+  _mig_psql -X -v ON_ERROR_STOP=1 -q --single-transaction \
     -c "SELECT pg_advisory_xact_lock(${ADVISORY_KEY})" \
-    -c "$_bootstrap_ddl" >/dev/null || { echo "❌ schema_migrations 부트스트랩 실패." >&2; exit 3; }
+    -c "$_bootstrap_ddl" || { echo "❌ schema_migrations 부트스트랩 실패: $_MIG_OUT" >&2; exit 3; }
 else
-  psql -X -v ON_ERROR_STOP=1 -q --single-transaction \
+  _mig_psql -X -v ON_ERROR_STOP=1 -q --single-transaction \
     -c "SELECT pg_advisory_xact_lock(${ADVISORY_KEY})" \
     -c "CREATE SCHEMA IF NOT EXISTS \"${PGSCHEMA}\"" \
-    -c "$_bootstrap_ddl" >/dev/null || { echo "❌ schema/ledger 부트스트랩 실패." >&2; exit 3; }
+    -c "$_bootstrap_ddl" || { echo "❌ schema/ledger 부트스트랩 실패: $_MIG_OUT" >&2; exit 3; }
 fi
 
 for _name in $_MIG_NAMES; do
@@ -486,6 +528,9 @@ for _name in $_MIG_NAMES; do
   _MIG_TMPS="$_MIG_TMPS $_pre $_post $_wrap"
   {
     printf 'SELECT pg_advisory_xact_lock(%s);\n' "$ADVISORY_KEY"
+    # 재재리뷰 P1 #3(b): runtime app role 목록을 GUC로 주입 — 값은 위에서 식별자
+    # 규칙([A-Za-z0-9_,])으로 검증됐으므로 single-quote literal에 안전하다.
+    printf "SET LOCAL shaman.app_roles = '%s';\n" "$_MIG_APP_ROLES"
     printf 'DO $mig$ BEGIN\n'
     printf "  IF EXISTS (SELECT 1 FROM \"%s\".schema_migrations WHERE version = '%s') THEN\n" "$PGSCHEMA" "$v"
     printf "    RAISE EXCEPTION 'migration %% is already applied', '%s';\n" "$v"
@@ -520,12 +565,10 @@ for _name in $_MIG_NAMES; do
   rm -f "$_snap" "$_pre" "$_post" "$_cut"
   # 단일 transaction 안에서: advisory lock → applied 재확인(guard) → SQL(EXECUTE)
   # → ledger 기록. 동시 runner의 패자는 lock 대기 후 guard의 예외로 중단된다.
-  _outf="$(mktemp "${TMPDIR:-/tmp}/dbmig-out.XXXXXX")" || { rm -f "$_wrap"; echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
-  _MIG_TMPS="$_MIG_TMPS $_outf"
   _rc=0
-  _mig_run_psql "$_wrap" "$_outf" || _rc=$?
-  _out="$(cat "$_outf" 2>/dev/null || true)"
-  rm -f "$_wrap" "$_outf"
+  _mig_psql -X -v ON_ERROR_STOP=1 -q --single-transaction -f "$_wrap" || _rc=$?
+  _out="$_MIG_OUT"
+  rm -f "$_wrap"
   if [ "$_rc" -ne 0 ]; then
     # 리뷰 16차 P1(오류 오판): 출력 문자열 매칭으로 skip을 판정하지 않는다 —
     # 마이그레이션 SQL의 임의 오류 메시지에 'ALREADY_APPLIED'가 포함되면 실패한
@@ -555,48 +598,14 @@ done
 
 # 최종 성공 보고 — ledger를 서버에서 재확인한 값으로 보고한다 (fail-closed).
 #
-# 재리뷰(추가사항): trap은 "포그라운드 명령이 끝난 뒤"에 실행되므로, 최종 ledger
-# 조회를 `$(psql ...)` 명령치환으로 돌리면 TERM을 받아도 psql이 끝날 때까지(실측
-# 5초) 기다린 뒤에야 종료했다 — rc=143은 맞지만 "즉시 종료" 계약은 아니었다.
-# 조회를 별도 프로세스 그룹의 background job으로 돌리고 wait로 기다린다: wait는
-# trap에 의해 즉시 깨어나므로, 신호를 받는 즉시 psql 그룹에 전달·reap하고 종료한다.
-_mig_query_bg() {  # $1=SQL → stdout(결과). 신호 수신 시 즉시 전달·reap 후 종료.
-  local _qout _pid _rc _i _snum
-  _mig_check_sig
-  _qout="$(mktemp "${TMPDIR:-/tmp}/dbmig-q.XXXXXX")" || { echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
-  _MIG_TMPS="$_MIG_TMPS $_qout"
-  _MIG_PHASE="psql"
-  set -m
-  psql -X -v ON_ERROR_STOP=1 -tAc "$1" > "$_qout" 2>&1 &
-  _pid=$!
-  set +m
-  while :; do
-    _rc=0
-    wait "$_pid" 2>/dev/null || _rc=$?
-    if [ -n "$_MIG_SIG" ]; then
-      kill -s "$_MIG_SIG" -- "-${_pid}" 2>/dev/null || true
-      _i=0
-      while kill -0 "$_pid" 2>/dev/null && [ "$_i" -lt 20 ]; do sleep 0.25; _i=$((_i+1)); done
-      kill -0 "$_pid" 2>/dev/null && kill -KILL -- "-${_pid}" 2>/dev/null
-      wait "$_pid" 2>/dev/null || true
-      _mig_server_drain || true
-      _snum="$(_mig_sig_num "$_MIG_SIG")"
-      _mig_cleanup_tmps
-      echo "❌ 신호(${_MIG_SIG}) 수신 — 즉시 중단합니다 (진행 중 transaction 없음; 이미 적용된 migration은 유효)." >&2
-      exit $((128 + _snum))
-    fi
-    kill -0 "$_pid" 2>/dev/null || break
-  done
-  _MIG_PHASE="run"
-  cat "$_qout"
-  rm -f "$_qout"
-  return "$_rc"
-}
-
+# 재재리뷰 P1 #1: 종전의 `_final_n="$(_mig_query_bg ...)"`는 명령치환이라 부모
+# bash가 subshell 종료까지 TERM trap을 미뤘다 (실측: elapsed≥5s, DB35 실패).
+# _mig_psql은 부모 셸에서 실행되고 결과는 _MIG_OUT으로 받는다 — 명령치환 없음.
 _mig_check_sig
-if ! _final_n="$(_mig_query_bg "select count(*) from \"${PGSCHEMA}\".schema_migrations")"; then
-  echo "❌ 최종 ledger 확인 실패: ${_final_n}" >&2
+if ! _mig_psql -X -v ON_ERROR_STOP=1 -tAc "select count(*) from \"${PGSCHEMA}\".schema_migrations"; then
+  echo "❌ 최종 ledger 확인 실패: ${_MIG_OUT}" >&2
   exit 3
 fi
+_final_n="$_MIG_OUT"
 _mig_check_sig
 echo "✅ migrations up-to-date (${_final_n} applied; ${PGDATABASE} @ ${PGHOST}:${PGPORT}, schema: ${PGSCHEMA})"

@@ -301,33 +301,55 @@ DROP FUNCTION IF EXISTS app_lock_user_rows(BIGINT[]);
 --   - app_soft_delete_user()는 이 role 소유의 SECURITY DEFINER 함수 — 함수 안
 --     에서만 current_user가 shaman_softdelete가 된다.
 --
--- 재리뷰 #4 (기존 role 무조건 신뢰 금지): 같은 이름의 LOGIN role이나 member가
--- 이미 있으면 그 member가 SET ROLE로 진입점을 우회해 직접 삭제할 수 있다 (실측).
--- role을 인수하기 전에 속성(NOLOGIN)과 membership(비어 있음)을 검증하고, 위반이면
--- 거부한다 (fail-closed — 배포가 role을 정리해야 한다).
+-- 재리뷰 #4 (기존 role 무조건 신뢰 금지) + 재재리뷰 P1 #2 (생성 경합 검증 우회):
+--   - 종전에는 존재 확인 "뒤" 경쟁 세션이 shaman_softdelete LOGIN을 만들면
+--     duplicate_object를 삼키고 검증 없이 005까지 성공 기록했다 — 다음 실행은
+--     ledger 때문에 skip해 위반 role이 영구 잔존했다 (실측: rc=0, rolcanlogin=true).
+--     이제 존재/신규/경합 어느 경로로든 "지금 카탈로그의 role"을 같은 기준으로
+--     생성 이후에 재검증한다 — 검증을 통과하지 못하면 transaction 전체가 rollback
+--     되어 ledger에 기록되지 않는다 (fail-closed).
+--   - member 예외는 둘뿐이다: superuser(이미 모든 경계 밖)와 "이 migration을
+--     실행 중인 role 자신"(비-superuser 배포의 OWNER TO가 membership을 요구한다 —
+--     ADR 0004 운영 전제; 재재리뷰 P1 #3(a) 모순 해소). 그 외 member는 SET ROLE로
+--     진입점을 우회할 수 있어 거부한다.
+--   - 상위-role membership(shaman_softdelete가 다른 role의 member)도 거부한다 —
+--     정의자 컨텍스트가 상속으로 최소 권한을 초과하면 안 된다 (재재리뷰 P2).
 DO $role$
 DECLARE
   _canlogin BOOLEAN;
   _members  INT;
+  _parents  INT;
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'shaman_softdelete') THEN
-    SELECT r.rolcanlogin INTO _canlogin FROM pg_roles r WHERE r.rolname = 'shaman_softdelete';
-    SELECT count(*) INTO _members
-      FROM pg_auth_members m
-      JOIN pg_roles r ON r.oid = m.roleid
-     WHERE r.rolname = 'shaman_softdelete';
-    IF _canlogin THEN
-      RAISE EXCEPTION 'role shaman_softdelete가 LOGIN 속성을 가지고 있습니다 — soft-delete 정의자 role은 NOLOGIN이어야 합니다 (이 role로 직접 접속하면 진입점을 우회할 수 있습니다). ALTER ROLE shaman_softdelete NOLOGIN 후 재실행하세요 (fail-closed)';
-    END IF;
-    IF _members > 0 THEN
-      RAISE EXCEPTION 'role shaman_softdelete에 member가 % 명 있습니다 — member는 SET ROLE로 진입점을 우회해 직접 삭제할 수 있습니다. 모든 membership을 REVOKE한 뒤 재실행하세요 (fail-closed)', _members;
-    END IF;
-  ELSE
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'shaman_softdelete') THEN
     BEGIN
       CREATE ROLE shaman_softdelete NOLOGIN;
     EXCEPTION WHEN duplicate_object THEN
-      NULL;  -- 동시 생성 경합 — 존재하면 충분하다 (다음 실행이 위 검증을 수행)
+      NULL;  -- 동시 생성 경합 — 승자가 만든 role도 아래 재검증을 그대로 통과해야 한다
     END;
+  END IF;
+  SELECT r.rolcanlogin INTO _canlogin FROM pg_roles r WHERE r.rolname = 'shaman_softdelete';
+  IF _canlogin IS NULL THEN
+    RAISE EXCEPTION 'role shaman_softdelete가 생성/확인 직후 사라졌습니다 — 외부 개입 의심, 재실행하세요 (fail-closed)';
+  END IF;
+  IF _canlogin THEN
+    RAISE EXCEPTION 'role shaman_softdelete가 LOGIN 속성을 가지고 있습니다 — soft-delete 정의자 role은 NOLOGIN이어야 합니다 (이 role로 직접 접속하면 진입점을 우회할 수 있습니다). ALTER ROLE shaman_softdelete NOLOGIN 후 재실행하세요 (fail-closed)';
+  END IF;
+  SELECT count(*) INTO _members
+    FROM pg_auth_members m
+    JOIN pg_roles r  ON r.oid  = m.roleid
+    JOIN pg_roles mr ON mr.oid = m.member
+   WHERE r.rolname = 'shaman_softdelete'
+     AND NOT mr.rolsuper
+     AND mr.rolname <> current_user;
+  IF _members > 0 THEN
+    RAISE EXCEPTION 'role shaman_softdelete에 허용되지 않은 member가 % 명 있습니다 — member는 SET ROLE로 진입점을 우회해 직접 삭제할 수 있습니다 (허용 예외: superuser·migration 실행 role 자신). 해당 membership을 REVOKE한 뒤 재실행하세요 (fail-closed)', _members;
+  END IF;
+  SELECT count(*) INTO _parents
+    FROM pg_auth_members m
+    JOIN pg_roles mr ON mr.oid = m.member
+   WHERE mr.rolname = 'shaman_softdelete';
+  IF _parents > 0 THEN
+    RAISE EXCEPTION 'role shaman_softdelete가 상위 role %개의 member입니다 — 정의자 컨텍스트가 상속으로 최소 권한을 초과할 수 있습니다. REVOKE <role> FROM shaman_softdelete 후 재실행하세요 (fail-closed)', _parents;
   END IF;
 END $role$;
 
@@ -394,14 +416,29 @@ END $fn$;
 -- 권한도 없는 신규 CONNECT role이 app_soft_delete_user(1)로 사용자를 삭제할 수
 -- 있었다 (실측 — SECURITY DEFINER가 정의자 권한으로 전부 수행하므로). PUBLIC에서
 -- 회수하고 "명시적 app role"에만 부여한다.
--- app role = 이 migration을 실행한 role(= DATABASE_URL의 애플리케이션 role).
--- 추가 app role이 있으면 배포가 명시적으로 GRANT해야 한다 (ADR 0004).
+--
+-- 재재리뷰 P1 #3(b): EXECUTE 대상은 "runtime app role"이지 migration의 current_user
+-- 가 아니다 — live 연결이 postgres면 postgres만 grant되어 애플리케이션이 진입점을
+-- 호출할 수 없었다. 대상 role 목록은 runner(scripts/db_migrate.sh)가
+-- MIGRATION_APP_ROLES에서 식별자 검증 후 GUC(shaman.app_roles, 쉼표 구분)로
+-- 주입한다. 지정이 없으면 실행 role로 fallback한다 (단일-role 배포 — ADR 0004).
+-- 재재리뷰 P1 #3(c): custom schema에서는 EXECUTE만으로 함수를 호출할 수 없다 —
+-- 각 runtime role에 schema USAGE도 함께 부여한다.
 DO $acl$
 DECLARE
-  _app text := current_user;
+  _roles text := coalesce(nullif(trim(current_setting('shaman.app_roles', true)), ''), current_user::text);
+  _r     text;
 BEGIN
   EXECUTE format('REVOKE ALL ON FUNCTION %I.app_soft_delete_user(bigint) FROM PUBLIC', current_schema);
-  EXECUTE format('GRANT EXECUTE ON FUNCTION %I.app_soft_delete_user(bigint) TO %I', current_schema, _app);
+  FOREACH _r IN ARRAY regexp_split_to_array(_roles, ',') LOOP
+    _r := trim(_r);
+    CONTINUE WHEN _r = '';
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = _r) THEN
+      RAISE EXCEPTION 'app role "%"가 존재하지 않습니다 — MIGRATION_APP_ROLES가 가리키는 runtime role을 먼저 생성한 뒤 재실행하세요 (fail-closed)', _r;
+    END IF;
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %I.app_soft_delete_user(bigint) TO %I', current_schema, _r);
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', current_schema, _r);
+  END LOOP;
 END $acl$;
 
 -- #2 (search_path가 신뢰 경계가 아니었다): `SET search_path FROM CURRENT`가 캡처하는
