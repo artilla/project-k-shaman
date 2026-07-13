@@ -1397,3 +1397,157 @@ MOCK
   # 우리 쪽 잔여물(token 임시 파일·임시 index)은 없다
   [ -z "$(find "$d/.git" -maxdepth 1 -name 'index.amrb*' 2>/dev/null)" ]
 }
+
+# 8라운드 후속 P1: cleanup의 release가 소유 확인 "전"에 canonical lock을 rename으로
+# 들어냈다 — 획득 여부와 무관하게 release가 호출되므로, 살아 있는 foreign writer의
+# lock이 빈 창 동안 canonical 경로에서 사라져 제3 writer가 획득했다 (상호배제 붕괴,
+# 실측: canonical=third, displaced=live foreign). 이제 release는 획득 시 보관한
+# 세션 token이 일치하는 lock에만 손을 댄다 — foreign lock은 한순간도 이동하지 않는다.
+@test "execute: live foreign writer lock never leaves the canonical path (token-gated release, no exclusion gap)" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  # 초기 clean 검사를 통과하도록 state/를 ignore (실제 repo와 동일 조건)
+  printf 'state/\n' > "$d/.gitignore"
+  git -C "$d" add .gitignore
+  git -C "$d" commit -q -m "ignore state"
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_fw.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/fw.flag" ]; then touch "$TEST_HOME/fw.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_fw.sh"
+
+  # 살아 있는 foreign writer의 lock (token 파일 없음 — 다른 writer 계열)
+  sleep 600 &
+  local fpid=$!
+  mkdir -p "$d/state/ticket_write.lock.d"
+  echo "$fpid" > "$d/state/ticket_write.lock.d/pid"
+  local ino_before gap_pid
+  ino_before="$(stat -f '%i' "$d/state/ticket_write.lock.d/pid" 2>/dev/null || stat -c '%i' "$d/state/ticket_write.lock.d/pid")"
+  # 관찰자: canonical lock이 한순간이라도 사라지면 GAP 기록
+  ( while :; do [ -d "$d/state/ticket_write.lock.d" ] || echo GAP >> "$TEST_HOME/fw.gaps"; sleep 0.01; done ) &
+  gap_pid=$!
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_fw.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  kill "$gap_pid" 2>/dev/null || true
+  wait "$gap_pid" 2>/dev/null || true
+  kill "$fpid" 2>/dev/null || true
+
+  [ "$status" -eq 1 ]
+  # 상호배제가 한순간도 깨지지 않았다 — 관찰 내내 canonical lock 존재
+  [ ! -f "$TEST_HOME/fw.gaps" ]
+  # foreign lock은 내용·inode 그대로 — 들어냈다 되돌린 것도 아니다
+  [ "$(cat "$d/state/ticket_write.lock.d/pid")" = "$fpid" ]
+  [ "$(stat -f '%i' "$d/state/ticket_write.lock.d/pid" 2>/dev/null || stat -c '%i' "$d/state/ticket_write.lock.d/pid")" = "$ino_before" ]
+  # 들어낸 흔적(.rel/.acq)이 없다
+  [ -z "$(ls -d "$d/state/ticket_write.lock.d.rel."* "$d/state/ticket_write.lock.d.acq."* 2>/dev/null || true)" ]
+  # writer lock을 못 잡으므로 복원은 포기 — 잔상 보존(REF_ONLY)
+  grep -q $'\tREF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+}
+
+# 8라운드 후속 P1: quarantine rename과 manifest 기록 사이에 죽으면 빈 .claim +
+# .amrb-bak payload만 남아 원경로·worktree·merge OID를 알 수 없었다 — 결정적 복구
+# 불가. 이제 rename "전"에 내구성 있는 intent metadata를 기록한다.
+@test "execute: KILL between quarantine rename and manifest record leaves deterministic intent metadata" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_qi.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/qi.flag" ]; then touch "$TEST_HOME/qi.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_qi.sh"
+
+  # quarantine rename(mv → trash) 직후, manifest 기록 "전"에 auto_merge를 KILL
+  local realmv
+  realmv="$(command -v mv)"
+  mkdir -p "$TEST_HOME/qibin"
+  cat > "$TEST_HOME/qibin/mv" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+case "\$last" in *auto_merge.trash.d/*)
+  "$realmv" "\$@"; rc=\$?
+  kill -KILL "\$PPID" 2>/dev/null
+  sleep 3
+  exit \$rc
+;; esac
+exec "$realmv" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/qibin/mv"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/qibin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_qi.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -ne 0 ]
+
+  # intent metadata가 남아 결정적 복구가 가능하다
+  local intent payload src dst wt
+  intent="$(ls "$d/.git/auto_merge.trash.d/"*.intent 2>/dev/null | head -1)"
+  [ -n "$intent" ]
+  grep -q $'^src\tdocs/file-1.md$' "$intent"
+  grep -Eq $'^merge\t[0-9a-f]{40}$' "$intent"
+  grep -q $'^worktree\t'"$d"'$' "$intent"
+  payload="${intent%.intent}"
+  [ -f "$payload" ]
+  grep -q "content 1" "$payload"
+  # manifest에는 이 격리의 행이 없다 — "행이 있으면 파일이 있다" 불변식과 함께,
+  # 기록 전 중단은 행이 아니라 intent로 식별된다 (거짓 성공 없음)
+  if [ -f "$d/.git/auto_merge.trash.d/manifest.tsv" ]; then
+    ! grep -q "$payload" "$d/.git/auto_merge.trash.d/manifest.tsv"
+  fi
+  # intent의 metadata만으로 실제 복원이 성립한다
+  src="$(awk -F'\t' '$1=="src"{print $2}' "$intent")"
+  dst="$(awk -F'\t' '$1=="dst"{print $2}' "$intent")"
+  wt="$(awk -F'\t' '$1=="worktree"{print $2}' "$intent")"
+  mv "$dst" "$wt/$src"
+  grep -q "content 1" "$d/docs/file-1.md"
+}
+
+# 8라운드 후속 P1: manifest 기록 실패가 rollback 성공으로 취급됐다 — 이제 기록
+# 실패는 rename을 되돌리고 실패를 반환한다 (호출자가 원복·보존, REF_ONLY 격하).
+@test "execute: quarantine manifest record failure is not success - rename undone, file preserved, REF_ONLY" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_qm.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/qm.flag" ]; then touch "$TEST_HOME/qm.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_qm.sh"
+
+  # manifest.tsv 자리에 디렉터리 — append가 반드시 실패한다
+  mkdir -p "$d/.git/auto_merge.trash.d/manifest.tsv"
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_qm.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  # rename이 되돌려져 파일은 원경로에 보존됐고, REF_ONLY로 격하됐다
+  [ -f "$d/docs/file-1.md" ]
+  grep -q "content 1" "$d/docs/file-1.md"
+  grep -q $'\tREF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+  # 격리 디렉터리에 payload·intent 잔여물이 없다 (거짓 기록·거짓 성공 없음)
+  [ -z "$(ls "$d/.git/auto_merge.trash.d" 2>/dev/null | grep -v -e '^README.md$' -e '^manifest.tsv$' || true)" ]
+}

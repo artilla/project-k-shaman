@@ -560,17 +560,26 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     local _i=0 _p _mp _pre
     mkdir -p state 2>/dev/null || true
     _pre="$_TW_LOCK.acq.$$"
+    # 리뷰 16차 8라운드 후속 P1: 획득마다 "세션 고유 token"을 lock 안에 담는다 —
+    # release는 이 token이 일치하는 lock에만 손을 댄다 (pid 재사용·lock 교체와
+    # 무관한 유일 소유 증거). token 파일이 없는 lock(다른 writer 계열)은 release가
+    # 관찰만 하고 절대 치우지 않는다.
     _am_tw_mkpre() {
       rm -rf "$_pre" 2>/dev/null || true
       mkdir "$_pre" 2>/dev/null || return 1
+      _AM_TW_TOKEN_CAND="tw.$$.${RANDOM}${RANDOM}${RANDOM}"
       echo "$$" > "$_pre/pid" 2>/dev/null || { rm -rf "$_pre" 2>/dev/null || true; return 1; }
+      printf '%s' "$_AM_TW_TOKEN_CAND" > "$_pre/token" 2>/dev/null || { rm -rf "$_pre" 2>/dev/null || true; return 1; }
     }
     _am_tw_mkpre || return 1
     while :; do
       if [ ! -e "$_TW_LOCK" ] && mv "$_pre" "$_TW_LOCK" 2>/dev/null; then
         # rename 경합으로 기존 lock "안"에 중첩됐을 수 있다 — 소유는 경로가 아니라
-        # 내용(pid==$$ + 비중첩)으로만 확정한다.
-        if [ "$(cat "$_TW_LOCK/pid" 2>/dev/null || true)" = "$$" ] && [ ! -d "$_TW_LOCK/${_pre##*/}" ]; then
+        # 내용(pid==$$ + token + 비중첩)으로만 확정한다.
+        if [ "$(cat "$_TW_LOCK/pid" 2>/dev/null || true)" = "$$" ] \
+           && [ "$(cat "$_TW_LOCK/token" 2>/dev/null || true)" = "$_AM_TW_TOKEN_CAND" ] \
+           && [ ! -d "$_TW_LOCK/${_pre##*/}" ]; then
+          _AM_TW_TOKEN="$_AM_TW_TOKEN_CAND"
           _AM_TW_HELD=1
           return 0
         fi
@@ -593,21 +602,28 @@ if [ "$ELIGIBLE" -eq 0 ]; then
       sleep 0.1
     done
   }
-  # 리뷰 16차 P1(8차 2회, #8): 해제도 "관찰한 그 lock"에 결속한다. 종전의
-  # pid 읽기 → rm 구조는 그 사이 lock이 교체되면(내 lock이 stale로 회수되고 다른
-  # writer가 새 lock을 세운 경우) 남의 lock을 지워 상호배제를 붕괴시켰다.
-  # 회수(acquire)와 같은 기법: 원자적 rename으로 먼저 들어낸 뒤 내용을 확인해
-  # 내 것일 때만 폐기하고, 아니면 그대로 되돌려 놓는다.
+  # 리뷰 16차 P1(8차 2회, #8) → 8라운드 후속 P1: 해제는 "내 token이 담긴 lock"
+  # 에만 손을 댄다. 8차 2회의 rename-먼저 방식은 소유 확인 "전"에 canonical
+  # lock을 들어냈다 — cleanup은 획득 여부와 무관하게 release를 호출하므로, 살아
+  # 있는 foreign lock이 빈 창 동안 canonical 경로에서 사라져 제3 writer가
+  # 획득했고 상호배제가 깨졌다 (실측: canonical=third, displaced=live foreign).
+  # 이제 (1) 획득하지 않았으면(token 없음) 아무것도 하지 않고, (2) 치우기 전에
+  # canonical lock의 token을 먼저 읽어 내 것일 때만 rename하며, (3) rename 후
+  # 재확인해 어긋나면 원복한다 — 알려진 foreign lock은 한순간도 canonical
+  # 경로를 떠나지 않는다.
   _am_tw_release() {
-    local _rel="$_TW_LOCK.rel.$$" _p
+    local _rel="$_TW_LOCK.rel.$$" _t
+    [ -n "${_AM_TW_TOKEN:-}" ] || return 0          # 획득한 적 없음 — 무접촉
     [ -d "$_TW_LOCK" ] || return 0
+    _t="$(cat "$_TW_LOCK/token" 2>/dev/null || true)"
+    [ "$_t" = "$_AM_TW_TOKEN" ] || return 0          # foreign lock — 무접촉
     mv "$_TW_LOCK" "$_rel" 2>/dev/null || return 0   # 이미 사라졌거나 남이 들고 있음
-    _p="$(cat "$_rel/pid" 2>/dev/null || true)"
-    if [ "$_p" = "$$" ]; then
+    if [ "$(cat "$_rel/token" 2>/dev/null || true)" = "$_AM_TW_TOKEN" ]; then
       rm -rf "$_rel" 2>/dev/null || true
+      _AM_TW_TOKEN=""
       return 0
     fi
-    # 내 것이 아니었다 — 원복한다 (그 사이 새 lock이 섰으면 덮지 않고 보존).
+    # 읽기~rename 사이에 교체됨(프로토콜 밖 개입) — 덮지 않고 원복한다.
     if [ -e "$_TW_LOCK" ] || ! mv "$_rel" "$_TW_LOCK" 2>/dev/null; then
       echo "[WARN] writer lock 원복 실패 — 확인 필요: ${_rel}" >&2
     fi
@@ -664,7 +680,9 @@ if [ "$ELIGIBLE" -eq 0 ]; then
         echo "- 복구: manifest.tsv(시각, merge OID, 원경로, 격리 경로, worktree toplevel)에서"
         echo "  찾아 mv로 복원 — 원경로는 5열의 worktree 기준 상대 경로다 (공유 trash 식별)."
         echo "- 불변식: manifest에 행이 있으면 그 격리 파일은 반드시 존재한다 (기록은 rename 후)."
-        echo "- '*.claim'만 남고 행이 없는 파일 = 격리는 됐으나 기록 실패/중단된 것 — 내용으로 확인 후 복원."
+        echo "- '*.intent'가 남고 행이 없는 파일 = 격리는 됐으나 기록 전 중단된 것 — intent 안의"
+        echo "  metadata(time/merge/src/dst/worktree)로 결정적으로 복원한다 (mv <dst> <worktree>/<src>)."
+        echo "- payload 없이 '*.intent'만 있는 것 = rename 전 중단 — 원본은 원위치에 있다 (intent는 삭제 가능)."
         echo "- 보존: 해당 rollback의 감사 로그(ROLLED_BACK) 확인 후 수동 삭제 가능 (자동 삭제 없음)."
         echo "- rename 실패 시에는 행을 남기지 않는다 — 그 파일은 격리되지 않고 원위치에 있다."
       } > "$1/README.md" 2>/dev/null || true
@@ -672,7 +690,7 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     return 0
   }
   _am_discard() {  # $1=캡처 파일, $2=원경로(기록용)
-    local _dir _dst _i _d1 _d2 _wt
+    local _dir _dst _i _d1 _d2 _wt _ts
     _dir="$_AM_COMMON_TRASH"
     _am_trash_init "$_dir" || return 1
     # 리뷰 16차 P1-9(7차): device 검사는 fail-closed — stat이 한쪽이라도 실패하면
@@ -681,35 +699,42 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     # 허용하고, 그 외에는 폐기하지 않는다 (호출자가 원복·보존).
     _d1="$(_dev_of "$1")"; _d2="$(_dev_of "$_dir")"
     [ -n "$_d1" ] && [ -n "$_d2" ] && [ "$_d1" = "$_d2" ] || return 1
-    # 리뷰 16차 P2(5차): 경로명 충돌 없는 목적지 — noclobber 생성으로 예약한다.
+    _wt="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    _ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
+    # 리뷰 16차 8라운드 후속 P1: 목적지 예약은 빈 .claim이 아니라 "복구에 충분한
+    # intent metadata"다 — rename과 manifest 기록 사이에 죽어도 원경로·worktree·
+    # merge OID·격리 경로가 남아 결정적 복구가 가능하다 (빈 마커 + .amrb-bak
+    # payload만으로는 복구가 불가능했다). noclobber 생성으로 경로 충돌도 예약.
     _i=0
     while :; do
       _dst="$_dir/$(date +%s).$$.${RANDOM}.$(basename "$1")"
-      if (set -C; : > "$_dst.claim") 2>/dev/null; then break; fi
+      if (set -C; printf 'time\t%s\nmerge\t%s\nsrc\t%s\ndst\t%s\nworktree\t%s\npid\t%s\nphase\tintent\n' \
+            "$_ts" "${MERGE_COMMIT:-unknown}" "$2" "$_dst" "$_wt" "$$" > "$_dst.intent") 2>/dev/null; then
+        break
+      fi
       _i=$((_i+1)); [ "$_i" -ge 10 ] && return 1
     done
-    # 리뷰 16차 P1(8차 2회, #8): manifest 행은 rename "후"에 기록한다.
-    # 6차의 record-then-rename은 기록과 rename 사이에 강제 종료되면 "격리 완료"를
-    # 뜻하는 성공 행만 남고 실제 격리 파일은 그 자리에 없는 상태를 만들었다 —
-    # manifest가 거짓을 말한다 (실측). 반대로 rename-then-record에서 그 사이에
-    # 죽으면 파일은 격리 디렉터리에 "안전하게" 존재하고 행만 없다 — 파일 유실이
-    # 없고, 남아 있는 .claim 마커로 미기록 격리본을 식별해 복구할 수 있다.
-    # 즉 "행이 있으면 파일이 있다"를 불변식으로 삼는다 (거짓 성공 금지).
-    # 리뷰 16차 P2(7차): trash는 common git dir 하나를 "여러 worktree"가 공유
-    # 한다 — 5열에 worktree toplevel(절대 경로)을 기록해 원경로를 유일하게 만든다.
-    _wt="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
     if ! mv "$1" "$_dst" 2>/dev/null; then
-      rm -f "$_dst.claim"          # 파일은 원위치 그대로 — 호출자가 원복·보존
+      rm -f "$_dst.intent"         # rename 전 실패 — 파일은 원위치, intent만 회수
       return 1
     fi
-    if ! printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)" \
+    # manifest 행이 "committed" 기록이다 — 행이 있으면 파일이 있다 (rename 후 기록).
+    if ! printf '%s\t%s\t%s\t%s\t%s\n' "$_ts" \
         "${MERGE_COMMIT:-unknown}" "$2" "$_dst" "$_wt" >> "$_dir/manifest.tsv" 2>/dev/null; then
-      # 파일은 이미 격리됐다(유실 없음) — 기록만 실패. .claim을 남겨 미기록
-      # 격리본으로 식별 가능하게 하고 경고한다.
-      echo "[WARN] quarantine manifest 기록 실패 — 파일은 격리됨: ${_dst} (원경로: ${_wt}/${2}); .claim 마커로 표시" >&2
-      return 0
+      # 리뷰 16차 8라운드 후속 P1: manifest 기록 실패는 성공이 아니다 — rename을
+      # 되돌려 호출자가 원복·보존(REF_ONLY)하게 한다. 되돌리기마저 실패하면
+      # 격리본과 intent metadata가 남아(유실 없음) 결정적 수동 복구가 가능하다.
+      if mv "$_dst" "$1" 2>/dev/null; then
+        rm -f "$_dst.intent"
+      else
+        echo "[WARN] quarantine manifest 기록 실패 + 원복 실패 — 격리본이 intent metadata와 함께 남아 있습니다: ${_dst} (${_dst}.intent 참조)" >&2
+      fi
+      return 1
     fi
-    rm -f "$_dst.claim"
+    # committed 전환: manifest 행 기록 완료 후 intent 마커 제거 — intent가 남아
+    # 있고 행이 없는 파일 = 미기록 격리본(intent로 복구), 행이 있는 파일 = committed.
+    rm -f "$_dst.intent"
+    return 0
   }
   # 리뷰 16차 P1-10(6차): 원복은 no-clobber — 캡처(rename)~원복 사이에 다른
   # 프로세스가 원경로에 만든 "새 파일"을 mv -f가 덮어썼다. ln(하드링크, 목적지
@@ -727,6 +752,8 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   _AM_LTMP_PATH=""
   _AM_ITMP_PATH=""
   _AM_TW_HELD=0
+  _AM_TW_TOKEN=""
+  _AM_TW_TOKEN_CAND=""
   _am_release_transients() {
     [ -n "${_AM_ITMP_PATH:-}" ] && { rm -f "$_AM_ITMP_PATH" 2>/dev/null || true; _AM_ITMP_PATH=""; }
     [ -n "${_AM_LTMP_PATH:-}" ] && { rm -f "$_AM_LTMP_PATH" 2>/dev/null || true; _AM_LTMP_PATH=""; }
