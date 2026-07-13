@@ -52,7 +52,19 @@ ENV_FILE="${ENV_FILE:-.env.local}"
 
 # 리뷰 16차 P2: sed|head는 대형 파일에서 SIGPIPE(rc=141) 무진단 종료가 가능 —
 # 입력을 끝까지 소비하는 awk 단일 패스로 첫 선언만 추출.
-DB_URL="$(awk '!f && sub(/^DATABASE_URL=/, "") { v = $0; f = 1 } END { if (f) print v }' "$ENV_FILE" | tr -d '"' | tr -d "'")"
+# 4라운드 P2: `tr -d`는 값 "안"의 모든 quote 문자까지 삭제해 값을 변형했다
+# (password에 quote가 있으면 다른 자격증명으로 접속) — 양끝의 "같은 종류 쌍"일
+# 때만 벗긴다 (frontmatter 파서와 동일 계약).
+_strip_pair_quotes() {  # $1=값 → stdout
+  local _v="$1"
+  case "$_v" in
+    \"*\") _v="${_v#\"}"; _v="${_v%\"}" ;;
+    \'*\') _v="${_v#\'}"; _v="${_v%\'}" ;;
+  esac
+  printf '%s' "$_v"
+}
+DB_URL="$(awk '!f && sub(/^DATABASE_URL=/, "") { v = $0; f = 1 } END { if (f) print v }' "$ENV_FILE")"
+DB_URL="$(_strip_pair_quotes "$DB_URL")"
 [ -n "$DB_URL" ] || { echo "❌ ${ENV_FILE} 에 DATABASE_URL 이 없습니다." >&2; exit 2; }
 
 # 리뷰 15차 P2: 수동 파서의 한계를 명시 거부로 — percent-encoding('%')·IPv6('[')는
@@ -109,7 +121,12 @@ fi
 # env MIGRATION_APP_ROLES 우선, 없으면 ENV_FILE의 선언을 읽는다. 쉼표 구분,
 # 각 이름은 schema와 같은 식별자 규칙으로 검증한다 (SET LOCAL literal에 들어가므로
 # 검증 실패는 거부 — fail-closed). 비어 있으면 migration이 실행 role로 fallback.
-_MIG_APP_ROLES="${MIGRATION_APP_ROLES:-$(awk '!f && sub(/^MIGRATION_APP_ROLES=/, "") { v = $0; f = 1 } END { if (f) print v }' "$ENV_FILE" | tr -d '"' | tr -d "'")}"
+if [ -n "${MIGRATION_APP_ROLES+x}" ]; then
+  _MIG_APP_ROLES="$MIGRATION_APP_ROLES"
+else
+  _MIG_APP_ROLES="$(awk '!f && sub(/^MIGRATION_APP_ROLES=/, "") { v = $0; f = 1 } END { if (f) print v }' "$ENV_FILE")"
+  _MIG_APP_ROLES="$(_strip_pair_quotes "$_MIG_APP_ROLES")"   # 4라운드 P2: 쌍 quote만 제거
+fi
 if [ -n "$_MIG_APP_ROLES" ]; then
   case "$_MIG_APP_ROLES" in
     *[!A-Za-z0-9_,]*)
@@ -171,8 +188,20 @@ command -v psql >/dev/null 2>&1 || { echo "❌ psql 이 PATH에 없습니다 (br
 # 이제 runner의 "모든" psql은 단 하나의 helper(_mig_psql)를 거친다: 별도 프로세스
 # 그룹의 background job + wait(신호에 즉시 깨어남) + 출력은 파일 경유로 부모 셸
 # 변수(_MIG_OUT)에 담는다 — 명령치환·foreground 대기 구조가 어디에도 남지 않는다.
+# 4라운드 P2: temp 목록은 개행 구분 — 공백 포함 TMPDIR에서도 cleanup이 경로를
+# 조각내지 않는다 (종전 공백 구분 + 무인용 word-splitting은 공백 경로를 누락).
 _MIG_TMPS=""
-_mig_cleanup_tmps() { local _t; for _t in $_MIG_TMPS; do rm -f "$_t" 2>/dev/null || true; done; _MIG_TMPS=""; }
+_mig_tmp_add() { _MIG_TMPS="${_MIG_TMPS}${1}
+"; }
+_mig_cleanup_tmps() {
+  local _t
+  while IFS= read -r _t; do
+    [ -n "$_t" ] && rm -f "$_t" 2>/dev/null || true
+  done <<MIG_TMPS_EOF
+$_MIG_TMPS
+MIG_TMPS_EOF
+  _MIG_TMPS=""
+}
 _MIG_SIG=""
 _mig_sig_num() { case "$1" in INT) echo 2 ;; HUP) echo 1 ;; *) echo 15 ;; esac; }
 # 리뷰 16차 8라운드 후속 P1: handler는 phase-aware — psql이 실행 중(phase=psql)일
@@ -231,19 +260,23 @@ _mig_probe() {  # $1=SQL, $2=제한(0.25s 스텝 수) → 결과는 $_MIG_PROBE_
   rm -f "$_f"
   return "$_rc"
 }
-_mig_server_drain() {
-  local _q="select count(*) from pg_stat_activity where application_name = '${PGAPPNAME}' and pid <> pg_backend_pid()" _i=0
-  # 전체 예산: probe(응답 상한 0.5s, 시간초과 시 TERM→KILL 포함 ≈0.8s) × 3회 +
-  # terminate 1회 + 최종 probe — 최악 ≈ 4s 상한. 예산 초과는 포기·실패 반환
-  # (호출자가 경고 후 즉시 종료 — 신호 처리 전체가 unbounded가 되지 않는다).
-  while [ "$_i" -lt 3 ]; do
+_mig_server_drain() {  # $1=absolute deadline(epoch초) — 신호 처리 전체와 "공유"
+  # 4라운드 P1(#8): drain의 자체 예산이 main psql reap과 "합산"되어 전체 상한이
+  # 계약(5s)을 넘었다 (실측: main·probe 모두 TERM 무시 시 9.057s). drain은 이제
+  # 독립 예산이 없다 — 호출자가 신호 수신 시점에 고정한 하나의 absolute deadline
+  # 안에서만 probe하고, 예산 소진 시 즉시 포기·실패를 반환한다.
+  local _q="select count(*) from pg_stat_activity where application_name = '${PGAPPNAME}' and pid <> pg_backend_pid()" _term_done=0 _now
+  while :; do
+    _now="$(date +%s)"
+    [ "$_now" -lt "$1" ] || return 1
     if _mig_probe "$_q" 2 && [ "$_MIG_PROBE_OUT" = "0" ]; then return 0; fi
-    if [ "$_i" -eq 1 ]; then
+    if [ "$_term_done" -eq 0 ]; then
+      _term_done=1
+      _now="$(date +%s)"
+      [ "$_now" -lt "$1" ] || return 1
       _mig_probe "select pg_terminate_backend(pid) from pg_stat_activity where application_name = '${PGAPPNAME}' and pid <> pg_backend_pid()" 2 || true
     fi
-    _i=$((_i+1))
   done
-  _mig_probe "$_q" 2 && [ "$_MIG_PROBE_OUT" = "0" ]
 }
 
 # 유일한 psql 실행 경로 — job control(set -m)로 별도 프로세스 그룹에 배치.
@@ -254,7 +287,7 @@ _mig_psql() {
   local _qout _pid _rc _i _snum
   _mig_check_sig  # 신호가 이미 기록됐으면 psql을 아예 띄우지 않는다
   _qout="$(mktemp "${TMPDIR:-/tmp}/dbmig-q.XXXXXX")" || { echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
-  _MIG_TMPS="$_MIG_TMPS $_qout"
+  _mig_tmp_add "$_qout"
   # 이 구간의 신호는 trap이 기록만 한다(phase=psql) — 전달·bounded reap·서버
   # drain·종료는 아래 루프가 소유한다. 루프 밖으로 정상 복귀할 때 run으로 되돌린다.
   _MIG_PHASE="psql"
@@ -266,14 +299,18 @@ _mig_psql() {
     _rc=0
     wait "$_pid" 2>/dev/null || _rc=$?
     if [ -n "$_MIG_SIG" ]; then
+      # 4라운드 P1(#8): 신호 처리 전체(main psql reap + 서버 drain)가 "하나의"
+      # absolute deadline(수신 +5s)을 공유한다 — 종전에는 reap 최대 5s와 drain
+      # 예산 ≈4s가 합산되어 상한이 9s를 넘었다 (실측 9.057s). 예산 소진 시
+      # KILL·포기 후 즉시 종료한다.
+      _mig_deadline=$(( $(date +%s) + 5 ))
       kill -s "$_MIG_SIG" -- "-${_pid}" 2>/dev/null || true
-      _i=0
-      while kill -0 "$_pid" 2>/dev/null && [ "$_i" -lt 20 ]; do sleep 0.25; _i=$((_i+1)); done
+      while kill -0 "$_pid" 2>/dev/null && [ "$(date +%s)" -lt "$_mig_deadline" ]; do sleep 0.25; done
       if kill -0 "$_pid" 2>/dev/null; then
         kill -KILL -- "-${_pid}" 2>/dev/null || true
       fi
       wait "$_pid" 2>/dev/null || true
-      if ! _mig_server_drain; then
+      if ! _mig_server_drain "$_mig_deadline"; then
         echo "⚠️  서버에 이 runner의 backend가 아직 남아 있을 수 있습니다 — pg_stat_activity(application_name=${PGAPPNAME})를 확인하세요." >&2
       fi
       _snum="$(_mig_sig_num "$_MIG_SIG")"
@@ -472,6 +509,13 @@ else
     -c "$_bootstrap_ddl" || { echo "❌ schema/ledger 부트스트랩 실패: $_MIG_OUT" >&2; exit 3; }
 fi
 
+# 4라운드(live 적용 전 확인): role 미지정 fallback은 조용히 지나가지 않는다 —
+# 005의 ACL 대상이 "실행 role"로 확정되며, ledger 때문에 설정 변경 후에도 005는
+# 재실행되지 않는다. runtime이 별도 role이면 적용 "전"에 지정해야 한다.
+if [ -z "$_MIG_APP_ROLES" ]; then
+  echo "ℹ️  MIGRATION_APP_ROLES 미지정 — 005 진입점 ACL(EXECUTE·schema USAGE)은 migration 실행 role(${PGUSER})로 fallback합니다. runtime이 별도 role이면 지금 지정하세요 (적용 후에는 ledger 때문에 005가 재실행되지 않아 후속 ACL migration이 필요합니다)." >&2
+fi
+
 for _name in $_MIG_NAMES; do
   _mig_check_sig  # 8차: bootstrap·직전 migration 사이에 온 신호 — 새 작업 시작 금지
   v="${_name%.sql}"
@@ -501,7 +545,7 @@ for _name in $_MIG_NAMES; do
     exit 1
   fi
   _snap="$(mktemp "${TMPDIR:-/tmp}/dbmig-snap.XXXXXX")" || { echo "❌ snapshot temp 생성 실패." >&2; exit 3; }
-  _MIG_TMPS="$_MIG_TMPS $_snap"
+  _mig_tmp_add "$_snap"
   if ! git cat-file blob "$_blob" > "$_snap" 2>/dev/null; then
     rm -f "$_snap"; echo "❌ $v: blob 읽기 실패 (${_blob})." >&2; exit 3
   fi
@@ -559,7 +603,7 @@ for _name in $_MIG_NAMES; do
   _pre="$(mktemp "${TMPDIR:-/tmp}/dbmig-pre.XXXXXX")" || { rm -f "$_snap"; echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
   _post="$(mktemp "${TMPDIR:-/tmp}/dbmig-post.XXXXXX")" || { rm -f "$_snap" "$_pre"; echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
   _wrap="$(mktemp "${TMPDIR:-/tmp}/dbmig.XXXXXX")" || { rm -f "$_snap" "$_pre" "$_post"; echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
-  _MIG_TMPS="$_MIG_TMPS $_pre $_post $_wrap"
+  _mig_tmp_add "$_pre"; _mig_tmp_add "$_post"; _mig_tmp_add "$_wrap"
   {
     printf 'SELECT pg_advisory_xact_lock(%s);\n' "$ADVISORY_KEY"
     # 재재리뷰 P1 #3(b): runtime app role 목록을 GUC로 주입 — 값은 위에서 식별자
@@ -589,7 +633,7 @@ for _name in $_MIG_NAMES; do
   _pre_sz="$(wc -c < "$_pre" | tr -d ' ')"
   _snap_sz="$(wc -c < "$_snap" | tr -d ' ')"
   _cut="$(mktemp "${TMPDIR:-/tmp}/dbmig-cut.XXXXXX")" || { rm -f "$_snap" "$_pre" "$_post" "$_wrap"; echo "❌ 임시 파일 생성 실패." >&2; exit 3; }
-  _MIG_TMPS="$_MIG_TMPS $_cut"
+  _mig_tmp_add "$_cut"
   dd if="$_wrap" of="$_cut" bs=1 skip="$_pre_sz" count="$_snap_sz" status=none 2>/dev/null || true
   if ! cmp -s "$_cut" "$_snap"; then
     rm -f "$_snap" "$_pre" "$_post" "$_wrap" "$_cut"
