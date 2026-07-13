@@ -68,31 +68,46 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   # 파일을 제거하고 rmdir한다. 그 사이 교체된 live lock은 inode가 달라 무접촉이며
   # rmdir 실패로 canonical에 그대로 남는다 (foreign lock 무이동 — 상호배제 공백 없음).
   _rb_reclaim_dead() {  # $1=lock dir → 0=해체 완료, 1=회수 불가
-    local _lk="$1" _obs="$1.obs.$$" _p
-    rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
-    _p="$(cat "$_lk/pid" 2>/dev/null || true)"
-    [ -n "$_p" ] || return 1
-    kill -0 "$_p" 2>/dev/null && return 1
-    if [ -f "$_lk/token" ]; then
-      ln "$_lk/token" "$_obs.t" 2>/dev/null || return 1
-    fi
-    if ! ln "$_lk/pid" "$_obs.p" 2>/dev/null; then
-      rm -f "$_obs.t" 2>/dev/null || true
-      return 1
-    fi
-    if [ "$(cat "$_obs.p" 2>/dev/null || true)" != "$_p" ] || kill -0 "$_p" 2>/dev/null; then
+      local _lk="$1" _obs="$1.obs.$$" _meta="$1.rec.d" _p _mp _rc=1
       rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
-      return 1
-    fi
-    if [ -f "$_obs.t" ] && [ "$_lk/token" -ef "$_obs.t" ]; then
-      rm -f "$_lk/token" 2>/dev/null || true
-    fi
-    if [ "$_lk/pid" -ef "$_obs.p" ]; then
-      rm -f "$_lk/pid" 2>/dev/null || true
-    fi
-    rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
-    rmdir "$_lk" 2>/dev/null || return 1
-    return 0
+      _p="$(cat "$_lk/pid" 2>/dev/null || true)"
+      [ -n "$_p" ] || return 1
+      kill -0 "$_p" 2>/dev/null && return 1
+      # 7라운드 P1(#2): -ef 확인과 경로 기반 rm 사이에 다른 reclaimer가 구 lock을
+      # 제거하고 새 owner가 획득하면 새 token이 삭제됐다 (실측: writer 고착) —
+      # 회수를 meta-lock(mkdir 원자)으로 직렬화한다. canonical 제거는 meta-lock
+      # 보유자만 수행한다. meta-lock stale은 pid-dead 시 정리(내용물 처분 가능).
+      if ! mkdir "$_meta" 2>/dev/null; then
+        _mp="$(cat "$_meta/pid" 2>/dev/null || true)"
+        if [ -n "$_mp" ] && ! kill -0 "$_mp" 2>/dev/null; then
+          rm -rf "$_meta" 2>/dev/null || true
+        fi
+        return 1
+      fi
+      if ! echo "$$" > "$_meta/pid" 2>/dev/null; then
+        rmdir "$_meta" 2>/dev/null || true
+        return 1
+      fi
+      if [ -f "$_lk/token" ]; then
+        ln "$_lk/token" "$_obs.t" 2>/dev/null || { rm -rf "$_meta" 2>/dev/null || true; return 1; }
+      fi
+      if ! ln "$_lk/pid" "$_obs.p" 2>/dev/null; then
+        rm -f "$_obs.t" 2>/dev/null || true
+        rm -rf "$_meta" 2>/dev/null || true
+        return 1
+      fi
+      if [ "$(cat "$_obs.p" 2>/dev/null || true)" = "$_p" ] && ! kill -0 "$_p" 2>/dev/null; then
+        if [ ! -f "$_obs.t" ] || [ "$_lk/token" -ef "$_obs.t" ]; then
+          [ -f "$_obs.t" ] && rm -f "$_lk/token" 2>/dev/null
+          if [ "$_lk/pid" -ef "$_obs.p" ]; then
+            rm -f "$_lk/pid" 2>/dev/null || true
+          fi
+          rmdir "$_lk" 2>/dev/null && _rc=0
+        fi
+      fi
+      rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
+      rm -rf "$_meta" 2>/dev/null || true
+      return "$_rc"
   }
   _rb_wl_acquire() {
     local _i=0 _p _pt _mp _mt _pre="$_RB_WL.acq.$$" _own="$_RB_WL.own.$$"
@@ -387,13 +402,13 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     # 6라운드 P1(#4): cleanup 자식도 deadline 아래에서 — worktree remove가 지연/
     # TERM 무시면 rollback과 writer lock이 무한정 남았다 (실측 7s+). 실패는 삼키지
     # 않고 플래그로 전파한다 (stale worktree 등록이 남으면 rc=0 금지).
-    _rb_bounded() {  # deadline(5s)-capped 그룹 실행 — rc 반환 (신호 semantics 없음)
-      local _pid _rc=0 _dl
+    _rb_bounded() {  # $1=absolute deadline, 나머지=명령 — 그룹 실행, rc 반환 (신호 semantics 없음)
+      local _pid _rc=0 _dl="$1"
+      shift
       set -m
       "$@" &
       _pid=$!
       set +m
-      _dl=$(( $(date +%s) + 5 ))
       while kill -0 -- "-${_pid}" 2>/dev/null && [ "$(date +%s)" -lt "$_dl" ]; do sleep 0.25; done
       if kill -0 -- "-${_pid}" 2>/dev/null; then
         kill -TERM -- "-${_pid}" 2>/dev/null || true
@@ -405,11 +420,15 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     }
     _RB_WT_CLEAN_OK=1
     _rb_cleanup_wt() {
+      # 7라운드 P2: remove·prune 각각이 아니라 cleanup "전체"가 하나의 deadline(5s)을
+      # 공유한다 (합산 10s+ 방지).
+      local _cl_dl
+      _cl_dl=$(( $(date +%s) + 5 ))
       # 멱등: 이미 정리된 뒤의 재호출이 실패로 오인되지 않도록 존재할 때만 시도
       if [ -d "$_WT" ]; then
-        _rb_bounded git worktree remove --force "$_WT" >/dev/null 2>&1 || _RB_WT_CLEAN_OK=0
+        _rb_bounded "$_cl_dl" git worktree remove --force "$_WT" >/dev/null 2>&1 || _RB_WT_CLEAN_OK=0
       fi
-      _rb_bounded git worktree prune >/dev/null 2>&1 || true
+      _rb_bounded "$_cl_dl" git worktree prune >/dev/null 2>&1 || true
       rm -rf "$_WT_BASE" 2>/dev/null || true
       [ -d "$_WT" ] && _RB_WT_CLEAN_OK=0
       return 0
@@ -860,10 +879,19 @@ REF_TXN
     fi
     return "$_rc"
   }
+  # 7라운드 P1(#3): _rs_run "사이"(및 태그 CAS·성공 출력 전)의 신호도 유실되지
+  # 않는다 — 각 단계 후 검사하고, 태그 CAS도 _rs_run(그룹·deadline) 아래에서.
+  _rs_check_sig() {
+    [ -n "$_RS_SIG" ] || return 0
+    echo "❌ 신호(${_RS_SIG}) 수신 — reset 경로를 중단합니다 (이후 단계 미수행). 'git status'와 ${POST_TAG} 태그 상태를 확인하세요." >&2
+    exit 130
+  }
+  _rs_check_sig
   if ! _rs_run git reset --hard "$PRE_OID" >/dev/null; then
     echo "❌ git reset 실패 또는 자식 그룹 잔존 — 중단합니다 (fail-closed). 'git status'로 상태를 확인하세요." >&2
     exit 3
   fi
+  _rs_check_sig
   # 리뷰 16차 P1-8(5차): quarantine(state/auto_merge.trash.d)은 rollback의
   # clean -fd에서도 살아남아야 한다 — 명시 제외 (.gitignore에도 등재).
   # 4라운드 P1(#6): 이 실행이 쥔 writer lock 산출물도 clean이 지우면 안 된다.
@@ -871,15 +899,17 @@ REF_TXN
     echo "❌ git clean 실패 또는 자식 그룹 잔존 — 중단합니다 (부분 정리 가능성). 'git status'로 상태를 확인하세요." >&2
     exit 3
   fi
+  _rs_check_sig
   # 사이클 종점 기록은 reset으로 무효화됨 — 해석 시점 OID 고정 CAS로 제거.
   # 5라운드 P1(#6): CAS 삭제 실패(그 사이 태그 이동/재생성)를 무시하면 post 태그가
   # 남은 "부분 rollback"이 rc=0/restored로 위장됐다 — 실패는 실패로 보고한다.
   if [ -n "$POST_TAGOBJ" ]; then
-    if ! git update-ref -d "refs/tags/${POST_TAG}" "$POST_TAGOBJ" 2>/dev/null; then
+    if ! _rs_run git update-ref -d "refs/tags/${POST_TAG}" "$POST_TAGOBJ" 2>/dev/null; then
       echo "❌ reset은 수행됐지만 ${POST_TAG} 태그 삭제(CAS)가 실패했습니다 — 태그가 그 사이 변경된 것으로 보입니다 (부분 완료, 성공 아님). 태그 상태를 확인 후 수동 정리하세요: git tag -d ${POST_TAG}" >&2
       exit 3
     fi
   fi
+  _rs_check_sig
   echo "restored $ID to $TAG"
   exit 0
 fi
