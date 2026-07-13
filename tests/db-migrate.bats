@@ -68,7 +68,13 @@ setup() {
   mkdir -p "$TROOT/scripts" "$TROOT/db"
   cp "$REPO_ROOT/scripts/db_migrate.sh" "$TROOT/scripts/db_migrate.sh"
   cp -R "$REPO_ROOT/db/migrations" "$TROOT/db/migrations"
-  chmod +x "$TROOT/scripts/db_migrate.sh"
+  # 리뷰 16차 8라운드 후속 P1: 여기서 chmod +x를 하지 않는다 — 과거 이 chmod가
+  # 커밋된 mode 소실(100755→100644, rc=126)을 숨겼다. cp는 원본 권한을 보존하므로
+  # 실제 checkout의 실행 권한이 그대로 검증된다 (실행 불가면 모든 테스트가 실패).
+  [ -x "$TROOT/scripts/db_migrate.sh" ] || {
+    echo "scripts/db_migrate.sh 가 checkout에서 실행 가능하지 않습니다 (git mode 100755 필요)" >&2
+    return 1
+  }
   git -C "$TROOT" init -q
   git -C "$TROOT" config user.email "db@test"
   git -C "$TROOT" config user.name "dbtest"
@@ -458,8 +464,11 @@ SQL
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 1 ]
   [[ "$output" == *"공개본 checksum"* ]]
-  PGOPTIONS='-c client_min_messages=warning' "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB2" -tAc \
-    "select coalesce((select count(*) from schema_migrations),0)" 2>/dev/null | grep -qE '^0?$'
+  # 8라운드 후속: manifest preflight는 bootstrap "전"에 거부한다 — 계약은
+  # "manifest 실패 시 DB에 아무것도 쓰지 않는다"이다. ledger 자체가 없어야 한다
+  # (과거 assertion은 테이블을 직접 조회해 빈 출력에서 실패했다).
+  [ "$(PGOPTIONS='-c client_min_messages=warning' "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB2" -tAc \
+    "select to_regclass('public.schema_migrations') is null")" = "t" ]
 }
 
 @test "DB17: session-only events are scrubbed, scrub is a frozen invariant, anonymized token is exact-UUID" {
@@ -523,10 +532,11 @@ SQL
   _psql "insert into events (event_type, session_id) select 'anon', id from sessions where user_id is null limit 1"
 }
 
-@test "DB19: the pin covers every published version (004 tamper refused mid-run) - unpublished 005 stays editable" {
-  # 리뷰 16차 P1(8차): pin은 001만이 아니라 공개된 전 version(001~004)을 덮는다.
-  # 변조 004(악성 객체 추가, 커밋)는 001~003 적용 후 004에서 거부되고, 아직
-  # 공개되지 않은 005는 pin이 없어 커밋된 수정이 정상 적용된다.
+@test "DB19: the manifest covers every published version including 005 - any committed tamper is refused before any write" {
+  # 리뷰 16차 8라운드 후속 P1: (a) "004 checksum 실패 전에 001~003이 적용된다"는
+  # 전제 제거 — 새 manifest 계약은 DB에 어떤 쓰기도 하기 "전에" 전체를 거부한다.
+  # (b) "unpublished 005 stays editable" 전제 제거 — 005도 공개본이며 변조는
+  # 반드시 거부된다 (001~005 전 항목 동일 규칙, 예외 없음).
   cat >> "$TROOT/db/migrations/004_soft_delete_contract.sql" <<'SQL'
 CREATE TABLE IF NOT EXISTS evil_004 (id INT);
 SQL
@@ -535,15 +545,29 @@ SQL
   [ "$status" -eq 1 ]
   [[ "$output" == *"공개본 checksum"* ]]
   [[ "$output" == *"004_soft_delete_contract"* ]]
-  # 001~003은 적용, 변조 004는 실행도 기록도 안 됨
-  [ "$(_psql "select count(*) from schema_migrations where version='003_soft_delete_invariant'")" = "1" ]
-  [ "$(_psql "select count(*) from schema_migrations where version like '004%'")" = "0" ]
+  # 아무것도 적용되지 않았다 — bootstrap 전 거부라 ledger 자체가 없다
+  [ "$(_psql "select to_regclass('public.schema_migrations') is null")" = "t" ]
   [ "$(_psql "select to_regclass('evil_004') is null")" = "t" ]
 
-  # 004 원복 + 미공개 005에 무해한 수정(커밋) → 정상 적용
+  # 004 원복 + 005 변조(무해한 주석 한 줄, 커밋) → 005도 같은 규칙으로 거부
   git -C "$TROOT" show HEAD~1:db/migrations/004_soft_delete_contract.sql \
     > "$TROOT/db/migrations/004_soft_delete_contract.sql"
-  printf -- '-- unpublished edit (pin 없음)\n' >> "$TROOT/db/migrations/005_ownership_repair_and_lock_contract.sql"
+  printf -- '-- tampered 005\n' >> "$TROOT/db/migrations/005_ownership_repair_and_lock_contract.sql"
+  _commit_migs
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"공개본 checksum"* ]]
+  [[ "$output" == *"005_ownership_repair_and_lock_contract"* ]]
+  [ "$(_psql "select to_regclass('public.schema_migrations') is null")" = "t" ]
+
+  # --status도 같은 계약으로 거부한다
+  run env ENV_FILE="$ENVF" "$RUNNER" --status
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"pending"* ]]
+
+  # 005 원복(직전 커밋의 원본) → 전부 정상 적용
+  git -C "$TROOT" show HEAD~1:db/migrations/005_ownership_repair_and_lock_contract.sql \
+    > "$TROOT/db/migrations/005_ownership_repair_and_lock_contract.sql"
   _commit_migs
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 0 ]
@@ -827,6 +851,16 @@ SHIM
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 0 ]
   [ "$(_psql "select to_regclass('tail_probe') is not null")" = "t" ]
+  # 8라운드 후속 P2: 개행 "없이" 끝나는(마지막 줄이 주석) 파일도 그대로 적용된다.
+  # 서버가 실행 직전 octet_length+md5로 "EXECUTE 문자열 == 검증 blob"을 강제하므로
+  # runner가 한 byte라도 추가/제거하면(과거: suffix \n) 이 apply는 실패한다 —
+  # 성공 자체가 byte-identity의 증거다.
+  printf 'CREATE TABLE nonl_probe (id INT);\n-- trailing comment, no newline' \
+    > "$TROOT/db/migrations/988_nonl_zz_test.sql"
+  _commit_migs
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [ "$(_psql "select to_regclass('nonl_probe') is not null")" = "t" ]
 }
 
 @test "DB30: soft-delete entrypoint is enforced by the schema - direct UPDATE is refused, no lock-order reversal remains" {
@@ -899,6 +933,89 @@ SHIM
   [ "$rc" -eq 143 ]
   ! grep -q "up-to-date" "$PGT/sig31.log"
   # 적용된 migration 자체는 유효하다 (transaction은 이미 commit됨)
+  [ "$(_psql "select count(*) from schema_migrations")" = "5" ]
+  [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
+}
+
+@test "DB32: manifest existence is an exact filename-set comparison - a superstring name cannot stand in for a published file" {
+  # 8라운드 후속 P1: substring 매칭은 공개 이름을 "포함하는" 다른 파일을 존재로
+  # 오판했다. 공개 005를 개명해 상위 이름 안에 숨겨도 정확 집합 대조가 거부한다.
+  git -C "$TROOT" mv db/migrations/005_ownership_repair_and_lock_contract.sql \
+    db/migrations/990_zz005_ownership_repair_and_lock_contract.sql
+  _commit_migs
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"005_ownership_repair_and_lock_contract.sql 이 커밋"* ]]
+  [[ "$output" != *"up-to-date"* ]]
+  # 아무것도 적용되지 않았다
+  [ "$(_psql "select to_regclass('public.schema_migrations') is null")" = "t" ]
+}
+
+@test "DB33: migration names must be fixed-width numeric (NNN_) with a safe charset - malformed names are refused up front" {
+  # 8라운드 후속 P1: 비정형 이름은 정렬·공개 대역 비교·SQL literal 어디서도
+  # 신뢰할 수 없다 — 시작 전에 거부한다 (fail-closed).
+  printf 'CREATE TABLE bad_name (id INT);\n' > "$TROOT/db/migrations/05_short_zz_test.sql"
+  _commit_migs
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"고정 폭 3자리 숫자 형식"* ]]
+  [ "$(_psql "select to_regclass('public.schema_migrations') is null")" = "t" ]
+  git -C "$TROOT" rm -q db/migrations/05_short_zz_test.sql
+  # 허용 밖 문자(-)도 거부
+  printf 'CREATE TABLE bad_name2 (id INT);\n' > "$TROOT/db/migrations/991_bad-dash_zz_test.sql"
+  _commit_migs
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"허용되지 않는 문자"* ]]
+  [ "$(_psql "select to_regclass('public.schema_migrations') is null")" = "t" ]
+  git -C "$TROOT" rm -q db/migrations/991_bad-dash_zz_test.sql
+  _commit_migs
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+}
+
+@test "DB34: the runner is committed with the executable bit - a real checkout runs without any chmod" {
+  # 8라운드 후속 P1: tracked mode가 100755→100644로 떨어져 실제 checkout에서
+  # rc=126(Permission denied)이었고, 테스트 setup의 chmod +x가 이를 숨겼다.
+  # 저장소의 커밋된 mode 자체를 검증한다 (setup은 더 이상 chmod하지 않는다).
+  run git -C "$REPO_ROOT" ls-tree HEAD -- scripts/db_migrate.sh
+  [ "$status" -eq 0 ]
+  [[ "$output" == 100755* ]]
+  # fixture(cp로 권한 보존된 checkout 사본)가 chmod 없이 그대로 실행된다
+  run env ENV_FILE="$ENVF" "$RUNNER" --status
+  [ "$status" -eq 0 ]
+}
+
+@test "DB35: TERM in the final success-report window is not reported as rc=0 (phase-aware trap)" {
+  # 8라운드 후속 P1: 마지막 checkpoint(_mig_check_sig) "이후" 최종 성공 보고
+  # 창에 온 TERM이 flag만 기록되고 rc=0 + '✅ up-to-date'로 위장됐다 (실측).
+  # 이제 최종 보고는 ledger 재확인 query를 거치고, phase=run 구간의 신호는
+  # trap이 즉시 128+N으로 종료한다 — 그 창의 TERM은 성공이 될 수 없다.
+  mkdir -p "$PGT/finbin_${BATS_TEST_NUMBER}" "$TROOT/tmp"
+  cat > "$PGT/finbin_${BATS_TEST_NUMBER}/psql" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in
+  *"where version ="*) : ;;
+  *'count(*) from "public".schema_migrations'*) touch "$TROOT/tmp/final"; sleep 5 ;;
+esac
+exec "$PGBIN/psql" "\$@"
+SHIM
+  chmod +x "$PGT/finbin_${BATS_TEST_NUMBER}/psql"
+  env PATH="$PGT/finbin_${BATS_TEST_NUMBER}:$PATH" ENV_FILE="$ENVF" TMPDIR="$TROOT/tmp" \
+    "$RUNNER" > "$PGT/sig35.log" 2>&1 &
+  local rpid=$! i=0 rc=0
+  while [ "$i" -lt 200 ]; do
+    [ -f "$TROOT/tmp/final" ] && break
+    sleep 0.1; i=$((i+1))
+  done
+  [ -f "$TROOT/tmp/final" ]
+  sleep 0.3
+  kill -TERM "$rpid"
+  wait "$rpid" || rc=$?
+  # 신호가 rc=0 성공으로 위장되지 않고, 성공 문구도 출력되지 않는다
+  [ "$rc" -eq 143 ]
+  ! grep -q "up-to-date" "$PGT/sig35.log"
+  # 적용 자체는 전부 완료된 상태였다 (신호는 보고 창에만 개입했다)
   [ "$(_psql "select count(*) from schema_migrations")" = "5" ]
   [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
 }
