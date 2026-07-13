@@ -1064,6 +1064,7 @@ WRAP
 for a in "\$@"; do
   if [ "\$a" = "revert" ]; then
     trap '' TERM
+    echo "\$\$" > "$repo/.revpid"
     touch "$repo/.inrev"
     sleep 30
     exec "$realgit" "\$@"
@@ -1086,6 +1087,11 @@ WRAP
   t1="$(date +%s)"
   [ "$rc" -eq 130 ]
   [ $(( t1 - t0 )) -lt 8 ]
+  # 6라운드 P1(#3): 실제 프로세스 잔존 검사 — TERM 무시 자식(그룹)이 KILL로
+  # 회수됐다 (leader-only 검사 금지)
+  sleep 0.5
+  [ -f "$repo/.revpid" ]
+  ! kill -0 "$(cat "$repo/.revpid")" 2>/dev/null
   # writer lock·격리 worktree가 잔존하지 않는다
   [ ! -e "$repo/state/ticket_write.lock.d" ]
   [ "$(git -C "$repo" worktree list | wc -l | tr -d ' ')" = "1" ]

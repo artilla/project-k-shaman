@@ -1597,7 +1597,9 @@ MOCK
 last=""
 for a in "\$@"; do last="\$a"; done
 case "\$last" in *.amrb-bak.*)
-  src="\$1"
+  # 6라운드 gate fixture: src는 위치가 아니라 "첫 비옵션 인수"로 추출 (mv 옵션 내성)
+  src=""
+  for a in "\$@"; do case "\$a" in -*) ;; *) src="\$a"; break ;; esac; done
   "$realmv" "\$@"; rc=\$?
   printf 'CONCURRENT-DO-NOT-CLOBBER\n' > "\$src"
   exit \$rc
@@ -1735,11 +1737,11 @@ EOF
   [[ "$output" == *"auto-merge executed"* ]]
 }
 
-@test "execute: intruder file planted at the reserved capture payload path is never clobbered (mv -n capture)" {
-  # 5라운드 P1(#3): capture 디렉터리만 예약하고 payload를 일반 mv로 게시하면
-  # 예약~mv 사이에 생긴 동시 파일을 덮었다 (실측: FOREIGN-CAPTURE 소실). 이제
-  # payload 이름은 난수이고 게시는 mv -n(no-clobber)이다 — 선점되면 원본은
-  # 원경로에 그대로 남고(무손실), 침입 파일도 덮이지 않는다.
+@test "execute: intruder file planted at the reserved capture payload path is never clobbered (link(2) capture)" {
+  # 5라운드 #3 → 6라운드 P1(#1): mv -n은 macOS에서 원자 no-clobber CAS가 아니다
+  # (lstat+일반 rename) — capture 게시는 link(2)로 교체됐다. 예약된 payload 경로가
+  # ln 직전에 선점되면 ln이 배타 실패하고 아무것도 이동하지 않는다
+  # (원본 무손실·침입 파일 불변).
   local d="$TEST_HOME/repo"
   mkdir -p "$d"
   make_repo "$d" 1 docs
@@ -1752,19 +1754,19 @@ exit 1
 MOCK
   chmod +x "$TEST_HOME/mock_checks_ci.sh"
 
-  local realmv
-  realmv="$(command -v mv)"
+  local realln
+  realln="$(command -v ln)"
   mkdir -p "$TEST_HOME/cibin"
-  cat > "$TEST_HOME/cibin/mv" <<MOCK
+  cat > "$TEST_HOME/cibin/ln" <<MOCK
 #!/usr/bin/env bash
 last=""
 for a in "\$@"; do last="\$a"; done
-case "\$last" in *.amrb-bak.*)
-  printf 'FOREIGN-CAPTURE\\n' > "\$last"   # 예약된 payload 경로를 mv 직전에 선점
+case "\$last" in *.amrb-bak.*payload.*)
+  if [ ! -e "\$last" ]; then printf 'FOREIGN-CAPTURE\n' > "\$last"; fi
 ;; esac
-exec "$realmv" "\$@"
+exec "$realln" "\$@"
 MOCK
-  chmod +x "$TEST_HOME/cibin/mv"
+  chmod +x "$TEST_HOME/cibin/ln"
 
   run bash -c "cd '$d' && \
     PATH='$TEST_HOME/cibin:'\"\$PATH\" \
@@ -1775,7 +1777,7 @@ MOCK
     '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
   [ "$status" -eq 1 ]
   grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
-  # 원본은 원경로에 무손실로 남았다 (capture 자체가 일어나지 않음)
+  # 원본은 원경로에 무손실로 남았다 (capture 자체가 일어나지 않음 — ln 배타 실패)
   grep -q "content 1" "$d/docs/file-1.md"
   # 침입 파일은 덮이지 않았다
   local intr

@@ -1348,3 +1348,26 @@ SHIM
   [ "$status" -eq 0 ]
   [ "$(_psql "select count(*) from schema_migrations")" = "5" ]
 }
+
+@test "DB44: changing MIGRATION_APP_ROLES after 005 is applied is not silently up-to-date - ACL evidence verified" {
+  # 6라운드 P1(#6): ledger가 005를 applied로 기록하면 skip되는데, 그 사이 바뀐
+  # MIGRATION_APP_ROLES는 ACL에 반영되지 않은 채 up-to-date(rc=0)로 보고됐다
+  # (실측: late_app의 EXECUTE=false). 성공 보고 전에 각 role의 EXECUTE/USAGE를
+  # 서버에서 확인한다.
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "drop role if exists zz_late44"
+  _psql "create role zz_late44 login"
+
+  run env MIGRATION_APP_ROLES=zz_late44 ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"up-to-date"* ]]
+  [[ "$output" == *"GRANT EXECUTE"* ]]
+
+  # 안내대로 GRANT를 반영하면 성공한다
+  _psql "grant usage on schema public to zz_late44"
+  _psql "grant execute on function app_soft_delete_user(bigint) to zz_late44"
+  run env MIGRATION_APP_ROLES=zz_late44 ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up-to-date"* ]]
+}

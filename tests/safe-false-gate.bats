@@ -19,6 +19,9 @@ setup() {
   cp "$REPO_ROOT/scripts/approve.sh" "$TEST_HOME/scripts/approve.sh"
   cp "$REPO_ROOT/scripts/ticket_edit.sh" "$TEST_HOME/scripts/ticket_edit.sh"
   cp "$REPO_ROOT/scripts/ticket_body.sh" "$TEST_HOME/scripts/ticket_body.sh"
+  # 6라운드 P1(#2): writer lock은 공용 lib — writer들이 source하므로 함께 복사
+  mkdir -p "$TEST_HOME/scripts/lib"
+  cp "$REPO_ROOT/scripts/lib/write_lock.sh" "$TEST_HOME/scripts/lib/write_lock.sh"
   cp "$REPO_ROOT/scripts/rollback.sh" "$TEST_HOME/scripts/rollback.sh"
   # 리뷰 2차 P1-7: run_loop의 safe:false 승인 판정은 mission-control/approval.mjs 단일 소스.
   cp "$REPO_ROOT/mission-control/approval.mjs" "$TEST_HOME/mission-control/approval.mjs"
@@ -1448,11 +1451,13 @@ WRAP
   [ ! -d "$TEST_HOME/state/ticket_write.lock.d" ]
 }
 
-@test "T63: stale write-lock reclaim re-verifies the moved lock's owner - live lock is never deleted" {
+@test "T63: stale write-lock reclaim binds the observed lock by inode - a live replacement is never dismantled" {
   _make_ticket T630 true open
   _commit_all "add T630"
 
-  # 관찰 시점의 dead pid, 그리고 reclaim mv 직전에 끼어드는 live owner를 시뮬레이션
+  # 관찰 시점의 dead pid, 그리고 회수 결속(.obs 하드링크) 직전에 끼어드는 live
+  # owner를 시뮬레이션 — 6라운드 P1(#2): 회수는 mv(이동)가 아니라 inode 결속
+  # 해체이므로, 교체를 감지하면 canonical을 건드리지 않고 대기·거부한다.
   local deadpid livepid
   sh -c 'exit 0' & deadpid=$!
   wait "$deadpid" 2>/dev/null || true
@@ -1461,28 +1466,29 @@ WRAP
   mkdir -p "$TEST_HOME/state/ticket_write.lock.d"
   echo "$deadpid" > "$TEST_HOME/state/ticket_write.lock.d/pid"
 
-  local realmv
-  realmv="$(command -v mv)"
+  local realln
+  realln="$(command -v ln)"
   mkdir -p "$TEST_HOME/racebin3"
-  cat > "$TEST_HOME/racebin3/mv" <<WRAP
+  cat > "$TEST_HOME/racebin3/ln" <<WRAP
 #!/usr/bin/env bash
-case "\$2" in
-  *ticket_write.lock.d.reclaim.*)
-    # reclaim 직전, 새 live owner가 lock을 차지한 상황을 주입
-    echo "$livepid" > "\$1/pid" 2>/dev/null
+case "\$*" in
+  *ticket_write.lock.d.obs.*)
+    # 결속 직전, 새 live owner가 lock을 차지한 상황을 주입 (내용 교체)
+    echo "$livepid" > "$TEST_HOME/state/ticket_write.lock.d/pid" 2>/dev/null
     ;;
 esac
-exec "$realmv" "\$@"
+exec "$realln" "\$@"
 WRAP
-  chmod +x "$TEST_HOME/racebin3/mv"
+  chmod +x "$TEST_HOME/racebin3/ln"
 
   run bash -c 'cd "$1" && PATH="$1/racebin3:$PATH" ./scripts/ticket_edit.sh set-priority T630 P1' _ "$TEST_HOME"
   # live owner를 만나 대기하다 명시적으로 실패한다 — 조용한 성공(rc=0) 금지
   [ "$status" -ne 0 ]
   [[ "$output" == *"경합 지속"* ]]
-  # live lock은 삭제되지 않고 보존된다
+  # live lock은 해체되지 않고 canonical에 그대로 보존된다 (이동도 없다)
   [ -d "$TEST_HOME/state/ticket_write.lock.d" ]
   [ "$(cat "$TEST_HOME/state/ticket_write.lock.d/pid")" = "$livepid" ]
+  [ -z "$(ls -d "$TEST_HOME/state/ticket_write.lock.d.reclaim."* 2>/dev/null || true)" ]
   # 티켓은 무변조
   grep -q '^priority: P2' "$TEST_HOME/docs/tickets/T630-test.md"
 
