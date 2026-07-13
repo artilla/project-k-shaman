@@ -693,32 +693,62 @@ SQL
   [ "$(_psql "select count(*) from events where scrubbed_at is not null and event_type in ('x','y')")" = "0" ]
 }
 
-@test "DB24: write contract - app_lock_user_rows fixes users->children order, app_soft_delete_user is the delete entrypoint" {
-  # 리뷰 16차 P1-5(7차): PG는 child row lock "후" BEFORE UPDATE 트리거를 실행하므로
-  # UPDATE 경로(child→users)와 삭제 경로(users→children)의 잠금 순서 역전은 트리거
-  # 선언만으로 제거되지 않는다. 계약: writer는 DML 전에 app_lock_user_rows로
-  # user 행을 먼저 잠근다 — 삭제와 교차해도 deadlock 없이 직렬화된다.
+@test "DB24: one global lock order (child->users) - writer holding child locks and the deleter contend in the danger window without deadlock" {
+  # 리뷰 16차 8라운드 후속 P1: 구 app_lock_user_rows(users-first)는 child→users인
+  # 삭제 경로와 정면 상충해, helper를 따른 writer가 deadlock victim이 됐다 (실측).
+  # 전역 순서는 child→users 하나다 — users-first helper는 제거됐고, writer는
+  # 사전 잠금 없이 child DML만으로 구조적으로 순서를 따른다.
   run env ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 0 ]
+  # users-first helper가 더 이상 존재하지 않는다
+  [ "$(_psql "select count(*) from pg_proc where proname='app_lock_user_rows'")" = "0" ]
   _psql "insert into users (provider, provider_subject) values ('kakao','u1')"
   _psql "insert into sessions (user_id) values (1)"
   _psql "insert into events (event_type, user_id, payload) values ('e', 1, '{\"p\":1}'::jsonb)"
-  # writer(계약 경로): user 잠금 → child no-op UPDATE(트리거 발화 컬럼 포함) → 지연 커밋
+  _psql "insert into streaks (user_id, current_streak, longest_streak) values (1, 1, 1)"
+  # writer: 여러 child 테이블의 행 잠금(트리거 발화 컬럼 포함)을 쥔 채 지연 커밋
   ( PGOPTIONS='-c client_min_messages=warning' "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" \
-      -c "BEGIN; SELECT app_lock_user_rows(1); UPDATE events SET user_id=user_id WHERE user_id=1; UPDATE sessions SET user_id=user_id WHERE user_id=1; SELECT pg_sleep(1.5); COMMIT;" >/dev/null 2>&1 ) &
+      -c "BEGIN; UPDATE events SET user_id=user_id WHERE user_id=1; UPDATE sessions SET user_id=user_id WHERE user_id=1; UPDATE streaks SET user_id=user_id WHERE user_id=1; SELECT pg_sleep(1.5); COMMIT;" > "$PGT/w24.log" 2>&1; echo $? > "$PGT/w24.rc" ) &
   local writer=$!
   sleep 0.5
-  # 삭제(계약 진입점): writer 커밋을 기다렸다가 deadlock 없이 성공해야 한다
+  # 삭제: 위험 창(writer 미커밋, child 행 잠금 보유) 한가운데서 진입 —
+  # deadlock이 아니라 "대기 후 성공"이어야 한다. 실제 경합을 timing으로 증명한다.
+  local t0 t1 waited
+  t0="$(_psql "select extract(epoch from clock_timestamp())")"
   run _psql "select app_soft_delete_user(1)"
+  t1="$(_psql "select extract(epoch from clock_timestamp())")"
   [ "$status" -eq 0 ]
   [[ "$output" == *"t"* ]]
+  waited="$(awk -v a="$t0" -v b="$t1" 'BEGIN { print (b - a >= 0.8) ? "y" : "n" }')"
+  [ "$waited" = "y" ]
   wait "$writer" 2>/dev/null || true
+  # 어느 쪽도 deadlock victim이 되지 않았다
+  [ "$(cat "$PGT/w24.rc")" -eq 0 ]
+  ! grep -qi "deadlock" "$PGT/w24.log"
   [ "$(_psql "select (deleted_at is not null) from users where id=1")" = "t" ]
   # 이미 삭제된 사용자 재호출은 false (멱등 신호)
   [ "$(_psql "select app_soft_delete_user(1)")" = "f" ]
   # 스크럽 결과는 기존 계약과 동일
   [ "$(_psql "select count(*) from sessions where user_id=1")" = "0" ]
   [ "$(_psql "select payload::text from events where event_type='e'")" = "{}" ]
+
+  # 역방향 위험 창: 삭제가 child 잠금을 쥔 채 미커밋인 동안 writer의 child
+  # UPDATE — deadlock이 아니라 "대기 후 guard 거부"로 직렬화된다.
+  _psql "insert into users (provider, provider_subject) values ('kakao','u2')"
+  _psql "insert into events (event_type, user_id, payload) values ('e2', 2, '{\"p\":2}'::jsonb)"
+  ( PGOPTIONS='-c client_min_messages=warning' "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" \
+      -c "BEGIN; SELECT app_soft_delete_user(2); SELECT pg_sleep(1.5); COMMIT;" > "$PGT/d24.log" 2>&1; echo $? > "$PGT/d24.rc" ) &
+  local deleter=$!
+  sleep 0.5
+  # 삭제가 스크럽한 행을 다시 사용자에 귀속하려는 UPDATE — 행 잠금 대기 후
+  # 재평가되어 guard/frozen CHECK가 거부한다 (deadlock 아님)
+  run _psql "update events set user_id=2 where event_type='e2'"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"deadlock"* ]]
+  wait "$deleter" 2>/dev/null || true
+  [ "$(cat "$PGT/d24.rc")" -eq 0 ]
+  ! grep -qi "deadlock" "$PGT/d24.log"
+  [ "$(_psql "select payload::text from events where event_type='e2'")" = "{}" ]
 }
 
 @test "DB25: TERM to the runner kills the migration psql process group - no late commit, temps cleaned, no lingering backend" {
@@ -878,9 +908,15 @@ SHIM
   [ "$status" -ne 0 ]
   [[ "$output" == *"app_soft_delete_user"* ]]
   [ "$(_psql "select (deleted_at is null) from users where id=1")" = "t" ]
-  # GUC를 수동으로 흉내내도 대상 id가 다르면 통과하지 못한다
+  # GUC를 수동으로 흉내내도 통과하지 못한다 — 틀린 값(999)뿐 아니라
+  # "정확한 대상 ID(1)"로 위조해도 거부된다 (8라운드 후속 P1: GUC는 더 이상
+  # 증거가 아니다 — 증거는 role 정체성뿐이다)
   run _psql "begin; select set_config('app.soft_delete_user','999',true); update users set deleted_at=now() where id=1; commit;"
   [ "$status" -ne 0 ]
+  [ "$(_psql "select (deleted_at is null) from users where id=1")" = "t" ]
+  run _psql "begin; select set_config('app.soft_delete_user','1',true); update users set deleted_at=now() where id=1; commit;"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"app_soft_delete_user"* ]]
   [ "$(_psql "select (deleted_at is null) from users where id=1")" = "t" ]
 
   # 역전 경로 재현: child row lock을 먼저 쥔 writer와 삭제가 경합해도 deadlock이
@@ -984,6 +1020,45 @@ SHIM
   # fixture(cp로 권한 보존된 checkout 사본)가 chmod 없이 그대로 실행된다
   run env ENV_FILE="$ENVF" "$RUNNER" --status
   [ "$status" -eq 0 ]
+}
+
+@test "DB36: a plain app role cannot forge entrypoint evidence - delete completes only through the SECURITY DEFINER entrypoint" {
+  # 8라운드 후속 P1: 과거 GUC 증거는 일반 app role이 정확한 ID로 set_config해
+  # 우회할 수 있었다 (실측 rc=0). 이제 증거는 role 정체성 — 일반 role로 재현한다.
+  run env ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "insert into users (provider, provider_subject) values ('kakao','u1')"   # id 1
+  _psql "insert into users (provider, provider_subject) values ('kakao','u2')"   # id 2
+  _psql "insert into events (event_type, user_id, payload) values ('e', 1, '{\"p\":1}'::jsonb)"
+  # 일반 app role — users에 대한 (테이블 수준) UPDATE 권한까지 있는 최악 조건
+  _psql "create role zz_app36 login"
+  _psql "grant select, update on users to zz_app36"
+  _approle() {
+    PGOPTIONS='-c client_min_messages=warning' \
+      "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U zz_app36 -d "$TEST_DB" -tAc "$1"
+  }
+  # 정확한 대상 ID로 GUC를 위조 + 직접 UPDATE — role 경계가 거부한다
+  run _approle "begin; select set_config('app.soft_delete_user','1',true); update users set deleted_at=now() where id=1; commit;"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"app_soft_delete_user"* ]]
+  [ "$(_psql "select (deleted_at is null) from users where id=1")" = "t" ]
+  # membership이 없으므로 정의자 role을 사칭(SET ROLE)할 수 없다
+  run _approle "set role shaman_softdelete"
+  [ "$status" -ne 0 ]
+  # 유일 경로: SECURITY DEFINER 진입점 — 일반 role로도 삭제·스크럽이 완결된다
+  [ "$(_approle "select app_soft_delete_user(1)")" = "t" ]
+  [ "$(_psql "select (deleted_at is not null) from users where id=1")" = "t" ]
+  [ "$(_psql "select payload::text from events where event_type='e'")" = "{}" ]
+  # 배포 계약(컬럼 목록 grant): deleted_at이 grant에 없으면 권한층이 먼저 거부한다
+  _psql "create role zz_app36col login"
+  _psql "grant select on users to zz_app36col"
+  _psql "grant update (nickname, last_topic) on users to zz_app36col"
+  run env PGOPTIONS='-c client_min_messages=warning' \
+    "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U zz_app36col -d "$TEST_DB" -tAc \
+    "update users set deleted_at=now() where id=2"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"permission denied"* ]]
+  [ "$(_psql "select (deleted_at is null) from users where id=2")" = "t" ]
 }
 
 @test "DB35: TERM in the final success-report window is not reported as rc=0 (phase-aware trap)" {

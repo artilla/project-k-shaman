@@ -1,6 +1,8 @@
 # 0004. 사용자 삭제(soft-delete) 계약 — 익명화·보존·재가입
 
-- 상태: 확정 (2026-07-12, owner 승인; C2는 리뷰 16차 P1-9에 따라 fail-closed로 강화)
+- 상태: 확정 (2026-07-12, owner 승인; C2는 리뷰 16차 P1-9에 따라 fail-closed로 강화.
+  2026-07-13 리뷰 16차 8라운드 후속: write contract를 단일 전역 잠금 순서
+  (child→users)로 통일, 진입점 증거를 GUC에서 role 권한 경계로 교체)
 - 근거: 리뷰 16차 P1-8 — "provider_subject·last_login_at·events 연결·purchases 연결이
   삭제 후에도 유지된다. 보존 자체는 가능하지만 익명화 여부·보존기간·재가입 처리
   계약을 먼저 확정해야 한다."
@@ -79,10 +81,11 @@ event_type·created_at 등 집계 축은 보존되어 익명 통계는 유지된
      차단한다. 허용 전이는 익명 세션의 로그인 바인딩(NULL→user, 삭제 사용자
      검사 포함)뿐이다.
    - events 교차 귀속 금지 (6차): event의 user_id와 session 소유자가 다르면
-     거부 — 교차 귀속은 삭제 스캔의 사각을 만든다. 잠금 순서는 스크럽 트리거와
-     동일하게 항상 users → sessions로 통일해 역전 deadlock을 제거했다
-     (소유자 무잠금 선독 → users FOR SHARE → sessions FOR SHARE → 소유자
-     재검증, 변경 감지 시 거부 fail-closed).
+     거부 — 교차 귀속은 삭제 스캔의 사각을 만든다. events_guard의 잠금 순서는
+     전역 순서(child→users)를 따른다: 대상 event 행(암묵) → session FOR SHARE
+     → users FOR SHARE. session 행을 먼저 잠그므로 소유자가 검사 중 바뀔 수
+     없다 (8라운드 후속 — 과거의 "무잠금 선독 → users → sessions → 재검증"은
+     삭제 경로와 역전을 만들었다).
 3. `events.scrubbed_at IS NOT NULL` ⇒ `user_id IS NULL AND session_id IS NULL
    AND payload = '{}'` (CHECK — 스크럽의 영속성. `session_id IS NULL`까지가
    frozen 불변식이다 — 이것이 빠지면 스크럽된 event의 세션 재연결(UPDATE
@@ -101,20 +104,43 @@ event_type·created_at 등 집계 축은 보존되어 익명 통계는 유지된
 제거되고 원 귀속·payload는 보존된다. 이후의 신규 교차 귀속은 트리거(불변식 2)가
 거부하므로 이 repair는 1회성이다.
 
-## Write contract — UPDATE 경로 잠금 순서·deadlock retry (7차 P1-5 — 005)
+## Write contract — 단일 전역 잠금 순서·진입점 권한 경계 (7차 P1-5 → 8라운드 후속 — 005)
 
-PostgreSQL은 child row lock "후" BEFORE UPDATE 트리거를 실행하므로,
-events/sessions의 UPDATE 경로(child→users)와 삭제 경로(users→children)의 잠금
-순서 역전은 트리거 내부 선언만으로 제거할 수 없다 (PG16 실측 deadlock 2경로).
-스키마가 제공하는 계약:
+PostgreSQL은 child row lock "후" BEFORE UPDATE 트리거를 실행하므로, 직접 child
+DML 경로는 구조적으로 child→users 순서이고 이는 바꿀 수 없다. 따라서 **전역
+잠금 순서는 하나뿐이다**:
 
-- `app_lock_user_rows(VARIADIC BIGINT[])`: events/sessions 행을 UPDATE(또는
-  FOR UPDATE)하는 모든 writer는 DML **전에** 이 함수로 관련 사용자 행을 먼저
-  잠근다(FOR SHARE, id 오름차순) — 전 경로가 users→children으로 고정된다.
-- `app_soft_delete_user(BIGINT)`: soft delete의 유일한 진입점. 계약을 지키지
-  않은 writer와의 잔여 deadlock은 서버 감지 후 이 함수의 bounded retry
-  (subtransaction rollback → 최대 5회 재시도)가 삭제 쪽에서 흡수한다 —
-  명시적 deadlock retry 계약.
+    events → sessions → streaks → user_fortunes → users   (child→users)
+
+- 직접 child DML: PG가 child 행을 먼저 잠그고 guard 트리거가 users FOR SHARE —
+  사전 잠금 helper 없이 구조적으로 순서를 따른다. 여러 child 행/테이블을
+  갱신하는 writer는 위 테이블 순서와 id 오름차순을 따른다.
+- `events_guard`: 대상 event 행(암묵) → session FOR SHARE → users FOR SHARE.
+- `app_soft_delete_user(BIGINT)`: 같은 순서로 child 행을 결정적(id 오름차순)으로
+  잠근 뒤 users를 잠근다.
+- 구 `app_lock_user_rows()`(users-first)는 **제거됐다** — users를 먼저 잠그는
+  helper가 남아 있는 한 역전이 사라지지 않는다 (8라운드 후속 실측: helper를
+  따른 writer가 deadlock victim). users를 먼저 잠그는 어떤 경로도 만들지 않는다.
+- 잔여 deadlock(외부 도구의 임의 순서 잠금)은 `app_soft_delete_user`의 bounded
+  retry(subtransaction rollback → 최대 5회)가 삭제 쪽에서 흡수한다.
+
+### 진입점 권한 경계 (8라운드 후속 P1 — GUC 증거 폐기)
+
+과거의 transaction-local GUC(`app.soft_delete_user`)는 일반 app role도 정확한
+ID로 `set_config`할 수 있어 **증거가 아니었다** (실측: 위조 후 직접 UPDATE로
+삭제 성공). 현재 경계:
+
+- `shaman_softdelete`: NOLOGIN 정의자 role. `app_soft_delete_user()`는 이 role
+  소유의 **SECURITY DEFINER** 함수(생성 시점 고정 search_path)다.
+- 스크럽 트리거는 `deleted_at` 전이 시점의 `current_user = shaman_softdelete`를
+  요구한다 — 이 컨텍스트는 진입점 함수 안에서만 성립하고, membership 없는
+  role은 SET ROLE로 사칭할 수 없다. superuser 여부와 무관하게 트리거가
+  강제된다 (직접 UPDATE는 postgres도 거부된다).
+- app role 배포 계약: `users`에 대한 UPDATE는 **컬럼 목록 grant**로 부여하고
+  `deleted_at`을 제외한다 — 권한층에서도 직접 DML이 차단된다 (트리거 경계는
+  그 위의 스키마 강제층).
+- 운영 전제: migration 실행 role은 role 생성/소유권 이전 권한(superuser 또는
+  CREATEROLE+membership)이 필요하다.
 
 ## 남은 후속 (P2, 별도 티켓)
 
