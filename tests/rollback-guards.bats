@@ -1099,3 +1099,52 @@ WRAP
   grep -q "^v2$" "$repo/file.txt"
   git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
 }
+
+@test "R37: TERM-ignoring update-ref child on the reset path is reaped and success is withheld" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 7라운드 P1(#3): reset 경로의 태그 CAS·성공 출력이 신호 관리 밖이라, TERM 무시
+  # update-ref 자식이 parent 종료 후에도 생존했고 TERM 직후에도 restored/rc=0이
+  # 나왔다 (실측). 태그 CAS도 _rs_run(그룹·deadline) 아래이고 성공 출력 전
+  # _rs_check_sig가 선다.
+  git -C "$repo" reset -q --hard cycle/T200-pre
+  git -C "$repo" tag -f -a cycle/T200-post -m x >/dev/null
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$TEST_BASE/r37bin"
+  cat > "$TEST_BASE/r37bin/git" <<WRAP
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "update-ref" ]; then
+    trap '' TERM
+    echo "\$\$" > "$TEST_BASE/r37.pid"
+    touch "$TEST_BASE/r37.in"
+    sleep 30
+    exec "$realgit" "\$@"
+  fi
+done
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$TEST_BASE/r37bin/git"
+
+  (cd "$repo" && exec env PATH="$TEST_BASE/r37bin:$PATH" ./scripts/rollback.sh T200 --yes) \
+    > "$TEST_BASE/r37.log" 2>&1 &
+  local bg=$! i=0 rc=0
+  while [ ! -f "$TEST_BASE/r37.in" ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done
+  [ -f "$TEST_BASE/r37.in" ]
+  sleep 0.3
+  local t0 t1
+  t0="$(date +%s)"
+  kill -TERM "$bg"
+  wait "$bg" || rc=$?
+  t1="$(date +%s)"
+  [ "$rc" -eq 130 ]
+  [ $(( t1 - t0 )) -lt 8 ]
+  # TERM 무시 자식은 그룹 KILL로 회수됐다
+  sleep 0.5
+  ! kill -0 "$(cat "$TEST_BASE/r37.pid")" 2>/dev/null
+  # 성공 출력 없음 + 태그는 보존 (CAS 미완) + writer lock 무잔존
+  ! grep -q "restored" "$TEST_BASE/r37.log"
+  git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+  [ ! -e "$repo/state/ticket_write.lock.d" ]
+}

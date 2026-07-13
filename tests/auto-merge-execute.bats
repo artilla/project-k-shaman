@@ -1785,3 +1785,75 @@ MOCK
   [ -n "$intr" ]
   grep -q "FOREIGN-CAPTURE" "$intr"
 }
+
+@test "execute: double replacement during capture strands the concurrent file WITH intent metadata (deterministic recovery)" {
+  # 7라운드 P1(#1): payload ln 후 원경로가 B로 원자 교체되고, side 캡처 후 다시
+  # C가 원경로를 선점하면 B가 side.*에 고립되는데 intent가 삭제돼 결정적 복구
+  # 계약이 깨졌다 (실측). 이제 stranded 위치가 intent에 durable하게 기록되고
+  # intent는 보존된다.
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_ds.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/ds.flag" ]; then touch "$TEST_HOME/ds.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_ds.sh"
+
+  local realln realmv
+  realln="$(command -v ln)"
+  realmv="$(command -v mv)"
+  mkdir -p "$TEST_HOME/dsbin"
+  # payload ln 성공 직후 원경로를 B로 "원자 교체"(새 inode)
+  cat > "$TEST_HOME/dsbin/ln" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+"$realln" "\$@"; rc=\$?
+case "\$last" in *.amrb-bak.*payload.*)
+  if [ \$rc -eq 0 ] && [ ! -f "$TEST_HOME/ds.b" ]; then
+    touch "$TEST_HOME/ds.b"
+    printf 'B-CONCURRENT\n' > "$d/docs/.b.tmp"
+    "$realmv" "$d/docs/.b.tmp" "$d/docs/file-1.md"
+  fi
+;; esac
+exit \$rc
+MOCK
+  # side 캡처(mv) 직후 원경로를 C로 선점 — B 복원(no-clobber)이 실패하게 만든다
+  cat > "$TEST_HOME/dsbin/mv" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+case "\$last" in *.amrb-bak.*side.*)
+  "$realmv" "\$@"; rc=\$?
+  printf 'C-THIRD\n' > "$d/docs/.c.tmp"
+  "$realmv" "$d/docs/.c.tmp" "$d/docs/file-1.md"
+  exit \$rc
+;; esac
+exec "$realmv" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/dsbin/ln" "$TEST_HOME/dsbin/mv"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/dsbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_ds.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+  # C는 덮이지 않았다
+  grep -q "C-THIRD" "$d/docs/file-1.md"
+  # intent가 보존되고, stranded 필드가 B의 고립 위치를 가리킨다
+  local intent sidep
+  intent="$(ls "$d/.git/auto_merge.trash.d/"*.intent 2>/dev/null | head -1)"
+  [ -n "$intent" ]
+  sidep="$(awk -F'\t' '$1=="stranded"{print $2}' "$intent")"
+  [ -n "$sidep" ]
+  [ -f "$sidep" ]
+  grep -q "B-CONCURRENT" "$sidep"
+}

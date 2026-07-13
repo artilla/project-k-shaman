@@ -1371,3 +1371,72 @@ SHIM
   [ "$status" -eq 0 ]
   [[ "$output" == *"up-to-date"* ]]
 }
+
+@test "DB45: ACL evidence covers the exact deployment contract (drift, PUBLIC re-grant, stale grantee)" {
+  # 7라운드 P1(#4): '요청 role의 권한 보유'만으로는 계약이 확인되지 않았다 —
+  # 함수 삭제(drift)·PUBLIC 재부여·설정 변경 후 구 role 잔존 grant가 전부 rc=0으로
+  # 통과했다 (실측). 증거는 정확한 배포 계약 전체다.
+  _psql "drop role if exists zz_a45; drop role if exists zz_b45"
+  _psql "create role zz_a45 login"
+  _psql "create role zz_b45 login"
+  run env MIGRATION_APP_ROLES=zz_a45 ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (c) 설정을 zz_a45→zz_b45로 바꿨지만 zz_a45 grant 잔존 → 거부
+  _psql "grant usage on schema public to zz_b45"
+  _psql "grant execute on function app_soft_delete_user(bigint) to zz_b45"
+  run env MIGRATION_APP_ROLES=zz_b45 ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"up-to-date"* ]]
+  [[ "$output" == *"zz_a45"* ]]
+  # 정리 후 성공
+  _psql "revoke execute on function app_soft_delete_user(bigint) from zz_a45"
+  run env MIGRATION_APP_ROLES=zz_b45 ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (b) PUBLIC 재부여 → 거부
+  _psql "grant execute on function app_soft_delete_user(bigint) to public"
+  run env MIGRATION_APP_ROLES=zz_b45 ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"PUBLIC"* ]]
+  _psql "revoke execute on function app_soft_delete_user(bigint) from public"
+  run env MIGRATION_APP_ROLES=zz_b45 ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (a) 진입점 함수 삭제(drift) → 거부
+  _psql "drop function app_soft_delete_user(bigint)"
+  run env MIGRATION_APP_ROLES=zz_b45 ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"up-to-date"* ]]
+  [[ "$output" == *"drift"* ]]
+}
+
+@test "DB46: TERM during the last --status query is not lost as rc=0" {
+  # 7라운드 P1(#5): 마지막 status 조회의 자손 정리 중 기록된 신호가 최종 검사
+  # 없이 exit 0으로 유실됐다 (실측: rc=0 + applied 5). 종료 직전 _mig_check_sig가
+  # 128+N 종료를 보장한다.
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  mkdir -p "$PGT/stbin_${BATS_TEST_NUMBER}" "$TROOT/tmp"
+  cat > "$PGT/stbin_${BATS_TEST_NUMBER}/psql" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in
+  *"where version = '005"*) touch "$TROOT/tmp/st46"; sleep 5 ;;
+esac
+exec "$PGBIN/psql" "\$@"
+SHIM
+  chmod +x "$PGT/stbin_${BATS_TEST_NUMBER}/psql"
+  env PATH="$PGT/stbin_${BATS_TEST_NUMBER}:$PATH" ENV_FILE="$ENVF" TMPDIR="$TROOT/tmp" \
+    "$RUNNER" --status > "$PGT/st46.log" 2>&1 &
+  local rpid=$! i=0 rc=0
+  while [ "$i" -lt 200 ]; do
+    [ -f "$TROOT/tmp/st46" ] && break
+    sleep 0.1; i=$((i+1))
+  done
+  [ -f "$TROOT/tmp/st46" ]
+  sleep 0.2
+  kill -TERM "$rpid"
+  wait "$rpid" || rc=$?
+  [ "$rc" -eq 143 ]
+  [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
+}
