@@ -10,8 +10,17 @@ state/failures.log
 state/auto_merge.log
 state/auto_merge.lock.d/
 state/auto_merge.lock.d.reclaim.*/
+state/auto_merge.lock.d.own.*
+state/auto_merge.lock.d.acq.*/
+state/auto_merge.lock.d.obs.*
+state/auto_merge.lock.d.rec.d/
+state/auto_merge.lock.d.rel.*/
 state/ticket_write.lock.d/
 state/ticket_write.lock.d.reclaim.*/
+state/ticket_write.lock.d.own.*
+state/ticket_write.lock.d.acq.*/
+state/ticket_write.lock.d.obs.*
+state/ticket_write.lock.d.rec.d/
 state/auto_merge.recovery
 state/cron.log
 state/reservations/

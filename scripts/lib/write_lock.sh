@@ -24,32 +24,63 @@ _TW_LOCK="${_TW_LOCK:-state/ticket_write.lock.d}"
 _TW_HELD=0
 _TW_TOKEN=""
 
-_twl_reclaim_dead() {  # $1=lock dir → 0=해체 완료, 1=회수 불가(live/교체/잔여물)
-  local _lk="$1" _obs="$1.obs.$$" _p
-  rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
-  _p="$(cat "$_lk/pid" 2>/dev/null || true)"
-  [ -n "$_p" ] || return 1
-  kill -0 "$_p" 2>/dev/null && return 1
-  if [ -f "$_lk/token" ]; then
-    ln "$_lk/token" "$_obs.t" 2>/dev/null || return 1
-  fi
-  if ! ln "$_lk/pid" "$_obs.p" 2>/dev/null; then
-    rm -f "$_obs.t" 2>/dev/null || true
-    return 1
-  fi
-  # 결속된 inode의 내용으로 dead를 재검증 — 교체된 새 lock의 pid가 아니어야 한다
-  if [ "$(cat "$_obs.p" 2>/dev/null || true)" != "$_p" ] || kill -0 "$_p" 2>/dev/null; then
+_twl_reclaim_dead() {  # $1=lock dir → 0=해체 완료, 1=회수 불가(live/교체/경합/잔여물)
+    local _lk="$1" _obs="$1.obs.$$" _meta="$1.rec.d" _p _mp _rc=1
     rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
-    return 1
-  fi
-  if [ -f "$_obs.t" ] && [ "$_lk/token" -ef "$_obs.t" ]; then
-    rm -f "$_lk/token" 2>/dev/null || true
-  fi
-  if [ "$_lk/pid" -ef "$_obs.p" ]; then
-    rm -f "$_lk/pid" 2>/dev/null || true
-  fi
-  rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
-  rmdir "$_lk" 2>/dev/null || return 1
+    _p="$(cat "$_lk/pid" 2>/dev/null || true)"
+    [ -n "$_p" ] || return 1
+    kill -0 "$_p" 2>/dev/null && return 1
+    # 7라운드 P1(#2): -ef 확인과 경로 기반 rm 사이에 다른 reclaimer가 구 lock을
+    # 제거하고 새 owner가 획득하면 새 token이 삭제됐다 (실측: writer 고착) —
+    # 회수를 meta-lock(mkdir 원자)으로 직렬화한다. canonical 제거는 meta-lock
+    # 보유자만 수행한다. meta-lock stale은 pid-dead 시 정리(내용물 처분 가능).
+    if ! mkdir "$_meta" 2>/dev/null; then
+      _mp="$(cat "$_meta/pid" 2>/dev/null || true)"
+      if [ -n "$_mp" ] && ! kill -0 "$_mp" 2>/dev/null; then
+        rm -rf "$_meta" 2>/dev/null || true
+      fi
+      return 1
+    fi
+    if ! echo "$$" > "$_meta/pid" 2>/dev/null; then
+      rmdir "$_meta" 2>/dev/null || true
+      return 1
+    fi
+    if [ -f "$_lk/token" ]; then
+      ln "$_lk/token" "$_obs.t" 2>/dev/null || { rm -rf "$_meta" 2>/dev/null || true; return 1; }
+    fi
+    if ! ln "$_lk/pid" "$_obs.p" 2>/dev/null; then
+      rm -f "$_obs.t" 2>/dev/null || true
+      rm -rf "$_meta" 2>/dev/null || true
+      return 1
+    fi
+    if [ "$(cat "$_obs.p" 2>/dev/null || true)" = "$_p" ] && ! kill -0 "$_p" 2>/dev/null; then
+      if [ ! -f "$_obs.t" ] || [ "$_lk/token" -ef "$_obs.t" ]; then
+        [ -f "$_obs.t" ] && rm -f "$_lk/token" 2>/dev/null
+        if [ "$_lk/pid" -ef "$_obs.p" ]; then
+          rm -f "$_lk/pid" 2>/dev/null || true
+        fi
+        rmdir "$_lk" 2>/dev/null && _rc=0
+      fi
+    fi
+    rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
+    rm -rf "$_meta" 2>/dev/null || true
+    return "$_rc"
+}
+
+# 7라운드 P2: EXIT trap이 release를 우회한 경로(스킵/대기 중 TERM)가 남긴
+# .own/.acq/.obs 부속물을 다음 획득 시점에 gc한다 — 이름의 pid가 죽어 있을 때만.
+_twl_gc_artifacts() {
+  local _f _pid
+  for _f in "$_TW_LOCK".own.* "$_TW_LOCK".acq.* "$_TW_LOCK".obs.*.t "$_TW_LOCK".obs.*.p; do
+    [ -e "$_f" ] || continue
+    _pid="${_f##*.}"
+    case "$_pid" in t|p) _pid="${_f%.*}"; _pid="${_pid##*.}" ;; esac
+    case "$_pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    kill -0 "$_pid" 2>/dev/null && continue
+    rm -rf "$_f" 2>/dev/null || true
+  done
   return 0
 }
 
@@ -59,6 +90,7 @@ _acquire_write_lock() {
   # 부를 수 있어야 approve/reject 상호 직렬화가 단일 임계구역으로 성립한다.
   if [ "${_TW_HELD:-0}" -gt 0 ]; then _TW_HELD=$((_TW_HELD+1)); return 0; fi
   mkdir -p "$(dirname "$_TW_LOCK")" 2>/dev/null || true
+  _twl_gc_artifacts
   _twl_mkpre() {
     rm -rf "$_pre" 2>/dev/null || true
     rm -f "$_own" 2>/dev/null || true
