@@ -99,52 +99,10 @@ _sha_of() { git hash-object -- "$1" 2>/dev/null || shasum "$1" 2>/dev/null | awk
 # 리뷰 13차 P1: writer publish 직렬화 — SHA 검사(guard)와 rename 사이가 lock 없이는
 # CAS가 아니다. 모든 writer가 같은 lock 아래에서 guard→publish를 수행해야 동시
 # 편집의 한쪽이 조용히 유실되지 않는다 (패자는 SHA 불일치로 명시 거부됨).
-_TW_LOCK="state/ticket_write.lock.d"
-_TW_HELD=0
-_acquire_write_lock() {
-  local _i=0 _p _mp
-  # 리뷰 14차 P1: 재진입 지원 — 결정(critical section)이 lock을 쥔 채 _safe_write를
-  # 부를 수 있어야 approve/reject 상호 직렬화가 단일 임계구역으로 성립한다.
-  if [ "${_TW_HELD:-0}" -gt 0 ]; then _TW_HELD=$((_TW_HELD+1)); return 0; fi
-  mkdir -p state 2>/dev/null || true
-  while :; do
-    if mkdir "$_TW_LOCK" 2>/dev/null; then
-      if echo "$$" > "$_TW_LOCK/pid" 2>/dev/null; then _TW_HELD=1; return 0; fi
-      rm -rf "$_TW_LOCK" 2>/dev/null || true
-      return 1
-    fi
-    _p="$(cat "$_TW_LOCK/pid" 2>/dev/null || true)"
-    if [ -n "$_p" ] && ! kill -0 "$_p" 2>/dev/null; then
-      # stale lock — 원자적 rename으로 회수. 리뷰 14차 P1: 회수를 "관찰한 그 lock"에
-      # 결속 — 이동한 디렉터리의 pid가 관찰한 dead pid와 다르면(그 사이 새 live
-      # owner로 교체) 원복하고 대기한다. live lock 삭제 → 상호배제 붕괴 방지.
-      if mv "$_TW_LOCK" "$_TW_LOCK.reclaim.$$" 2>/dev/null; then
-        _mp="$(cat "$_TW_LOCK.reclaim.$$/pid" 2>/dev/null || true)"
-        if [ "$_mp" = "$_p" ]; then
-          rm -rf "$_TW_LOCK.reclaim.$$" 2>/dev/null || true
-          continue
-        fi
-        if ! mv "$_TW_LOCK.reclaim.$$" "$_TW_LOCK" 2>/dev/null; then
-          echo "❌ live write lock 원복 실패 — fail-closed로 중단합니다: ${_TW_LOCK}.reclaim.$$ 확인" >&2
-          return 1
-        fi
-      fi
-    fi
-    _i=$((_i+1))
-    if [ "$_i" -ge 100 ]; then
-      echo "❌ ticket write lock 획득 실패(경합 지속) — ${_TW_LOCK} 확인" >&2
-      return 1
-    fi
-    sleep 0.1
-  done
-}
-_release_write_lock() {
-  if [ "${_TW_HELD:-0}" -gt 1 ]; then _TW_HELD=$((_TW_HELD-1)); return 0; fi
-  if [ "$(cat "$_TW_LOCK/pid" 2>/dev/null)" = "$$" ]; then
-    rm -rf "$_TW_LOCK" 2>/dev/null || true
-  fi
-  _TW_HELD=0
-}
+# 6라운드 P1(#2): inline mv-회수 lock을 공용 lib로 교체 — stale 회수가 live lock을
+# canonical 밖으로 밀어내지 않는다 (inode 결속·무이동 해체; 계약은 lib 주석 참조).
+# shellcheck source=scripts/lib/write_lock.sh
+. "$ROOT/scripts/lib/write_lock.sh"
 _safe_write() {  # stdin → $1 (same-dir temp + rename), $2=canonical 상대 디렉터리
   local f="$1" want_dir="$2" tmp perm
   tmp=$(mktemp "${want_dir}/.write.XXXXXX") || return 1
