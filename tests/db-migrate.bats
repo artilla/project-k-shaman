@@ -1188,3 +1188,66 @@ SHIM
   [ "$(_psql "select count(*) from schema_migrations")" = "5" ]
   [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
 }
+
+@test "DB40: TERM during the initial connect probe / applied() query exits immediately (no foreground/command-substitution wait)" {
+  # 재재리뷰 P1(#1): 최종 보고 창(DB35)뿐 아니라 초기 접속·bootstrap·applied()에도
+  # foreground psql·명령치환 대기 구조가 남아 TERM 처리가 psql 종료까지 밀렸다
+  # (실측: elapsed≥5s). 이제 모든 psql이 단일 helper(_mig_psql: 별도 프로세스 그룹
+  # background + wait)를 거치므로 어느 창의 신호든 즉시 전달·reap된다.
+  mkdir -p "$PGT/connbin_${BATS_TEST_NUMBER}" "$TROOT/tmp"
+  cat > "$PGT/connbin_${BATS_TEST_NUMBER}/psql" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in
+  *"select 1"*) touch "$TROOT/tmp/conn"; sleep 5 ;;
+esac
+exec "$PGBIN/psql" "\$@"
+SHIM
+  chmod +x "$PGT/connbin_${BATS_TEST_NUMBER}/psql"
+  env PATH="$PGT/connbin_${BATS_TEST_NUMBER}:$PATH" ENV_FILE="$ENVF" TMPDIR="$TROOT/tmp" \
+    "$RUNNER" > "$PGT/sig40.log" 2>&1 &
+  local rpid=$! i=0 rc=0
+  while [ "$i" -lt 200 ]; do
+    [ -f "$TROOT/tmp/conn" ] && break
+    sleep 0.1; i=$((i+1))
+  done
+  [ -f "$TROOT/tmp/conn" ]
+  sleep 0.3
+  local t0 t1
+  t0="$(date +%s)"
+  kill -TERM "$rpid"
+  wait "$rpid" || rc=$?
+  t1="$(date +%s)"
+  [ "$rc" -eq 143 ]
+  ! grep -q "up-to-date" "$PGT/sig40.log"
+  [ $(( t1 - t0 )) -lt 3 ]
+  [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
+
+  # applied() 창 — ledger 조회(where version =)가 느려도 TERM은 즉시 처리된다
+  mkdir -p "$PGT/appbin_${BATS_TEST_NUMBER}"
+  cat > "$PGT/appbin_${BATS_TEST_NUMBER}/psql" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in
+  *"where version ="*) touch "$TROOT/tmp/appl"; sleep 5 ;;
+esac
+exec "$PGBIN/psql" "\$@"
+SHIM
+  chmod +x "$PGT/appbin_${BATS_TEST_NUMBER}/psql"
+  rc=0
+  env PATH="$PGT/appbin_${BATS_TEST_NUMBER}:$PATH" ENV_FILE="$ENVF" TMPDIR="$TROOT/tmp" \
+    "$RUNNER" > "$PGT/sig40b.log" 2>&1 &
+  rpid=$!; i=0
+  while [ "$i" -lt 200 ]; do
+    [ -f "$TROOT/tmp/appl" ] && break
+    sleep 0.1; i=$((i+1))
+  done
+  [ -f "$TROOT/tmp/appl" ]
+  sleep 0.3
+  t0="$(date +%s)"
+  kill -TERM "$rpid"
+  wait "$rpid" || rc=$?
+  t1="$(date +%s)"
+  [ "$rc" -eq 143 ]
+  ! grep -q "up-to-date" "$PGT/sig40b.log"
+  [ $(( t1 - t0 )) -lt 3 ]
+  [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
+}

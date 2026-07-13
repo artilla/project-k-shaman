@@ -791,3 +791,138 @@ WRAP
   run git -C "$repo" log --format=%s -1
   [[ "$output" == *"foreign: post-publish"* ]]
 }
+
+@test "R27: branch switch to a DIFFERENT-OID branch during read-tree -> that branch's own tree is restored" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 재재리뷰 P1(#7): 역방향 read-tree(_NEW→HEAD_OID)는 "원 branch의 tree"를 적용할
+  # 뿐이라, 다른 OID의 branch로 전환된 경우 tracked dirty가 남는데도 '원상복구
+  # 완료'로 보고했다 (실측). 복구 목표는 "지금 checkout된 commit의 tree"다.
+  local base_br other_oid
+  base_br="$(git -C "$repo" symbolic-ref --short HEAD)"
+  git -C "$repo" checkout -q -b other cycle/T200-pre
+  echo "OTHER" > "$repo/file.txt"
+  git -C "$repo" add file.txt
+  git -C "$repo" commit -q -m "other: divergent"
+  other_oid="$(git -C "$repo" rev-parse HEAD)"
+  git -C "$repo" checkout -q "$base_br"
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin14"
+  cat > "$repo/gbin14/git" <<WRAP
+#!/usr/bin/env bash
+case " \$* " in *" read-tree "*)
+  if [ ! -f "$repo/.r27" ]; then
+    touch "$repo/.r27"
+    "$realgit" -C "$repo" symbolic-ref HEAD refs/heads/other
+  fi
+;; esac
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin14/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin14:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"rolled back"* ]]
+  [[ "$output" == *"checkout branch가 바뀌었습니다"* ]]
+  # other의 worktree는 "other의 tree"로 복원됐다 — 원 branch(v2)의 tree가 아니다
+  grep -q "^OTHER$" "$repo/file.txt"
+  [ -z "$(git -C "$repo" status --porcelain --untracked-files=no)" ]
+  # other ref 무변경, 공개는 고정 branch에만 적용
+  [ "$(git -C "$repo" rev-parse refs/heads/other)" = "$other_oid" ]
+  run git -C "$repo" log --format=%s "refs/heads/$base_br"
+  [[ "$output" == *"Revert"* ]]
+  git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
+}
+
+@test "R28: forged 'already reverted' commit touching a newline-named file -> refused (NUL-based path verification)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 재재리뷰 P1(#4): newline 기반 diff-tree|sort는 개행 포함 파일명을 C-quote
+  # 문자열/조각으로 갈라 ls-tree가 양쪽 모두 빈 결과를 반환 — 위조 커밋이 "이미
+  # 되돌려짐"으로 인정되어 rc=0 + post 태그 삭제까지 재현됐다 (실측).
+  local nlf own
+  nlf="$(printf 'bad\nname.txt')"
+  _add_owned_commit "$repo" "T200: newline file" "$nlf" "v1"
+  own="$(git -C "$repo" rev-parse HEAD)"
+  printf 'EVIL\n' > "$repo/$nlf"
+  git -C "$repo" add -A
+  git -C "$repo" -c user.email=f@f -c user.name=F commit -q -m "forge
+
+This reverts commit ${own}."
+
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"rolled back"* ]]
+  [[ "$output" == *"소유 역커밋이 아닌 커밋"* ]]
+  # 아무것도 공개되지 않았다 — 태그 생존, 위조 내용 그대로(파괴 없음)
+  git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+  grep -q "^EVIL$" "$repo/$nlf"
+}
+
+@test "R29: legitimate rollback of an owned commit with a newline-named file succeeds (no false rejection)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  local nlf
+  nlf="$(printf 'bad\nname.txt')"
+  _add_owned_commit "$repo" "T200: newline file" "$nlf" "v1"
+
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rolled back T200 by revert"* ]]
+  [ ! -e "$repo/$nlf" ]
+  grep -q "^v1$" "$repo/file.txt"
+  [ -z "$(git -C "$repo" status --porcelain --untracked-files=no)" ]
+  ! git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+}
+
+@test "R30: git status failing with empty output (rc!=0) is not treated as clean -> refused, nothing published" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 재재리뷰 P1(#5): 초기·공개 전·최종 검사가 출력만 비교하고 rc를 버려, 빈
+  # 출력+rc=42에서 rollback이 성공 공개되고 태그도 삭제됐다 (실측).
+  local realgit tip
+  realgit="$(command -v git)"
+  tip="$(git -C "$repo" rev-parse HEAD)"
+  mkdir -p "$repo/gbin15"
+  cat > "$repo/gbin15/git" <<WRAP
+#!/usr/bin/env bash
+for a in "\$@"; do [ "\$a" = "status" ] && exit 42; done
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin15/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin15:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"rolled back"* ]]
+  [[ "$output" == *"git status 실패"* ]]
+  [ "$(git -C "$repo" rev-parse HEAD)" = "$tip" ]
+  git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+}
+
+@test "R31: pre-existing recovery ref is never clobbered (CAS) - foreign evidence preserved, contained evidence CAS-deleted" {
+  # 재재리뷰 P1(#8): refs/rollback/<ID>를 무조건 덮거나 expected-old 없이 삭제해
+  # 선행 복구 증거가 정상 rollback 한 번으로 사라졌다 (실측).
+  # (a) 공개 결과에 포함되지 않는 foreign 증거 → 보존 + 고지
+  local repo="$TEST_BASE/keep"
+  _make_repo "$repo"
+  local foreign
+  foreign="$(git -C "$repo" commit-tree "$(git -C "$repo" rev-parse 'HEAD^{tree}')" -m foreign </dev/null)"
+  git -C "$repo" update-ref refs/rollback/T200 "$foreign"
+
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rolled back T200 by revert"* ]]
+  [[ "$output" == *"보존합니다"* ]]
+  [ "$(git -C "$repo" rev-parse refs/rollback/T200)" = "$foreign" ]
+
+  # (b) 공개 결과의 ancestor인 증거 → expected-old CAS로 정리
+  local repo2="$TEST_BASE/contained"
+  _make_repo "$repo2"
+  git -C "$repo2" update-ref refs/rollback/T200 "$(git -C "$repo2" rev-parse 'cycle/T200-pre^{commit}')"
+
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo2"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"rolled back T200 by revert"* ]]
+  ! git -C "$repo2" rev-parse -q --verify "refs/rollback/T200" >/dev/null
+}

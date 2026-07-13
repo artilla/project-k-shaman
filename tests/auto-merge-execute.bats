@@ -1670,3 +1670,27 @@ MOCK
   [ ! -d "$d/state/ticket_write.lock.d" ]
   [ -z "$(ls -d "$d/state/ticket_write.lock.d."* 2>/dev/null || true)" ]
 }
+
+@test "execute: half-formed lock (no pid/token, pre-trap crash remnant) is reclaimed -> no permanent 'pid unknown' refusal" {
+  # 재재리뷰 P1(#9): lock 획득(~500행)과 cleanup trap(~1032행) 사이의 신호가
+  # pid/token 없는 lock을 남기면 이후 실행이 'pid unknown'으로 영구 거부됐다
+  # (실측). 이제 (a) trap을 획득 전에 설치하고 (b) 획득은 pid·token이 담긴 사전
+  # 구성 디렉터리의 원자 rename이므로 반쪽 lock은 정상 경로에서 생기지 않으며,
+  # (c) 남아 있는 pid 없는 lock(구 형식 잔존)은 stale로 원자 회수한다.
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  mkdir -p "$TEST_HOME/state/auto_merge.lock.d"   # pid/token 없는 반쪽 lock
+
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"reclaiming"* ]]
+  [[ "$output" == *"auto-merge executed"* ]]
+  [ ! -e "$TEST_HOME/state/auto_merge.lock.d" ]
+}
