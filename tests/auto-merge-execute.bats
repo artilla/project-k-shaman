@@ -1621,7 +1621,7 @@ MOCK
   # payload는 capture 디렉터리(payload 파일이 있으면 그것이 payload — 모호성 없음)에
   # intent와 함께 보존되어 결정적 복구가 가능하다
   local cap intent
-  cap="$(ls "$d/docs/".amrb-bak.*.d/payload 2>/dev/null | head -1)"
+  cap="$(ls "$d/docs/".amrb-bak.*.d/payload.* 2>/dev/null | head -1)"
   [ -n "$cap" ]
   grep -q "content 1" "$cap"
   intent="$(ls "$d/.git/auto_merge.trash.d/"*.intent 2>/dev/null | head -1)"
@@ -1733,4 +1733,53 @@ EOF
     '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
   [ "$status" -eq 0 ]
   [[ "$output" == *"auto-merge executed"* ]]
+}
+
+@test "execute: intruder file planted at the reserved capture payload path is never clobbered (mv -n capture)" {
+  # 5라운드 P1(#3): capture 디렉터리만 예약하고 payload를 일반 mv로 게시하면
+  # 예약~mv 사이에 생긴 동시 파일을 덮었다 (실측: FOREIGN-CAPTURE 소실). 이제
+  # payload 이름은 난수이고 게시는 mv -n(no-clobber)이다 — 선점되면 원본은
+  # 원경로에 그대로 남고(무손실), 침입 파일도 덮이지 않는다.
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_ci.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/ci.flag" ]; then touch "$TEST_HOME/ci.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_ci.sh"
+
+  local realmv
+  realmv="$(command -v mv)"
+  mkdir -p "$TEST_HOME/cibin"
+  cat > "$TEST_HOME/cibin/mv" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+case "\$last" in *.amrb-bak.*)
+  printf 'FOREIGN-CAPTURE\\n' > "\$last"   # 예약된 payload 경로를 mv 직전에 선점
+;; esac
+exec "$realmv" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/cibin/mv"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/cibin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_ci.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+  # 원본은 원경로에 무손실로 남았다 (capture 자체가 일어나지 않음)
+  grep -q "content 1" "$d/docs/file-1.md"
+  # 침입 파일은 덮이지 않았다
+  local intr
+  intr="$(ls "$d/docs/".amrb-bak.*.d/payload.* 2>/dev/null | head -1)"
+  [ -n "$intr" ]
+  grep -q "FOREIGN-CAPTURE" "$intr"
 }

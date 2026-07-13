@@ -1021,3 +1021,75 @@ WRAP
   run git -C "$repo" log --format=%s -1
   [[ "$output" == *"foreign: with status"* ]]
 }
+
+@test "R35: reset path post-tag CAS delete failure is not reported as success (partial rollback surfaces)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 5라운드 P1(#6): CAS 삭제 실패를 무시하면 post 태그가 남은 부분 rollback이
+  # rc=0/restored로 위장됐다. reset 모드로 만들기 위해 pre 이후 커밋을 제거한다.
+  git -C "$repo" reset -q --hard cycle/T200-pre
+  git -C "$repo" tag -f -a cycle/T200-post -m x >/dev/null
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin19"
+  cat > "$repo/gbin19/git" <<WRAP
+#!/usr/bin/env bash
+prev=""
+for a in "\$@"; do
+  if [ "\$prev" = "update-ref" ] && [ "\$a" = "-d" ]; then exit 42; fi
+  prev="\$a"
+done
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin19/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin19:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"restored"* ]]
+  [[ "$output" == *"태그 삭제(CAS)가 실패"* ]]
+  git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+}
+
+@test "R36: TERM while an isolated revert child ignores TERM -> bounded reap, lock released, no lingering process" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 5라운드 P1(#5): foreground git revert가 TERM을 무시하면 trap이 자식 종료까지
+  # 지연됐다 (30s shim에서 3s 후에도 프로세스·writer lock 잔존, 실측). 자식은
+  # 별도 프로세스 그룹 + wait + absolute deadline(5s)로 reap된다.
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin20"
+  cat > "$repo/gbin20/git" <<WRAP
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "revert" ]; then
+    trap '' TERM
+    touch "$repo/.inrev"
+    sleep 30
+    exec "$realgit" "\$@"
+  fi
+done
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin20/git"
+
+  (cd "$repo" && exec env PATH="$repo/gbin20:$PATH" ./scripts/rollback.sh T200 --yes) \
+    > "$repo/.r36.log" 2>&1 &
+  local bg=$! i=0 rc=0
+  while [ ! -f "$repo/.inrev" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i+1)); done
+  [ -f "$repo/.inrev" ]
+  sleep 0.3
+  local t0 t1
+  t0="$(date +%s)"
+  kill -TERM "$bg"
+  wait "$bg" || rc=$?
+  t1="$(date +%s)"
+  [ "$rc" -eq 130 ]
+  [ $(( t1 - t0 )) -lt 8 ]
+  # writer lock·격리 worktree가 잔존하지 않는다
+  [ ! -e "$repo/state/ticket_write.lock.d" ]
+  [ "$(git -C "$repo" worktree list | wc -l | tr -d ' ')" = "1" ]
+  # 아무것도 공개되지 않았다
+  grep -q "^v2$" "$repo/file.txt"
+  git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+}

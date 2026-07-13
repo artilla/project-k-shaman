@@ -60,6 +60,10 @@ setup() {
   _as_pg "'$PGBIN/createdb' -h 127.0.0.1 -p $PGT_PORT -U postgres $TEST_DB"
   ENVF="$PGT/${TEST_DB}.env"
   echo "DATABASE_URL=postgres://postgres:x@127.0.0.1:${PGT_PORT}/${TEST_DB}?schema=public" > "$ENVF"
+  # 5라운드(#7): apply는 MIGRATION_APP_ROLES 지정이 필수(fail-closed) — 테스트
+  # 클러스터는 실행 role(postgres)이 곧 runtime role이므로 @self로 명시 승인한다.
+  # (ENVF를 덮어쓰는 테스트에도 적용되도록 env로 export)
+  export MIGRATION_APP_ROLES=@self
   # fixture 격리: runner + migrations를 temp ROOT로 복사 (실제 저장소 무변조)
   # 리뷰 16차 P1(7차): runner의 실행 원본은 "HEAD에 커밋된 blob"뿐이다 —
   # fixture도 git repo여야 하고, 테스트가 migration 파일을 쓰거나 바꾸면
@@ -1323,4 +1327,24 @@ SHIM
   # 공유 deadline(5s) + KILL/reap ε — 합산(9s+)이 아니다
   [ $(( t1 - t0 )) -lt 8 ]
   [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
+}
+
+@test "DB43: apply without MIGRATION_APP_ROLES is refused fail-closed; --status does not require it" {
+  # 5라운드 live blocker(#7): 미지정 fallback은 ACL 대상을 실행 role로 '확정'하고
+  # ledger 때문에 재실행되지 않는다 — 경고+진행이 아니라 거부한다. 실행 role
+  # fallback은 @self 명시 승인일 때만.
+  run env MIGRATION_APP_ROLES= ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"MIGRATION_APP_ROLES"* ]]
+  [[ "$output" == *"@self"* ]]
+  [ "$(_psql "select to_regclass('schema_migrations') is null")" = "t" ]
+
+  # --status는 읽기 전용 — 요구하지 않는다
+  run env MIGRATION_APP_ROLES= ENV_FILE="$ENVF" "$RUNNER" --status
+  [ "$status" -eq 0 ]
+
+  # @self 명시 승인 시 정상 적용
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [ "$(_psql "select count(*) from schema_migrations")" = "5" ]
 }
