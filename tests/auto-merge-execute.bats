@@ -1329,12 +1329,15 @@ MOCK
     '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
   [ "$status" -eq 1 ]
   grep -q $'\tROLLED_BACK$' "$TEST_HOME/state/auto_merge.log"
-  # 폐기된 merge-added 파일이 .git 아래 quarantine에 manifest와 함께 남는다
+  # 폐기된 merge-added 파일이 .git 아래 quarantine에 manifest 레코드와 함께 남는다
+  # (4라운드 P1 #3: manifest는 append 파일이 아니라 레코드별 파일 — temp→fsync→
+  # 원자 rename이므로 존재하는 레코드는 완전하고 참이다)
   [ -d "$d/.git/auto_merge.trash.d" ]
-  [ -f "$d/.git/auto_merge.trash.d/manifest.tsv" ]
-  grep -q $'\tdocs/file-1.md\t' "$d/.git/auto_merge.trash.d/manifest.tsv"
-  local qfile
-  qfile="$(awk -F'\t' 'END{print $4}' "$d/.git/auto_merge.trash.d/manifest.tsv")"
+  [ -d "$d/.git/auto_merge.trash.d/manifest.d" ]
+  local rec qfile
+  rec="$(grep -l $'\tdocs/file-1.md\t' "$d/.git/auto_merge.trash.d/manifest.d/"*.tsv 2>/dev/null | head -1)"
+  [ -n "$rec" ]
+  qfile="$(awk -F'\t' 'END{print $4}' "$rec")"
   [ -f "$qfile" ]
   grep -q 'content 1' "$qfile"
   # git clean -fd에도 살아남는다 (.git은 clean 대상이 아님)
@@ -1543,8 +1546,10 @@ exit 1
 MOCK
   chmod +x "$TEST_HOME/mock_checks_qm.sh"
 
-  # manifest.tsv 자리에 디렉터리 — append가 반드시 실패한다
-  mkdir -p "$d/.git/auto_merge.trash.d/manifest.tsv"
+  # manifest.d 자리에 "파일" — 레코드 디렉터리 생성(mkdir -p)이 반드시 실패한다
+  # (4라운드 P1 #3: append+사후검증 → 레코드별 파일 temp→fsync→rename 구조)
+  mkdir -p "$d/.git/auto_merge.trash.d"
+  touch "$d/.git/auto_merge.trash.d/manifest.d"
 
   run bash -c "cd '$d' && \
     LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
@@ -1558,14 +1563,16 @@ MOCK
   grep -q "content 1" "$d/docs/file-1.md"
   grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
   # 격리 디렉터리에 payload·intent 잔여물이 없다 (거짓 기록·거짓 성공 없음)
-  [ -z "$(ls "$d/.git/auto_merge.trash.d" 2>/dev/null | grep -v -e '^README.md$' -e '^manifest.tsv$' || true)" ]
+  [ -z "$(ls "$d/.git/auto_merge.trash.d" 2>/dev/null | grep -v -e '^README.md$' -e '^manifest.d$' || true)" ]
+  # worktree 쪽 capture 잔여물도 없다 (원복 완료)
+  [ -z "$(ls -d "$d/docs/".amrb-bak.* 2>/dev/null || true)" ]
 }
 
-# 8라운드 후속 재리뷰 P1(#10): manifest 기록 실패의 되돌리기가 mv -f라, 그 사이
-# capture 경로에 생긴 동시 파일을 덮어 실제 내용을 유실시켰다 (실측). 되돌리기는
-# no-clobber여야 하고, capture 경로가 선점됐으면 그 파일을 건드리지 않은 채
-# payload를 intent와 함께 trash에 보존해야 한다 (원경로로 옮기지도 않는다).
-@test "execute: manifest failure with a concurrent file at the capture path - foreign file untouched, payload kept in trash" {
+# 8라운드 후속 재리뷰 P1(#10) → 4라운드 P1(#1·#2): 기록 실패 시 payload는 capture를
+# 떠나지 않는다(ln-forward). 원복(no-clobber)이 원경로의 동시 파일 때문에 실패하면
+# 동시 파일을 덮지 않고, payload는 capture 디렉터리에 intent와 함께 보존되어
+# 결정적 복구가 가능하다.
+@test "execute: record failure + concurrent file at the original path - foreign file untouched, payload kept with intent" {
   local d="$TEST_HOME/repo"
   mkdir -p "$d"
   make_repo "$d" 1 docs
@@ -1578,9 +1585,10 @@ exit 1
 MOCK
   chmod +x "$TEST_HOME/mock_checks_nc.sh"
 
-  # manifest.tsv 자리에 디렉터리 → append 항상 실패
-  mkdir -p "$d/.git/auto_merge.trash.d/manifest.tsv"
-  # 격리 rename 직후(되돌리기 직전) capture 경로를 동시 파일이 선점하게 만든다
+  # manifest.d 자리에 "파일" → 레코드 기록이 반드시 실패한다 (4라운드 #3 구조)
+  mkdir -p "$d/.git/auto_merge.trash.d"
+  touch "$d/.git/auto_merge.trash.d/manifest.d"
+  # capture 직후 "원경로"를 동시 파일이 선점하게 만든다 — 원복은 no-clobber여야 한다
   local realmv
   realmv="$(command -v mv)"
   mkdir -p "$TEST_HOME/ncbin"
@@ -1588,11 +1596,10 @@ MOCK
 #!/usr/bin/env bash
 last=""
 for a in "\$@"; do last="\$a"; done
-case "\$last" in *auto_merge.trash.d/*)
+case "\$last" in *.amrb-bak.*)
+  src="\$1"
   "$realmv" "\$@"; rc=\$?
-  for a in "\$@"; do
-    case "\$a" in *.amrb-bak.*) printf 'CONCURRENT-DO-NOT-CLOBBER\n' > "\$a" ;; esac
-  done
+  printf 'CONCURRENT-DO-NOT-CLOBBER\n' > "\$src"
   exit \$rc
 ;; esac
 exec "$realmv" "\$@"
@@ -1609,17 +1616,25 @@ MOCK
   [ "$status" -eq 1 ]
   grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
 
-  # 동시 파일은 덮이지도, 원경로로 옮겨지지도 않았다 (우리 것이 아니다)
-  local bak
-  bak="$(ls "$d/docs/".amrb-bak.* 2>/dev/null | head -1)"
-  [ -n "$bak" ]
-  grep -q "CONCURRENT-DO-NOT-CLOBBER" "$bak"
-  # payload는 trash에 intent와 함께 보존되어 결정적 복구가 가능하다
-  local q
-  q="$(ls "$d/.git/auto_merge.trash.d" | grep -v -e '^README.md$' -e '^manifest.tsv$' -e '\.intent$' | head -1)"
-  [ -n "$q" ]
-  grep -q "content 1" "$d/.git/auto_merge.trash.d/$q"
-  [ -f "$d/.git/auto_merge.trash.d/$q.intent" ]
+  # 동시 파일은 덮이지 않았다 (no-clobber 원복)
+  grep -q "CONCURRENT-DO-NOT-CLOBBER" "$d/docs/file-1.md"
+  # payload는 capture 디렉터리(payload 파일이 있으면 그것이 payload — 모호성 없음)에
+  # intent와 함께 보존되어 결정적 복구가 가능하다
+  local cap intent
+  cap="$(ls "$d/docs/".amrb-bak.*.d/payload 2>/dev/null | head -1)"
+  [ -n "$cap" ]
+  grep -q "content 1" "$cap"
+  intent="$(ls "$d/.git/auto_merge.trash.d/"*.intent 2>/dev/null | head -1)"
+  [ -n "$intent" ]
+  grep -q $'^src\tdocs/file-1.md$' "$intent"
+  # intent의 capture 필드가 가리키는 payload가 실제로 존재하고 내용이 맞다
+  local capfield
+  capfield="$(awk -F'\t' '$1=="capture"{print $2}' "$intent")"
+  [ -f "$capfield" ]
+  grep -q "content 1" "$capfield"
+  # intent의 복구 절차가 성립한다: dst payload 없음(파일 부재 = payload 아님) →
+  # capture payload가 유일한 복구 근거다
+  [ ! -f "$(awk -F'\t' '$1=="dst"{print $2}' "$intent")" ]
 }
 
 # 8라운드 후속 재리뷰 P1(#8): lock 디렉터리 rename 성공과 token 대입 사이의 TERM에서

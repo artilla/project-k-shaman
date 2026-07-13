@@ -1283,7 +1283,44 @@ SHIM
   t1="$(date +%s)"
   [ "$rc" -eq 143 ]
   ! grep -q "up-to-date" "$PGT/sig41.log"
-  # 전체 예산(≈4s) + 여유 — 지연 probe에 인질로 잡히지 않는다 (종전 8s+ 생존)
+  # 4라운드 P1(#8): main psql reap과 drain이 "하나의 absolute deadline"(신호
+  # 수신 +5s)을 공유한다 — 합산으로 상한이 9s를 넘던 문제 제거 (종전 실측 9.057s)
+  [ $(( t1 - t0 )) -lt 8 ]
+  [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
+}
+
+@test "DB42: main psql AND drain probes both ignoring TERM - one shared absolute deadline bounds the exit" {
+  # 4라운드 P1(#8): main psql reap(최대 5s)과 drain(≈4s)이 합산되어 rc=143까지
+  # 9.057s가 걸렸다 (실측). 신호 수신 시점에 고정한 하나의 deadline(+5s)을 reap과
+  # drain이 공유한다 — 어느 쪽이 예산을 소진하든 전체 상한은 deadline+ε이다.
+  mkdir -p "$PGT/dlbin_${BATS_TEST_NUMBER}" "$TROOT/tmp"
+  cat > "$PGT/dlbin_${BATS_TEST_NUMBER}/psql" <<SHIM
+#!/usr/bin/env bash
+trap '' TERM
+case "\$*" in
+  *pg_stat_activity*) sleep 30; echo 1; exit 0 ;;
+  *'count(*) from "public".schema_migrations'*) touch "$TROOT/tmp/dl"; sleep 30 ;;
+esac
+exec "$PGBIN/psql" "\$@"
+SHIM
+  chmod +x "$PGT/dlbin_${BATS_TEST_NUMBER}/psql"
+  env PATH="$PGT/dlbin_${BATS_TEST_NUMBER}:$PATH" ENV_FILE="$ENVF" TMPDIR="$TROOT/tmp" \
+    "$RUNNER" > "$PGT/sig42.log" 2>&1 &
+  local rpid=$! i=0 rc=0
+  while [ "$i" -lt 200 ]; do
+    [ -f "$TROOT/tmp/dl" ] && break
+    sleep 0.1; i=$((i+1))
+  done
+  [ -f "$TROOT/tmp/dl" ]
+  sleep 0.3
+  local t0 t1
+  t0="$(date +%s)"
+  kill -TERM "$rpid"
+  wait "$rpid" || rc=$?
+  t1="$(date +%s)"
+  [ "$rc" -eq 143 ]
+  ! grep -q "up-to-date" "$PGT/sig42.log"
+  # 공유 deadline(5s) + KILL/reap ε — 합산(9s+)이 아니다
   [ $(( t1 - t0 )) -lt 8 ]
   [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
 }

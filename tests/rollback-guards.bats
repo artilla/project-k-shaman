@@ -983,3 +983,41 @@ WRAP
   grep -q "^v2$" "$repo/file.txt"
   git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
 }
+
+@test "R34: commit injected concurrently with the LAST status observation -> success withheld (tip re-checked after status)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 4라운드 P1(#5): 최종 검증이 ref/HEAD를 먼저 읽고 status를 마지막에 관측했다 —
+  # status가 clean을 반환하면서 "동시에" 커밋이 주입되면 어떤 검사에도 걸리지
+  # 않고 rc=0 + 성공 문구가 나왔다 (실측: 실제 tip은 foreign). 이제 status 이후
+  # tip을 재관측한다. (writer lock은 프로토콜 writer만 배제한다 — raw git 개입은
+  # 이 재관측이 성공 보고를 막는 fail-closed가 최선이다.)
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin18"
+  cat > "$repo/gbin18/git" <<WRAP
+#!/usr/bin/env bash
+is_status=0
+for a in "\$@"; do [ "\$a" = "status" ] && is_status=1; done
+if [ "\$is_status" = 1 ] && ! "$realgit" rev-parse -q --verify refs/tags/cycle/T200-post >/dev/null 2>&1 && [ ! -f "$repo/.r34" ]; then
+  # post 태그 삭제 후의 첫 status = 최종 검증의 status — clean 결과를 돌려주면서
+  # 동시에 foreign commit을 주입한다
+  touch "$repo/.r34"
+  st="\$("$realgit" "\$@")"
+  "$realgit" -c user.email=f@f -c user.name=F commit -q --allow-empty -m "foreign: with status" 2>/dev/null
+  printf '%s' "\$st"
+  exit 0
+fi
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin18/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin18:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"rolled back"* ]]
+  [[ "$output" == *"예상 밖 커밋"* ]]
+  # 복구 참조가 남는다
+  git -C "$repo" rev-parse -q --verify "refs/rollback/T200" >/dev/null
+  run git -C "$repo" log --format=%s -1
+  [[ "$output" == *"foreign: with status"* ]]
+}
