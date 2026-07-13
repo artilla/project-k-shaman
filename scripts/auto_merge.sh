@@ -538,32 +538,48 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   #     canonical에 그대로 남는다 — foreign lock이 canonical을 떠나는 순간이 없다.
   # 반환 0 = canonical 해체(빈 자리), 1 = 회수 불가(live/교체/잔여물 — 재시도·거부).
   _am_reclaim_dead() {  # $1=lock dir
-    local _lk="$1" _obs="$1.obs.$$" _p
+    local _lk="$1" _obs="$1.obs.$$" _meta="$1.rec.d" _p _mp _rc=1
     rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
     _p="$(cat "$_lk/pid" 2>/dev/null || true)"
     [ -n "$_p" ] || return 1                          # pid 없는 lock — 무접촉 (기존 계약)
     kill -0 "$_p" 2>/dev/null && return 1             # live — 회수 대상 아님
+    # 7라운드 P1(#2): -ef 확인과 rm 사이에 "다른 reclaimer"가 구 lock을 제거하고
+    # 새 owner가 획득하면, 경로 기반 rm이 새 lock의 token을 지웠다 (실측: writer
+    # 고착). 회수를 meta-lock(mkdir 원자)으로 직렬화한다 — canonical 제거는
+    # meta-lock 보유자만 수행하므로, 참여자 간에는 그 창이 존재하지 않는다.
+    # meta-lock 자체의 stale은 pid-dead 시 정리한다 (내용물이 pid뿐이라 처분 가능).
+    if ! mkdir "$_meta" 2>/dev/null; then
+      _mp="$(cat "$_meta/pid" 2>/dev/null || true)"
+      if [ -n "$_mp" ] && ! kill -0 "$_mp" 2>/dev/null; then
+        rm -rf "$_meta" 2>/dev/null || true
+      fi
+      return 1   # 이번 회수는 양보 — 호출자 루프가 재시도
+    fi
+    if ! echo "$$" > "$_meta/pid" 2>/dev/null; then
+      rmdir "$_meta" 2>/dev/null || true
+      return 1
+    fi
     if [ -f "$_lk/token" ]; then
-      ln "$_lk/token" "$_obs.t" 2>/dev/null || return 1
+      ln "$_lk/token" "$_obs.t" 2>/dev/null || { rm -rf "$_meta" 2>/dev/null || true; return 1; }
     fi
     if ! ln "$_lk/pid" "$_obs.p" 2>/dev/null; then
       rm -f "$_obs.t" 2>/dev/null || true
+      rm -rf "$_meta" 2>/dev/null || true
       return 1
     fi
     # 결속된 inode의 내용으로 dead를 재검증 — 교체된 새 lock의 pid가 아니다
-    if [ "$(cat "$_obs.p" 2>/dev/null || true)" != "$_p" ] || kill -0 "$_p" 2>/dev/null; then
-      rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
-      return 1
-    fi
-    if [ -f "$_obs.t" ] && [ "$_lk/token" -ef "$_obs.t" ]; then
-      rm -f "$_lk/token" 2>/dev/null || true
-    fi
-    if [ "$_lk/pid" -ef "$_obs.p" ]; then
-      rm -f "$_lk/pid" 2>/dev/null || true
+    if [ "$(cat "$_obs.p" 2>/dev/null || true)" = "$_p" ] && ! kill -0 "$_p" 2>/dev/null; then
+      if [ ! -f "$_obs.t" ] || [ "$_lk/token" -ef "$_obs.t" ]; then
+        [ -f "$_obs.t" ] && rm -f "$_lk/token" 2>/dev/null
+        if [ "$_lk/pid" -ef "$_obs.p" ]; then
+          rm -f "$_lk/pid" 2>/dev/null || true
+        fi
+        rmdir "$_lk" 2>/dev/null && _rc=0
+      fi
     fi
     rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
-    rmdir "$_lk" 2>/dev/null || return 1              # 잔여물(교체/침입) — 무접촉 종료
-    return 0
+    rm -rf "$_meta" 2>/dev/null || true
+    return "$_rc"
   }
   trap '_am_lock_release; rm -rf "$AM_LOCK.acq.$$" 2>/dev/null || true' EXIT
   trap '_am_lock_release; rm -rf "$AM_LOCK.acq.$$" 2>/dev/null; exit 143' TERM INT HUP
@@ -798,6 +814,10 @@ if [ "$ELIGIBLE" -eq 0 ]; then
         echo "- 레코드(manifest.d/<id>.tsv)가 있는 격리본 = committed (intent 없음)."
         echo "- 레코드 없이 intent만 있는 격리본 = 기록 전 중단 — 위 절차로 복원 후"
         echo "  intent와 빈 예약 디렉터리를 삭제한다."
+        echo "- intent에 'stranded' 행이 있으면: capture 중 원경로가 두 번 교체되어"
+        echo "  그 시점의 동시 파일이 해당 side.* 경로에 고립된 것이다 — 검토 후"
+        echo "  내용에 따라 원경로/적절한 위치로 복원한다 (merge 잔상 payload 자체는"
+        echo "  이미 원경로에서 교체돼 폐기 대상이었다)."
         echo "- intent는 payload가 원위치(원복 성공) 또는 레코드(격리 완료)로 확정된"
         echo "  뒤에만 삭제된다 — capture에 payload가 남아 있으면 intent도 남는다."
         echo "- 보존: 해당 rollback의 감사 로그(ROLLED_BACK) 확인 후 수동 삭제 가능 (자동 삭제 없음)."
@@ -861,6 +881,7 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     # 보존적으로 실패(REF_ONLY).
     local _side
     _AM_CAPTURED=0   # 1 = payload가 $2에 담김 (실패 시 호출자가 원복 대상 판단)
+    _AM_STRANDED=0   # 1 = 교체본이 side.*에 고립됨 — intent를 보존해야 한다 (7라운드 #1)
     [ -h "$1" ] && return 1
     ln "$1" "$2" 2>/dev/null || return 1
     _side="$(dirname "$2")/side.${RANDOM}${RANDOM}"
@@ -880,7 +901,20 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     if ln "$_side" "$1" 2>/dev/null; then
       rm -f "$_side" 2>/dev/null || true
     else
-      echo "⚠️  capture 중 교체된 동시 파일을 원경로로 되돌리지 못했습니다(원경로 재선점) — 보존: ${_side}" >&2
+      # 7라운드 P1(#1): 이중 교체(복원 시점에 원경로가 다시 선점) — 교체본이
+      # side.*에 고립되는데 intent가 삭제되면 결정적 복구 계약이 깨진다 (실측).
+      # stranded 위치를 intent에 durable하게 기록하고, 호출자에게 intent 보존을
+      # 지시한다 (_AM_STRANDED).
+      _AM_STRANDED=1
+      if [ -n "${_AM_Q_INTENT:-}" ] && [ -f "$_AM_Q_INTENT" ]; then
+        # 절대 경로로 기록 — 복구자가 cwd에 의존하지 않도록 (capture 필드와 동일 계약)
+        case "$_side" in
+          /*) printf 'stranded\t%s\n' "$_side" >> "$_AM_Q_INTENT" 2>/dev/null || true ;;
+          *)  printf 'stranded\t%s/%s\n' "$(pwd)" "$_side" >> "$_AM_Q_INTENT" 2>/dev/null || true ;;
+        esac
+        _am_fsync "$_AM_Q_INTENT" || true
+      fi
+      echo "⚠️  capture 중 교체된 동시 파일을 원경로로 되돌리지 못했습니다(원경로 재선점) — 보존: ${_side} (intent의 stranded 필드 참조)" >&2
     fi
     rm -f "$2" 2>/dev/null || true
     return 1
@@ -1184,6 +1218,10 @@ EOF
             if [ "${_AM_CAPTURED:-0}" -eq 1 ]; then
               # payload는 담겼으나 침입 흔적 감지 — 원복·보존 (intent는 원복 성공 시 해제)
               if _am_restore "$_bak" "$_p"; then _am_intent_abort; fi
+            elif [ "${_AM_STRANDED:-0}" -eq 1 ]; then
+              # 7라운드 #1: 교체본이 side.*에 고립 — intent(stranded 기록 포함)와
+              # 예약 dir을 보존한다 (결정적 복구 근거)
+              :
             else
               # 아무것도 이동되지 않음 (선점/교체 감지·복원) — 예약만 해제
               _am_intent_abort; _am_bak_unreserve "$_bak"
@@ -1228,6 +1266,8 @@ EOF
           if ! _am_capture "$_p" "$_bak"; then
             if [ "${_AM_CAPTURED:-0}" -eq 1 ]; then
               if _am_restore "$_bak" "$_p"; then _am_intent_abort; fi
+            elif [ "${_AM_STRANDED:-0}" -eq 1 ]; then
+              :   # 7라운드 #1: stranded — intent·예약 dir 보존
             else
               _am_intent_abort; _am_bak_unreserve "$_bak"
             fi
