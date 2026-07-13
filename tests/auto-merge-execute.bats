@@ -1450,17 +1450,21 @@ MOCK
   # 들어낸 흔적(.rel/.acq)이 없다
   [ -z "$(ls -d "$d/state/ticket_write.lock.d.rel."* "$d/state/ticket_write.lock.d.acq."* 2>/dev/null || true)" ]
   # writer lock을 못 잡으므로 복원은 포기 — 잔상 보존(REF_ONLY)
-  grep -q $'\tREF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+  grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
 }
 
 # 8라운드 후속 P1: quarantine rename과 manifest 기록 사이에 죽으면 빈 .claim +
 # .amrb-bak payload만 남아 원경로·worktree·merge OID를 알 수 없었다 — 결정적 복구
 # 불가. 이제 rename "전"에 내구성 있는 intent metadata를 기록한다.
-@test "execute: KILL between quarantine rename and manifest record leaves deterministic intent metadata" {
+@test "execute: KILL right after the original is captured leaves deterministic intent metadata (intent precedes capture)" {
   local d="$TEST_HOME/repo"
   mkdir -p "$d"
   make_repo "$d" 1 docs
   make_ticket "$TEST_HOME/T999-test.md" true
+  # macOS: mktemp -d는 /var/..., git rev-parse --show-toplevel은 /private/var/... —
+  # intent의 worktree는 물리 경로다. 비교 기준을 물리 경로로 정규화한다.
+  local dphys
+  dphys="$(cd "$d" && pwd -P)"
 
   cat > "$TEST_HOME/mock_checks_qi.sh" <<MOCK
 #!/usr/bin/env bash
@@ -1469,7 +1473,9 @@ exit 1
 MOCK
   chmod +x "$TEST_HOME/mock_checks_qi.sh"
 
-  # quarantine rename(mv → trash) 직후, manifest 기록 "전"에 auto_merge를 KILL
+  # 8라운드 후속 재리뷰 P1(#9)의 정확한 창: 원본을 .amrb-bak.<pid>로 "capture한
+  # 직후" KILL — 종전에는 이 시점에 원본이 원경로에서 사라지고 hidden backup만
+  # 남았으며 intent·manifest가 모두 없어 복구가 불가능했다.
   local realmv
   realmv="$(command -v mv)"
   mkdir -p "$TEST_HOME/qibin"
@@ -1477,7 +1483,7 @@ MOCK
 #!/usr/bin/env bash
 last=""
 for a in "\$@"; do last="\$a"; done
-case "\$last" in *auto_merge.trash.d/*)
+case "\$last" in *.amrb-bak.*)
   "$realmv" "\$@"; rc=\$?
   kill -KILL "\$PPID" 2>/dev/null
   sleep 3
@@ -1496,26 +1502,29 @@ MOCK
     '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
   [ "$status" -ne 0 ]
 
-  # intent metadata가 남아 결정적 복구가 가능하다
-  local intent payload src dst wt
+  # 원본은 원경로에서 사라졌지만(capture됨), intent가 그 위치를 가리킨다
+  local intent src wt capture dst payload
   intent="$(ls "$d/.git/auto_merge.trash.d/"*.intent 2>/dev/null | head -1)"
   [ -n "$intent" ]
   grep -q $'^src\tdocs/file-1.md$' "$intent"
   grep -Eq $'^merge\t[0-9a-f]{40}$' "$intent"
-  grep -q $'^worktree\t'"$d"'$' "$intent"
-  payload="${intent%.intent}"
-  [ -f "$payload" ]
-  grep -q "content 1" "$payload"
-  # manifest에는 이 격리의 행이 없다 — "행이 있으면 파일이 있다" 불변식과 함께,
-  # 기록 전 중단은 행이 아니라 intent로 식별된다 (거짓 성공 없음)
-  if [ -f "$d/.git/auto_merge.trash.d/manifest.tsv" ]; then
-    ! grep -q "$payload" "$d/.git/auto_merge.trash.d/manifest.tsv"
-  fi
-  # intent의 metadata만으로 실제 복원이 성립한다
+  grep -q $'^worktree\t'"$dphys"'$' "$intent"
   src="$(awk -F'\t' '$1=="src"{print $2}' "$intent")"
-  dst="$(awk -F'\t' '$1=="dst"{print $2}' "$intent")"
   wt="$(awk -F'\t' '$1=="worktree"{print $2}' "$intent")"
-  mv "$dst" "$wt/$src"
+  capture="$(awk -F'\t' '$1=="capture"{print $2}' "$intent")"
+  dst="$(awk -F'\t' '$1=="dst"{print $2}' "$intent")"
+  # payload는 capture 또는 dst 중 한 곳에 반드시 존재한다 (유실 없음)
+  payload=""
+  [ -f "$dst" ] && payload="$dst"
+  [ -z "$payload" ] && [ -f "$capture" ] && payload="$capture"
+  [ -n "$payload" ]
+  grep -q "content 1" "$payload"
+  # manifest에는 이 격리의 행이 없다 — 기록 전 중단은 행이 아니라 intent로 식별된다
+  if [ -f "$d/.git/auto_merge.trash.d/manifest.tsv" ]; then
+    ! grep -q "$dst" "$d/.git/auto_merge.trash.d/manifest.tsv"
+  fi
+  # intent의 metadata만으로 실제 복원이 성립한다 (README의 복구 절차 그대로)
+  mv "$payload" "$wt/$src"
   grep -q "content 1" "$d/docs/file-1.md"
 }
 
@@ -1547,7 +1556,117 @@ MOCK
   # rename이 되돌려져 파일은 원경로에 보존됐고, REF_ONLY로 격하됐다
   [ -f "$d/docs/file-1.md" ]
   grep -q "content 1" "$d/docs/file-1.md"
-  grep -q $'\tREF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+  grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
   # 격리 디렉터리에 payload·intent 잔여물이 없다 (거짓 기록·거짓 성공 없음)
   [ -z "$(ls "$d/.git/auto_merge.trash.d" 2>/dev/null | grep -v -e '^README.md$' -e '^manifest.tsv$' || true)" ]
+}
+
+# 8라운드 후속 재리뷰 P1(#10): manifest 기록 실패의 되돌리기가 mv -f라, 그 사이
+# capture 경로에 생긴 동시 파일을 덮어 실제 내용을 유실시켰다 (실측). 되돌리기는
+# no-clobber여야 하고, capture 경로가 선점됐으면 그 파일을 건드리지 않은 채
+# payload를 intent와 함께 trash에 보존해야 한다 (원경로로 옮기지도 않는다).
+@test "execute: manifest failure with a concurrent file at the capture path - foreign file untouched, payload kept in trash" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_nc.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/nc.flag" ]; then touch "$TEST_HOME/nc.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_nc.sh"
+
+  # manifest.tsv 자리에 디렉터리 → append 항상 실패
+  mkdir -p "$d/.git/auto_merge.trash.d/manifest.tsv"
+  # 격리 rename 직후(되돌리기 직전) capture 경로를 동시 파일이 선점하게 만든다
+  local realmv
+  realmv="$(command -v mv)"
+  mkdir -p "$TEST_HOME/ncbin"
+  cat > "$TEST_HOME/ncbin/mv" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+case "\$last" in *auto_merge.trash.d/*)
+  "$realmv" "\$@"; rc=\$?
+  for a in "\$@"; do
+    case "\$a" in *.amrb-bak.*) printf 'CONCURRENT-DO-NOT-CLOBBER\n' > "\$a" ;; esac
+  done
+  exit \$rc
+;; esac
+exec "$realmv" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/ncbin/mv"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/ncbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_nc.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+
+  # 동시 파일은 덮이지도, 원경로로 옮겨지지도 않았다 (우리 것이 아니다)
+  local bak
+  bak="$(ls "$d/docs/".amrb-bak.* 2>/dev/null | head -1)"
+  [ -n "$bak" ]
+  grep -q "CONCURRENT-DO-NOT-CLOBBER" "$bak"
+  # payload는 trash에 intent와 함께 보존되어 결정적 복구가 가능하다
+  local q
+  q="$(ls "$d/.git/auto_merge.trash.d" | grep -v -e '^README.md$' -e '^manifest.tsv$' -e '\.intent$' | head -1)"
+  [ -n "$q" ]
+  grep -q "content 1" "$d/.git/auto_merge.trash.d/$q"
+  [ -f "$d/.git/auto_merge.trash.d/$q.intent" ]
+}
+
+# 8라운드 후속 재리뷰 P1(#8): lock 디렉터리 rename 성공과 token 대입 사이의 TERM에서
+# cleanup이 소유를 인지하지 못해 canonical writer lock이 잔존했다 (실측). 소유 증거
+# (token)는 사전 구성 시점에 파일·셸 변수에 동시에 심어, rename이 성공하는 순간부터
+# cleanup이 확인할 수 있어야 한다.
+@test "execute: TERM right after the writer-lock rename succeeds leaves no canonical lock (token precedes rename)" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  printf 'state/\n' > "$d/.gitignore"
+  git -C "$d" add .gitignore
+  git -C "$d" commit -q -m "ignore state"
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_lk.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/lk.flag" ]; then touch "$TEST_HOME/lk.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_lk.sh"
+
+  local realmv
+  realmv="$(command -v mv)"
+  mkdir -p "$TEST_HOME/lkbin"
+  cat > "$TEST_HOME/lkbin/mv" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+case "\$last" in */state/ticket_write.lock.d)
+  "$realmv" "\$@"; rc=\$?
+  kill -TERM "\$PPID" 2>/dev/null
+  exit \$rc
+;; esac
+exec "$realmv" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/lkbin/mv"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/lkbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_lk.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -ne 0 ]
+  # canonical writer lock이 남지 않았다 — 다음 writer가 고착되지 않는다
+  [ ! -d "$d/state/ticket_write.lock.d" ]
+  [ -z "$(ls -d "$d/state/ticket_write.lock.d."* 2>/dev/null || true)" ]
 }
