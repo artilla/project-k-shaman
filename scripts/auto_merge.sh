@@ -846,23 +846,49 @@ if [ "$ELIGIBLE" -eq 0 ]; then
       [ "$_i" -ge 10 ] && { _AM_BAK=""; return 1; }
     done
   }
-  _am_capture() {  # $1=원경로, $2=예약된 capture payload 경로 — 원자 rename + no-clobber
-    # 5라운드 P1(#3): (a) 이름은 예측 불가 난수, (b) 존재 선검사, (c) mv -n —
-    # GNU(RENAME_NOREPLACE)·BSD 모두 기존 파일을 덮지 않는다. BSD mv -n은 skip을
-    # rc=0으로 보고할 수 있으므로 "원본이 아직 원경로에 있는가"로 이동 여부를
-    # 판정한다 (skip이면 payload는 원위치 그대로 — 아무것도 잃지 않고 실패).
-    [ -e "$2" ] && return 1                       # 예약 이름 선점(침입) — 덮지 않는다
-    mv -n "$1" "$2" 2>/dev/null || true
-    [ -e "$1" ] && return 1                       # 이동되지 않음(선점/실패) — 원본 무손실
-    [ -f "$2" ] || return 1
-    # 소유 dir에 정확히 payload 하나만 존재해야 한다 — 침입 흔적이 있으면 실패
-    # (payload는 안전하게 담겨 있고 intent가 가리킨다; 호출자가 원복·보존).
-    [ "$(ls -A "$(dirname "$2")" 2>/dev/null | wc -l | tr -d ' ')" = "1" ] || return 1
-    return 0
+  _am_capture() {  # $1=원경로, $2=예약된 capture payload 경로
+    # 5라운드 #3 → 6라운드 P1(#1): mv -n은 macOS에서 원자 no-clobber CAS가 아니다
+    # (/bin/mv는 lstat+일반 rename — exclusive rename primitive 없음). 유일한 원자
+    # no-clobber primitive는 link(2)다:
+    #   1) ln $1 $2   — 원자·배타 게시. dst가 선점돼 있으면 실패하고 아무것도
+    #      변하지 않는다 (원본은 원경로 그대로).
+    #   2) mv $1 side — 원경로를 원자 rename으로 비운다. rename은 "그 순간 원경로에
+    #      있는 inode"를 캡처하므로, 1~2 사이의 원자 교체도 유실되지 않는다.
+    #   3) side -ef $2 — 같은 inode(우리 payload)면 side 링크만 제거(캡처 완료;
+    #      payload는 $2가 보유). 다르면 교체본을 캡처한 것 — ln(no-clobber)으로
+    #      원경로에 되돌리고 우리 링크($2)를 해제한 뒤 실패를 반환한다 (무손실).
+    # side 이름도 소유 dir 안의 난수다. symlink는 ln의 플랫폼별 의미가 갈린다 —
+    # 보존적으로 실패(REF_ONLY).
+    local _side
+    _AM_CAPTURED=0   # 1 = payload가 $2에 담김 (실패 시 호출자가 원복 대상 판단)
+    [ -h "$1" ] && return 1
+    ln "$1" "$2" 2>/dev/null || return 1
+    _side="$(dirname "$2")/side.${RANDOM}${RANDOM}"
+    if [ -e "$_side" ] || ! mv "$1" "$_side" 2>/dev/null; then
+      rm -f "$2" 2>/dev/null || true
+      return 1
+    fi
+    if [ "$_side" -ef "$2" ]; then
+      _AM_CAPTURED=1
+      rm -f "$_side" 2>/dev/null || true
+      # 소유 dir에 payload 하나만 존재해야 한다 — 침입 흔적이 있으면 실패
+      # (payload는 $2에 안전하게 담겨 있고 intent가 가리킨다; 호출자가 원복·보존).
+      [ "$(ls -A "$(dirname "$2")" 2>/dev/null | wc -l | tr -d ' ')" = "1" ] || return 1
+      return 0
+    fi
+    # 1~2 사이의 원자 교체를 캡처했다 — 교체본을 원경로로 무손실 복원 (no-clobber)
+    if ln "$_side" "$1" 2>/dev/null; then
+      rm -f "$_side" 2>/dev/null || true
+    else
+      echo "⚠️  capture 중 교체된 동시 파일을 원경로로 되돌리지 못했습니다(원경로 재선점) — 보존: ${_side}" >&2
+    fi
+    rm -f "$2" 2>/dev/null || true
+    return 1
   }
-  _am_bak_unreserve() {  # $1=capture payload 경로 — payload가 없거나 이미 이동된 뒤에만 호출
+  _am_bak_unreserve() {  # $1=capture payload 경로 — 빈 예약 dir만 해제한다
+    # 6라운드: 파일은 지우지 않는다 — ln 실패 케이스의 $1은 침입 파일일 수 있다.
+    # 잔여물이 있으면 rmdir이 실패해 dir이 남는다 (무해, 보존적).
     [ -n "$1" ] || return 0
-    rm -f "$1" 2>/dev/null || true
     rmdir "$(dirname "$1")" 2>/dev/null || true
     return 0
   }
@@ -1153,12 +1179,13 @@ EOF
           # capture 직후 KILL돼도 payload 위치를 가리키는 복구 근거가 디스크에 남는다.
           # (device 검사도 여기서 — 폐기 불가능한 상황이면 원본을 옮기지 않는다.)
           if ! _am_intent_begin "$_bak" "$_p"; then _am_bak_unreserve "$_bak"; rm -f "$_tmp"; _rc=1; continue; fi
-          # 5라운드 P1(#3): capture 게시도 no-clobber — 존재 검사 + 사후 단독성 검증.
+          # 5라운드 #3 → 6라운드 #1: capture는 link(2) 기반 원자 no-clobber.
           if ! _am_capture "$_p" "$_bak"; then
-            if [ -f "$_bak" ]; then
+            if [ "${_AM_CAPTURED:-0}" -eq 1 ]; then
               # payload는 담겼으나 침입 흔적 감지 — 원복·보존 (intent는 원복 성공 시 해제)
               if _am_restore "$_bak" "$_p"; then _am_intent_abort; fi
             else
+              # 아무것도 이동되지 않음 (선점/교체 감지·복원) — 예약만 해제
               _am_intent_abort; _am_bak_unreserve "$_bak"
             fi
             rm -f "$_tmp"; _rc=1; continue
@@ -1197,9 +1224,9 @@ EOF
           _bak="$_AM_BAK"
           # #9: intent를 원본 capture 전에 (device 검사 포함)
           if ! _am_intent_begin "$_bak" "$_p"; then _am_bak_unreserve "$_bak"; _rc=1; continue; fi
-          # 5라운드 P1(#3): capture 게시도 no-clobber (M 분기와 동일 계약)
+          # 5라운드 #3 → 6라운드 #1: link(2) 기반 원자 no-clobber capture (M 분기 동일)
           if ! _am_capture "$_p" "$_bak"; then
-            if [ -f "$_bak" ]; then
+            if [ "${_AM_CAPTURED:-0}" -eq 1 ]; then
               if _am_restore "$_bak" "$_p"; then _am_intent_abort; fi
             else
               _am_intent_abort; _am_bak_unreserve "$_bak"
