@@ -1251,3 +1251,39 @@ SHIM
   [ $(( t1 - t0 )) -lt 3 ]
   [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
 }
+
+@test "DB41: drain probes are bounded - TERM exit is not hostage to a hanging pg_stat_activity query" {
+  # 3라운드 P1(#8): _mig_server_drain의 probe psql이 foreground 직접 호출이라,
+  # probe가 응답하지 않으면 신호 처리 전체가 unbounded였다 (실측: TERM 후 8초에도
+  # runner 생존). probe는 별도 프로세스 그룹 + per-probe 시간 제한 + 전체 예산으로
+  # 관리된다 — 지연 셔임에서도 runner는 예산 안에 종료한다.
+  mkdir -p "$PGT/drainbin_${BATS_TEST_NUMBER}" "$TROOT/tmp"
+  cat > "$PGT/drainbin_${BATS_TEST_NUMBER}/psql" <<SHIM
+#!/usr/bin/env bash
+case "\$*" in
+  *pg_stat_activity*) sleep 30; echo 1; exit 0 ;;
+  *'count(*) from "public".schema_migrations'*) touch "$TROOT/tmp/drain"; sleep 30 ;;
+esac
+exec "$PGBIN/psql" "\$@"
+SHIM
+  chmod +x "$PGT/drainbin_${BATS_TEST_NUMBER}/psql"
+  env PATH="$PGT/drainbin_${BATS_TEST_NUMBER}:$PATH" ENV_FILE="$ENVF" TMPDIR="$TROOT/tmp" \
+    "$RUNNER" > "$PGT/sig41.log" 2>&1 &
+  local rpid=$! i=0 rc=0
+  while [ "$i" -lt 200 ]; do
+    [ -f "$TROOT/tmp/drain" ] && break
+    sleep 0.1; i=$((i+1))
+  done
+  [ -f "$TROOT/tmp/drain" ]
+  sleep 0.3
+  local t0 t1
+  t0="$(date +%s)"
+  kill -TERM "$rpid"
+  wait "$rpid" || rc=$?
+  t1="$(date +%s)"
+  [ "$rc" -eq 143 ]
+  ! grep -q "up-to-date" "$PGT/sig41.log"
+  # 전체 예산(≈4s) + 여유 — 지연 probe에 인질로 잡히지 않는다 (종전 8s+ 생존)
+  [ $(( t1 - t0 )) -lt 8 ]
+  [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
+}

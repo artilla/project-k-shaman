@@ -900,9 +900,11 @@ WRAP
   git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
 }
 
-@test "R31: pre-existing recovery ref is never clobbered (CAS) - foreign evidence preserved, contained evidence CAS-deleted" {
-  # 재재리뷰 P1(#8): refs/rollback/<ID>를 무조건 덮거나 expected-old 없이 삭제해
-  # 선행 복구 증거가 정상 rollback 한 번으로 사라졌다 (실측).
+@test "R31: pre-existing recovery ref is never clobbered nor deleted - evidence preserved regardless of ancestry" {
+  # 재재리뷰 P1(#8) → 3라운드 P1(#4): refs/rollback/<ID>를 무조건 덮거나 삭제해
+  # 선행 복구 증거가 사라졌고, 같은 ID의 "동시 실행"에서는 ancestor 판정 삭제도
+  # 다른 실행의 증거를 지울 수 있다 — 이 실행이 만들지 않은 ref는 어떤 경로에서도
+  # 삭제하지 않는다 (보존 + 고지만).
   # (a) 공개 결과에 포함되지 않는 foreign 증거 → 보존 + 고지
   local repo="$TEST_BASE/keep"
   _make_repo "$repo"
@@ -916,13 +918,68 @@ WRAP
   [[ "$output" == *"보존합니다"* ]]
   [ "$(git -C "$repo" rev-parse refs/rollback/T200)" = "$foreign" ]
 
-  # (b) 공개 결과의 ancestor인 증거 → expected-old CAS로 정리
-  local repo2="$TEST_BASE/contained"
+  # (b) 공개 결과의 ancestor인 증거도 삭제하지 않는다 — 동시 실행의 복구 증거일 수 있다
+  local repo2="$TEST_BASE/contained" pre2
   _make_repo "$repo2"
-  git -C "$repo2" update-ref refs/rollback/T200 "$(git -C "$repo2" rev-parse 'cycle/T200-pre^{commit}')"
+  pre2="$(git -C "$repo2" rev-parse 'cycle/T200-pre^{commit}')"
+  git -C "$repo2" update-ref refs/rollback/T200 "$pre2"
 
   run bash -c 'cd "$1" && ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo2"
   [ "$status" -eq 0 ]
   [[ "$output" == *"rolled back T200 by revert"* ]]
-  ! git -C "$repo2" rev-parse -q --verify "refs/rollback/T200" >/dev/null
+  [ "$(git -C "$repo2" rev-parse refs/rollback/T200)" = "$pre2" ]
+}
+
+@test "R32: ls-tree failing (rc!=0) during revert-identity verification is not treated as 'absent' -> forged revert refused" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 3라운드 P1(#2): ls-tree 실패를 빈 결과로 삼키면 양쪽 모두 '부재'로 비교되어
+  # 위조 역커밋이 인정됐다 (실측: rc=42 셔임에서 rc=0 + 위조 내용 보존 + post
+  # 태그 삭제). 실패는 부재가 아니라 검증 실패다.
+  local own
+  own="$(git -C "$repo" rev-parse HEAD)"
+  echo "EVIL" > "$repo/file.txt"
+  git -C "$repo" add file.txt
+  git -C "$repo" -c user.email=f@f -c user.name=F commit -q -m "forge
+
+This reverts commit ${own}."
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin16"
+  cat > "$repo/gbin16/git" <<WRAP
+#!/usr/bin/env bash
+for a in "\$@"; do [ "\$a" = "ls-tree" ] && exit 42; done
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin16/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin16:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"rolled back"* ]]
+  grep -q "^EVIL$" "$repo/file.txt"
+  git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
+}
+
+@test "R33: rev-list failing (rc!=0) is not treated as 'no commits after pre' -> refused, no reset path (fail-closed)" {
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  # 3라운드 P1(#2): rev-list 실패를 빈 결과로 해석하면 reset 경로로 fail-open —
+  # 조회 실패는 판정 불가로 즉시 중단한다.
+  local tip realgit
+  tip="$(git -C "$repo" rev-parse HEAD)"
+  realgit="$(command -v git)"
+  mkdir -p "$repo/gbin17"
+  cat > "$repo/gbin17/git" <<WRAP
+#!/usr/bin/env bash
+for a in "\$@"; do [ "\$a" = "rev-list" ] && exit 42; done
+exec "$realgit" "\$@"
+WRAP
+  chmod +x "$repo/gbin17/git"
+
+  run bash -c 'cd "$1" && PATH="$1/gbin17:$PATH" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo"
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"rev-list) 실패"* ]]
+  [ "$(git -C "$repo" rev-parse HEAD)" = "$tip" ]
+  grep -q "^v2$" "$repo/file.txt"
+  git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
 }

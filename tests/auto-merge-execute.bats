@@ -1671,26 +1671,51 @@ MOCK
   [ -z "$(ls -d "$d/state/ticket_write.lock.d."* 2>/dev/null || true)" ]
 }
 
-@test "execute: half-formed lock (no pid/token, pre-trap crash remnant) is reclaimed -> no permanent 'pid unknown' refusal" {
-  # 재재리뷰 P1(#9): lock 획득(~500행)과 cleanup trap(~1032행) 사이의 신호가
-  # pid/token 없는 lock을 남기면 이후 실행이 'pid unknown'으로 영구 거부됐다
-  # (실측). 이제 (a) trap을 획득 전에 설치하고 (b) 획득은 pid·token이 담긴 사전
-  # 구성 디렉터리의 원자 rename이므로 반쪽 lock은 정상 경로에서 생기지 않으며,
-  # (c) 남아 있는 pid 없는 lock(구 형식 잔존)은 stale로 원자 회수한다.
+@test "execute: TERM during post-check leaves no lock (traps precede acquisition) -> next run acquires normally" {
+  # 재재리뷰 P1(#9) → 3라운드 P1(#1): 계약 정리 —
+  #   - pid 없는 lock은 "회수하지 않는다": 기존 계약(동시 실행 간주, fail-closed
+  #     거부·무접촉)을 유지한다. 위 'concurrent lock present' 테스트가 이를 고정한다.
+  #   - 대신 우리 프로토콜은 반쪽 lock을 만들지 않는다: trap을 획득 "전"에 설치하고
+  #     획득은 pid·token이 담긴 사전 구성 디렉터리의 원자 rename이다. 어느 시점의
+  #     신호에서도 lock이 잔존하지 않아 다음 실행이 고착되지 않는다.
   local d="$TEST_HOME/repo"
   mkdir -p "$d"
   make_repo "$d" 1 docs
-  mkdir -p "$TEST_HOME/state/auto_merge.lock.d"   # pid/token 없는 반쪽 lock
 
+  cat > "$TEST_HOME/mock_checks_slow.sh" <<EOF
+#!/bin/sh
+n=\$(cat "$TEST_HOME/slow.cnt" 2>/dev/null || echo 0); n=\$((n+1)); echo \$n > "$TEST_HOME/slow.cnt"
+if [ \$n -ge 2 ]; then touch "$TEST_HOME/slow.inpost"; sleep 30; fi
+exit 0
+EOF
+  chmod +x "$TEST_HOME/mock_checks_slow.sh"
+
+  (cd "$d" && exec env \
+    LINT_EXTERNAL_DOCS_CMD="$MOCK_LINT" \
+    RUN_CHECKS_CMD="$TEST_HOME/mock_checks_slow.sh" \
+    CHECK_SCOPE_OMISSION_CMD="$MOCK_SCOPE" \
+    STATE_DIR="$TEST_HOME/state" \
+    TICKETS_DIR="$TICKETS_DIR" \
+    "$SCRIPT_PATH" "$TEST_HOME/T999-test.md" --execute --branch ralph/T999 --base main) \
+    > "$TEST_HOME/slow.log" 2>&1 &
+  local bg=$! i=0 rc=0
+  while [ ! -f "$TEST_HOME/slow.inpost" ] && [ "$i" -lt 200 ]; do sleep 0.1; i=$((i+1)); done
+  [ -f "$TEST_HOME/slow.inpost" ]
+  sleep 0.3
+  kill -TERM "$bg"
+  wait "$bg" || rc=$?
+  [ "$rc" -eq 143 ]
+  # lock이 잔존하지 않는다 — 다음 실행이 'pid unknown'으로 고착되지 않는다
+  [ ! -e "$TEST_HOME/state/auto_merge.lock.d" ]
+  [ -z "$(ls -d "$TEST_HOME/state/auto_merge.lock.d."* 2>/dev/null || true)" ]
+
+  rm -f "$TEST_HOME/slow.cnt" "$TEST_HOME/slow.inpost"
   run bash -c "cd '$d' && \
     LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
     RUN_CHECKS_CMD='$MOCK_CHECKS' \
     CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
     STATE_DIR='$TEST_HOME/state' \
     '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
-
   [ "$status" -eq 0 ]
-  [[ "$output" == *"reclaiming"* ]]
   [[ "$output" == *"auto-merge executed"* ]]
-  [ ! -e "$TEST_HOME/state/auto_merge.lock.d" ]
 }
