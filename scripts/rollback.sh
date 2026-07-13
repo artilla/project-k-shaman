@@ -384,10 +384,35 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     # 결과를 ff-only로 원자 공개한다.
     _WT_BASE="$(mktemp -d "${TMPDIR:-/tmp}/rollback-wt.XXXXXX")" || { echo "❌ 격리 worktree temp 생성 실패." >&2; exit 3; }
     _WT="${_WT_BASE}/wt"
+    # 6라운드 P1(#4): cleanup 자식도 deadline 아래에서 — worktree remove가 지연/
+    # TERM 무시면 rollback과 writer lock이 무한정 남았다 (실측 7s+). 실패는 삼키지
+    # 않고 플래그로 전파한다 (stale worktree 등록이 남으면 rc=0 금지).
+    _rb_bounded() {  # deadline(5s)-capped 그룹 실행 — rc 반환 (신호 semantics 없음)
+      local _pid _rc=0 _dl
+      set -m
+      "$@" &
+      _pid=$!
+      set +m
+      _dl=$(( $(date +%s) + 5 ))
+      while kill -0 -- "-${_pid}" 2>/dev/null && [ "$(date +%s)" -lt "$_dl" ]; do sleep 0.25; done
+      if kill -0 -- "-${_pid}" 2>/dev/null; then
+        kill -TERM -- "-${_pid}" 2>/dev/null || true
+        sleep 0.25
+        kill -0 -- "-${_pid}" 2>/dev/null && kill -KILL -- "-${_pid}" 2>/dev/null
+      fi
+      wait "$_pid" 2>/dev/null || _rc=$?
+      return "$_rc"
+    }
+    _RB_WT_CLEAN_OK=1
     _rb_cleanup_wt() {
-      git worktree remove --force "$_WT" >/dev/null 2>&1 || true
-      git worktree prune >/dev/null 2>&1 || true
+      # 멱등: 이미 정리된 뒤의 재호출이 실패로 오인되지 않도록 존재할 때만 시도
+      if [ -d "$_WT" ]; then
+        _rb_bounded git worktree remove --force "$_WT" >/dev/null 2>&1 || _RB_WT_CLEAN_OK=0
+      fi
+      _rb_bounded git worktree prune >/dev/null 2>&1 || true
       rm -rf "$_WT_BASE" 2>/dev/null || true
+      [ -d "$_WT" ] && _RB_WT_CLEAN_OK=0
+      return 0
     }
     # 8차 2회 P1(#6) → 8라운드 후속 P1(#2): 공개 여부를 shell boolean으로 들지
     # 않는다 — ref transaction commit과 대입 사이의 신호가 "메인 무변경"으로
@@ -469,10 +494,12 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
         _rc=0
         wait "$_pid" 2>/dev/null || _rc=$?
         if [ -n "$_RB_SIG" ]; then
+          # 6라운드 P1(#3): 수명 검사는 leader PID가 아니라 "프로세스 그룹" —
+          # leader만 죽고 TERM 무시 자손이 남는 재현이 확인됐다.
           _dl=$(( $(date +%s) + 5 ))
           kill -s TERM -- "-${_pid}" 2>/dev/null || true
-          while kill -0 "$_pid" 2>/dev/null && [ "$(date +%s)" -lt "$_dl" ]; do sleep 0.25; done
-          kill -0 "$_pid" 2>/dev/null && kill -KILL -- "-${_pid}" 2>/dev/null
+          while kill -0 -- "-${_pid}" 2>/dev/null && [ "$(date +%s)" -lt "$_dl" ]; do sleep 0.25; done
+          kill -0 -- "-${_pid}" 2>/dev/null && kill -KILL -- "-${_pid}" 2>/dev/null
           wait "$_pid" 2>/dev/null || true
           _RB_PHASE="main"
           _rb_cleanup_wt
@@ -481,6 +508,17 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
         fi
         kill -0 "$_pid" 2>/dev/null || break
       done
+      # 6라운드 P1(#3): leader 정상 종료 후 그룹 잔존 자손 — late write 방지를 위해
+      # 회수하고, 잔존이 있었다는 사실 자체를 실패(rc=97)로 취급한다 (auto_merge
+      # _run_in_group과 동일 계약).
+      if kill -0 -- "-${_pid}" 2>/dev/null; then
+        kill -TERM -- "-${_pid}" 2>/dev/null || true
+        _dl=$(( $(date +%s) + 5 ))
+        while kill -0 -- "-${_pid}" 2>/dev/null && [ "$(date +%s)" -lt "$_dl" ]; do sleep 0.25; done
+        kill -0 -- "-${_pid}" 2>/dev/null && kill -KILL -- "-${_pid}" 2>/dev/null
+        _RB_PHASE="main"
+        return 97
+      fi
       _RB_PHASE="main"
       return "$_rc"
     }
@@ -666,8 +704,9 @@ REF_TXN
       if [ -n "$_RB_SIG" ]; then
         kill -s "$_RB_SIG" -- "-${_rt_pid}" 2>/dev/null || true
         _rt_i=0
-        while kill -0 "$_rt_pid" 2>/dev/null && [ "$_rt_i" -lt 20 ]; do sleep 0.25; _rt_i=$((_rt_i+1)); done
-        if kill -0 "$_rt_pid" 2>/dev/null; then
+        # 6라운드 P1(#3): 그룹 기준 수명 검사 (leader-only 금지)
+        while kill -0 -- "-${_rt_pid}" 2>/dev/null && [ "$_rt_i" -lt 20 ]; do sleep 0.25; _rt_i=$((_rt_i+1)); done
+        if kill -0 -- "-${_rt_pid}" 2>/dev/null; then
           kill -KILL -- "-${_rt_pid}" 2>/dev/null || true
         fi
         wait "$_rt_pid" 2>/dev/null || true
@@ -682,6 +721,14 @@ REF_TXN
       fi
       kill -0 "$_rt_pid" 2>/dev/null || break
     done
+    # 6라운드 P1(#3): leader 종료 후 read-tree 그룹 잔존 자손 회수 — 잔존은 실패
+    if kill -0 -- "-${_rt_pid}" 2>/dev/null; then
+      kill -TERM -- "-${_rt_pid}" 2>/dev/null || true
+      _rt_i=0
+      while kill -0 -- "-${_rt_pid}" 2>/dev/null && [ "$_rt_i" -lt 20 ]; do sleep 0.25; _rt_i=$((_rt_i+1)); done
+      kill -0 -- "-${_rt_pid}" 2>/dev/null && kill -KILL -- "-${_rt_pid}" 2>/dev/null
+      _rt_rc=97
+    fi
     _RB_PHASE="main"
     if [ "$_rt_rc" -ne 0 ]; then
       _rb_cleanup_wt
@@ -717,6 +764,12 @@ REF_TXN
       exit 3
     fi
     _rb_cleanup_wt
+    if [ "${_RB_WT_CLEAN_OK:-1}" -ne 1 ]; then
+      _rb_save_recovery || true
+      trap - INT TERM HUP
+      echo "❌ 공개(${HEAD_REF} = ${_NEW})는 완료됐지만 격리 worktree 정리에 실패했습니다 — stale 등록이 남았을 수 있습니다: 'git worktree list' 확인 후 'git worktree prune'. 성공으로 보고하지 않습니다. $(_rb_rref_note)" >&2
+      exit 3
+    fi
 
     # 선행 실행의 복구 참조 (재리뷰 P1(#8) → 3라운드 P1(#4)): "삭제하지 않는다" —
     # 같은 ID의 선행/동시 실행이 남긴 refs/rollback/<ID>는 그 실행의 복구 증거이며,
@@ -772,11 +825,52 @@ REF_TXN
     exit 0
   fi
 
-  git reset --hard "$PRE_OID" >/dev/null
+  # 6라운드 P1(#5): reset 경로도 신호·그룹 수명 관리 아래에서 — TERM 무시 자식이
+  # parent 종료·lock 해제 후 뒤늦게 파괴적 reset/clean을 실행하지 않는다.
+  _RS_SIG=""
+  trap '_RS_SIG=TERM' TERM
+  trap '_RS_SIG=INT'  INT
+  trap '_RS_SIG=HUP'  HUP
+  _rs_run() {  # "$@"=명령 — rc 반환(97=그룹 잔존 자손). 신호 시 그룹 reap 후 130 종료.
+    local _pid _rc=0 _dl
+    set -m
+    "$@" &
+    _pid=$!
+    set +m
+    while :; do
+      _rc=0
+      wait "$_pid" 2>/dev/null || _rc=$?
+      if [ -n "$_RS_SIG" ]; then
+        _dl=$(( $(date +%s) + 5 ))
+        kill -s TERM -- "-${_pid}" 2>/dev/null || true
+        while kill -0 -- "-${_pid}" 2>/dev/null && [ "$(date +%s)" -lt "$_dl" ]; do sleep 0.25; done
+        kill -0 -- "-${_pid}" 2>/dev/null && kill -KILL -- "-${_pid}" 2>/dev/null
+        wait "$_pid" 2>/dev/null || true
+        echo "❌ 신호(${_RS_SIG})로 중단됨 — reset 자식 프로세스 그룹을 정리했습니다. 'git status'로 상태를 확인하세요 (부분 수행 가능)." >&2
+        exit 130
+      fi
+      kill -0 "$_pid" 2>/dev/null || break
+    done
+    if kill -0 -- "-${_pid}" 2>/dev/null; then
+      kill -TERM -- "-${_pid}" 2>/dev/null || true
+      _dl=$(( $(date +%s) + 5 ))
+      while kill -0 -- "-${_pid}" 2>/dev/null && [ "$(date +%s)" -lt "$_dl" ]; do sleep 0.25; done
+      kill -0 -- "-${_pid}" 2>/dev/null && kill -KILL -- "-${_pid}" 2>/dev/null
+      return 97
+    fi
+    return "$_rc"
+  }
+  if ! _rs_run git reset --hard "$PRE_OID" >/dev/null; then
+    echo "❌ git reset 실패 또는 자식 그룹 잔존 — 중단합니다 (fail-closed). 'git status'로 상태를 확인하세요." >&2
+    exit 3
+  fi
   # 리뷰 16차 P1-8(5차): quarantine(state/auto_merge.trash.d)은 rollback의
   # clean -fd에서도 살아남아야 한다 — 명시 제외 (.gitignore에도 등재).
   # 4라운드 P1(#6): 이 실행이 쥔 writer lock 산출물도 clean이 지우면 안 된다.
-  git clean -fd -e "state/auto_merge.trash.d" -e "state/ticket_write.lock.d" -e "state/ticket_write.lock.d.*" >/dev/null
+  if ! _rs_run git clean -fd -e "state/auto_merge.trash.d" -e "state/ticket_write.lock.d" -e "state/ticket_write.lock.d.*" >/dev/null; then
+    echo "❌ git clean 실패 또는 자식 그룹 잔존 — 중단합니다 (부분 정리 가능성). 'git status'로 상태를 확인하세요." >&2
+    exit 3
+  fi
   # 사이클 종점 기록은 reset으로 무효화됨 — 해석 시점 OID 고정 CAS로 제거.
   # 5라운드 P1(#6): CAS 삭제 실패(그 사이 태그 이동/재생성)를 무시하면 post 태그가
   # 남은 "부분 rollback"이 rc=0/restored로 위장됐다 — 실패는 실패로 보고한다.
