@@ -63,6 +63,37 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   # 상호배제 공백이 아니다. EXIT trap이 모든 종료 경로의 해제를 덮는다.
   _RB_WL="state/ticket_write.lock.d"
   _RB_WL_TOKEN=""
+  # 5라운드 P1(#2): 관찰한 dead lock을 "이동 없이" 해체한다 — token/pid 파일의
+  # inode를 하드링크(.obs.$$)로 결속하고, dead 재검증 후 -ef가 성립할 때만 각
+  # 파일을 제거하고 rmdir한다. 그 사이 교체된 live lock은 inode가 달라 무접촉이며
+  # rmdir 실패로 canonical에 그대로 남는다 (foreign lock 무이동 — 상호배제 공백 없음).
+  _rb_reclaim_dead() {  # $1=lock dir → 0=해체 완료, 1=회수 불가
+    local _lk="$1" _obs="$1.obs.$$" _p
+    rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
+    _p="$(cat "$_lk/pid" 2>/dev/null || true)"
+    [ -n "$_p" ] || return 1
+    kill -0 "$_p" 2>/dev/null && return 1
+    if [ -f "$_lk/token" ]; then
+      ln "$_lk/token" "$_obs.t" 2>/dev/null || return 1
+    fi
+    if ! ln "$_lk/pid" "$_obs.p" 2>/dev/null; then
+      rm -f "$_obs.t" 2>/dev/null || true
+      return 1
+    fi
+    if [ "$(cat "$_obs.p" 2>/dev/null || true)" != "$_p" ] || kill -0 "$_p" 2>/dev/null; then
+      rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
+      return 1
+    fi
+    if [ -f "$_obs.t" ] && [ "$_lk/token" -ef "$_obs.t" ]; then
+      rm -f "$_lk/token" 2>/dev/null || true
+    fi
+    if [ "$_lk/pid" -ef "$_obs.p" ]; then
+      rm -f "$_lk/pid" 2>/dev/null || true
+    fi
+    rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
+    rmdir "$_lk" 2>/dev/null || return 1
+    return 0
+  }
   _rb_wl_acquire() {
     local _i=0 _p _pt _mp _mt _pre="$_RB_WL.acq.$$" _own="$_RB_WL.own.$$"
     mkdir -p state 2>/dev/null || true
@@ -89,28 +120,11 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
         _rb_wl_mkpre || return 1
       fi
       _p="$(cat "$_RB_WL/pid" 2>/dev/null || true)"
-      _pt="$(cat "$_RB_WL/token" 2>/dev/null || true)"
       if [ -n "$_p" ] && ! kill -0 "$_p" 2>/dev/null; then
-        # stale 회수는 관찰한 pid+token "전체 identity"에 결속 (4라운드 #4 —
-        # 같은 dead pid를 담은 새 lock을 stale로 오인하지 않는다).
-        if mv "$_RB_WL" "$_RB_WL.reclaim.$$" 2>/dev/null; then
-          _mp="$(cat "$_RB_WL.reclaim.$$/pid" 2>/dev/null || true)"
-          _mt="$(cat "$_RB_WL.reclaim.$$/token" 2>/dev/null || true)"
-          if [ "$_mp" = "$_p" ] && [ "$_mt" = "$_pt" ]; then
-            rm -rf "$_RB_WL.reclaim.$$" 2>/dev/null || true
-            continue
-          fi
-          # 원복은 canonical이 비어 있을 때만 — 재점유 시 중첩(mv가 디렉터리 안으로
-          # 들어감) 금지, 이동본 보존·고지 (4라운드 #6).
-          if [ ! -e "$_RB_WL" ] && mv "$_RB_WL.reclaim.$$" "$_RB_WL" 2>/dev/null; then
-            :
-          else
-            echo "⚠️  writer lock 회수 원복 불가(canonical 재점유) — 이동본 보존: $_RB_WL.reclaim.$$" >&2
-            rm -rf "$_pre" 2>/dev/null || true
-            rm -f "$_own" 2>/dev/null || true
-            return 1
-          fi
-        fi
+        # 5라운드 P1(#2): mv 기반 회수는 관찰~mv 창의 live lock을 canonical 밖으로
+        # 밀어냈다 — 이동 없는 inode 결속 해체로 교체. 실패(교체된 live lock 등)는
+        # 훔치지 않고 bounded 대기로 재시도한다.
+        _rb_reclaim_dead "$_RB_WL" && continue
       fi
       _i=$((_i+1))
       if [ "$_i" -ge 100 ]; then rm -rf "$_pre" 2>/dev/null || true; rm -f "$_own" 2>/dev/null || true; return 1; fi
@@ -120,6 +134,7 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   _rb_wl_release() {
     local _own="$_RB_WL.own.$$"
     rm -rf "$_RB_WL.acq.$$" 2>/dev/null || true
+    rm -f "$_RB_WL.obs.$$.t" "$_RB_WL.obs.$$.p" 2>/dev/null || true
     if [ -f "$_own" ] && [ "$_RB_WL/token" -ef "$_own" ]; then
       rm -f "$_RB_WL/token" "$_RB_WL/pid" 2>/dev/null || true
       rmdir "$_RB_WL" 2>/dev/null \
@@ -429,8 +444,9 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     }
     _rb_on_sig() {
       _RB_SIG="$1"
-      # read-tree child 실행 중에는 기록만 — 전달·bounded reap은 그 루프가 소유
+      # read-tree/child 실행 중에는 기록만 — 전달·bounded reap은 그 루프가 소유
       [ "$_RB_PHASE" = "readtree" ] && return 0
+      [ "$_RB_PHASE" = "child" ] && return 0
       _rb_cleanup_wt
       _rb_sig_report
       exit 130
@@ -438,7 +454,37 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     trap '_rb_on_sig TERM' TERM
     trap '_rb_on_sig INT'  INT
     trap '_rb_on_sig HUP'  HUP
-    if ! git worktree add --detach "$_WT" "$HEAD_OID" >/dev/null 2>&1; then
+    # 5라운드 P1(#5): 장시간 git 자식(revert·worktree add)을 foreground로 돌리면
+    # bash trap이 자식 종료까지 지연된다 — TERM을 무시하는 자식(30s shim 실측)에서
+    # 프로세스와 writer lock이 계속 남았다. 자식을 별도 프로세스 그룹으로 돌리고
+    # wait(신호에 즉시 깨어남) + absolute deadline(5s) 안에서 TERM→KILL→reap한다.
+    _rb_run() {  # "$@"=명령 — rc 반환. 신호 수신 시 reap·정리·보고 후 여기서 130 종료.
+      local _pid _rc=0 _dl
+      _RB_PHASE="child"
+      set -m
+      "$@" &
+      _pid=$!
+      set +m
+      while :; do
+        _rc=0
+        wait "$_pid" 2>/dev/null || _rc=$?
+        if [ -n "$_RB_SIG" ]; then
+          _dl=$(( $(date +%s) + 5 ))
+          kill -s TERM -- "-${_pid}" 2>/dev/null || true
+          while kill -0 "$_pid" 2>/dev/null && [ "$(date +%s)" -lt "$_dl" ]; do sleep 0.25; done
+          kill -0 "$_pid" 2>/dev/null && kill -KILL -- "-${_pid}" 2>/dev/null
+          wait "$_pid" 2>/dev/null || true
+          _RB_PHASE="main"
+          _rb_cleanup_wt
+          _rb_sig_report
+          exit 130
+        fi
+        kill -0 "$_pid" 2>/dev/null || break
+      done
+      _RB_PHASE="main"
+      return "$_rc"
+    }
+    if ! _rb_run git worktree add --detach "$_WT" "$HEAD_OID" >/dev/null 2>&1; then
       _rb_cleanup_wt
       trap - INT TERM HUP
       echo "❌ 격리 worktree 생성 실패 — 자동 롤백을 중단합니다 (fail-closed)." >&2
@@ -462,7 +508,8 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
           continue
           ;;
       esac
-      if ! _rbgit revert --no-edit "$c" >/dev/null 2>&1; then
+      # 5라운드 P1(#5): revert도 _rb_run 경유 — TERM을 무시해도 bounded reap.
+      if ! _rb_run _rbgit revert --no-edit "$c" >/dev/null 2>&1; then
         _rbgit revert --abort >/dev/null 2>&1 || true  # 격리 index — 파괴 대상 없음
         _rb_failed="$c"
         break
@@ -731,8 +778,13 @@ REF_TXN
   # 4라운드 P1(#6): 이 실행이 쥔 writer lock 산출물도 clean이 지우면 안 된다.
   git clean -fd -e "state/auto_merge.trash.d" -e "state/ticket_write.lock.d" -e "state/ticket_write.lock.d.*" >/dev/null
   # 사이클 종점 기록은 reset으로 무효화됨 — 해석 시점 OID 고정 CAS로 제거.
+  # 5라운드 P1(#6): CAS 삭제 실패(그 사이 태그 이동/재생성)를 무시하면 post 태그가
+  # 남은 "부분 rollback"이 rc=0/restored로 위장됐다 — 실패는 실패로 보고한다.
   if [ -n "$POST_TAGOBJ" ]; then
-    git update-ref -d "refs/tags/${POST_TAG}" "$POST_TAGOBJ" >/dev/null 2>&1 || true
+    if ! git update-ref -d "refs/tags/${POST_TAG}" "$POST_TAGOBJ" 2>/dev/null; then
+      echo "❌ reset은 수행됐지만 ${POST_TAG} 태그 삭제(CAS)가 실패했습니다 — 태그가 그 사이 변경된 것으로 보입니다 (부분 완료, 성공 아님). 태그 상태를 확인 후 수동 정리하세요: git tag -d ${POST_TAG}" >&2
+      exit 3
+    fi
   fi
   echo "restored $ID to $TAG"
   exit 0
