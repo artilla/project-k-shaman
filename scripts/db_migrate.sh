@@ -327,12 +327,17 @@ _mig_psql() {
         kill -KILL -- "-${_pid}" 2>/dev/null || true
       fi
       wait "$_pid" 2>/dev/null || true
-      if ! _mig_server_drain "$_mig_deadline"; then
+      # 7라운드 P2: 종료 문구가 drain 결과와 상충하지 않는다 — 확인 실패 시
+      # '확인했다'고 말하지 않는다.
+      if _mig_server_drain "$_mig_deadline"; then
+        _mig_drain_note="서버 backend 종료를 확인했습니다"
+      else
         echo "⚠️  서버에 이 runner의 backend가 아직 남아 있을 수 있습니다 — pg_stat_activity(application_name=${PGAPPNAME})를 확인하세요." >&2
+        _mig_drain_note="서버 backend 종료는 예산 내에 확인하지 못했습니다"
       fi
       _snum="$(_mig_sig_num "$_MIG_SIG")"
       _mig_cleanup_tmps
-      echo "❌ 신호(${_MIG_SIG})로 중단됨 — psql 프로세스 그룹에 신호를 전달하고 서버 backend 종료를 확인했습니다 (미완료 transaction은 서버가 rollback)." >&2
+      echo "❌ 신호(${_MIG_SIG})로 중단됨 — psql 프로세스 그룹에 신호를 전달했고, ${_mig_drain_note} (미완료 transaction은 서버가 rollback)." >&2
       exit $((128 + _snum))
     fi
     kill -0 "$_pid" 2>/dev/null || break
@@ -505,6 +510,9 @@ if [ "$MODE" = "status" ]; then
     v="${_name%.sql}"
     if [ "$_ledger" = "t" ] && applied "$v"; then echo "  ✓ $v (applied)"; else echo "  · $v (pending)"; fi
   done
+  # 7라운드 P1(#5): 마지막 조회의 자손 정리 중 기록된 신호가 exit 0으로 유실됐다
+  # (실측: rc=0 + applied 5). 종료 직전 최종 검사로 128+N 종료를 보장한다.
+  _mig_check_sig
   exit 0
 fi
 
@@ -704,16 +712,72 @@ done
 # schema USAGE를 "실제로" 갖는지 서버에서 확인한다. 진입점이 아직 없으면(005 미적용
 # 세트) 검증 대상이 없고, @self는 적용 주체라 자명하다.
 _mig_verify_acl() {
-  local _r
+  # 7라운드 P1(#4): 증거는 '요청 role의 권한 보유'만이 아니라 ADR 0004의 정확한
+  # 배포 계약 전체다 —
+  #   (a) ledger가 005 적용을 기록했으면 진입점 함수가 "존재"해야 한다 (drift 탐지)
+  #   (b) PUBLIC에 EXECUTE가 없어야 한다
+  #   (c) EXECUTE grantee 집합 == {요청 roles(@self는 실행 사용자), 정의자 role} —
+  #       잔존 grant(app_old 등)도 위반이다
+  #   (d) 요청 각 role(@self 포함)의 실효 EXECUTE + schema USAGE
+  local _r _g _applied _fn_exists _cur _allowed
+  if ! _mig_psql -X -v ON_ERROR_STOP=1 -tAc "select count(*) from \"${PGSCHEMA}\".schema_migrations where version like '005\\_%'"; then
+    echo "❌ ACL 검증(ledger) query 실패: ${_MIG_OUT}" >&2
+    exit 3
+  fi
+  _applied="$_MIG_OUT"
   if ! _mig_psql -X -v ON_ERROR_STOP=1 -tAc "select to_regprocedure('\"${PGSCHEMA}\".app_soft_delete_user(bigint)') is not null"; then
     echo "❌ ACL 검증 query 실패: ${_MIG_OUT}" >&2
     exit 3
   fi
-  [ "$_MIG_OUT" = "t" ] || return 0
-  [ -n "$_MIG_APP_ROLES" ] || return 0
+  _fn_exists="$_MIG_OUT"
+  if [ "$_applied" = "0" ]; then
+    return 0   # 005 미적용 세트 — 검증 대상 없음
+  fi
+  if [ "$_fn_exists" != "t" ]; then
+    echo "❌ ledger는 005 적용을 기록했지만 진입점 함수(app_soft_delete_user)가 존재하지 않습니다 — drift(외부 DROP?). 성공으로 보고하지 않습니다 (fail-closed)." >&2
+    exit 1
+  fi
+  if ! _mig_psql -X -v ON_ERROR_STOP=1 -tAc "select current_user"; then
+    echo "❌ ACL 검증(current_user) query 실패: ${_MIG_OUT}" >&2
+    exit 3
+  fi
+  _cur="$_MIG_OUT"
+  # 허용 집합 = 요청 roles + 정의자 role + "현재 실행 사용자"(migration 적용 주체 —
+  # 005의 GRANT 실행자이자 OWNER TO 이전 전의 소유자로, ACL에 흔적이 남는 것이
+  # 정상이다). 그 밖의 grantee(구 role·PUBLIC 등)는 전부 위반이다.
+  if [ -n "$_MIG_APP_ROLES" ]; then
+    _allowed=",${_MIG_APP_ROLES},shaman_softdelete,${_cur},"
+  else
+    _allowed=",${_cur},shaman_softdelete,"   # @self — 실행 사용자
+  fi
+  # (b)+(c): EXECUTE grantee 전량 (PUBLIC은 grantee oid 0)
+  if ! _mig_psql -X -v ON_ERROR_STOP=1 -tAc "select coalesce(string_agg(distinct coalesce(r.rolname, 'PUBLIC'), ','), '') from pg_proc p cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a left join pg_roles r on r.oid = a.grantee where p.oid = '\"${PGSCHEMA}\".app_soft_delete_user(bigint)'::regprocedure and a.privilege_type = 'EXECUTE'"; then
+    echo "❌ ACL grantee 조회 실패: ${_MIG_OUT}" >&2
+    exit 3
+  fi
   _mig_roles_ifs="$IFS"; IFS=','
-  for _r in $_MIG_APP_ROLES; do
+  for _g in $_MIG_OUT; do
     IFS="$_mig_roles_ifs"
+    [ -n "$_g" ] || { IFS=','; continue; }
+    if [ "$_g" = "PUBLIC" ]; then
+      echo "❌ 진입점 EXECUTE가 PUBLIC에 열려 있습니다 — ADR 0004 위반 (재부여된 것으로 보임). REVOKE ALL ON FUNCTION \"${PGSCHEMA}\".app_soft_delete_user(bigint) FROM PUBLIC; 후 재실행하세요 (fail-closed)." >&2
+      exit 1
+    fi
+    case "$_allowed" in
+      *",${_g},"*) : ;;
+      *)
+        echo "❌ 허용 집합 밖의 role '${_g}'에 진입점 EXECUTE가 남아 있습니다 — ADR 0004는 'runtime app role에만 EXECUTE'를 요구합니다 (허용: ${_MIG_APP_ROLES:-${_cur}(@self)} + 정의자). 정리 후 재실행하세요: REVOKE EXECUTE ON FUNCTION \"${PGSCHEMA}\".app_soft_delete_user(bigint) FROM ${_g}; (fail-closed)" >&2
+        exit 1
+        ;;
+    esac
+    IFS=','
+  done
+  IFS="$_mig_roles_ifs"
+  # (d): 요청 각 role(@self는 실행 사용자)의 실효 권한
+  _mig_roles_ifs="$IFS"; IFS=','
+  for _r in ${_MIG_APP_ROLES:-$_cur}; do
+    IFS="$_mig_roles_ifs"
+    [ -n "$_r" ] || { IFS=','; continue; }
     if ! _mig_psql -X -v ON_ERROR_STOP=1 -tAc "select has_function_privilege('${_r}', '\"${PGSCHEMA}\".app_soft_delete_user(bigint)', 'EXECUTE') and has_schema_privilege('${_r}', '${PGSCHEMA}', 'USAGE')"; then
       echo "❌ role '${_r}' ACL 검증 실패(role 부재 가능): ${_MIG_OUT}" >&2
       exit 3
