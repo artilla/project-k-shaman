@@ -117,6 +117,14 @@ if [ -n "$_MIG_APP_ROLES" ]; then
       exit 2
       ;;
   esac
+  # 3라운드 P2: 빈 원소는 셸 word-splitting에서 소리 없이 사라져 for 루프 검증에
+  # 잡히지 않았다 (a,,b 허용) — 분리 전에 문자열 패턴으로 직접 거부한다.
+  case ",${_MIG_APP_ROLES}," in
+    *,,*)
+      echo "❌ MIGRATION_APP_ROLES에 빈 role 이름(선행/후행/중복 쉼표)이 있습니다: '${_MIG_APP_ROLES}'" >&2
+      exit 2
+      ;;
+  esac
   _mig_roles_ifs="$IFS"; IFS=','
   for _mr in $_MIG_APP_ROLES; do
     case "$_mr" in
@@ -196,20 +204,46 @@ _mig_check_sig() {
   exit $((128 + _snum))
 }
 
-# 서버 쪽 종료 확인: 이 runner(application_name=$PGAPPNAME)의 다른 backend가
-# 사라질 때까지 bounded 대기 — 중간에 종료 요청(pg_terminate_backend)으로
-# escalate하고, 끝까지 남으면 실패(호출자가 경고)를 반환한다.
+# 서버 쪽 종료 확인 — 3라운드 P1(#8): drain probe도 foreground psql이면 안 된다.
+# probe psql이 응답하지 않으면(지연 셔임 실측: TERM 후 8초에도 runner 생존) 신호
+# 처리 전체가 unbounded가 된다. probe를 별도 프로세스 그룹의 background로 돌리고
+# per-probe 시간 제한(TERM→KILL→reap)과 전체 drain 예산을 강제한다 — 예산을
+# 넘기면 포기하고 실패를 반환한다 (호출자가 경고 후 즉시 종료).
+_mig_probe() {  # $1=SQL, $2=제한(0.25s 스텝 수) → 결과는 $_MIG_PROBE_OUT, rc≠0=실패/시간초과
+  local _f _pid _i=0 _rc=0
+  _MIG_PROBE_OUT=""
+  _f="$(mktemp "${TMPDIR:-/tmp}/dbmig-probe.XXXXXX")" || return 1
+  set -m
+  psql -X -tAc "$1" > "$_f" 2>/dev/null &
+  _pid=$!
+  set +m
+  while kill -0 "$_pid" 2>/dev/null && [ "$_i" -lt "$2" ]; do sleep 0.25; _i=$((_i+1)); done
+  if kill -0 "$_pid" 2>/dev/null; then
+    kill -TERM -- "-${_pid}" 2>/dev/null || true
+    sleep 0.25
+    kill -0 "$_pid" 2>/dev/null && kill -KILL -- "-${_pid}" 2>/dev/null
+    wait "$_pid" 2>/dev/null || true
+    rm -f "$_f"
+    return 1
+  fi
+  wait "$_pid" 2>/dev/null || _rc=$?
+  _MIG_PROBE_OUT="$(cat "$_f" 2>/dev/null || true)"
+  rm -f "$_f"
+  return "$_rc"
+}
 _mig_server_drain() {
-  local _q="select count(*) from pg_stat_activity where application_name = '${PGAPPNAME}' and pid <> pg_backend_pid()" _n="" _i=0
-  while [ "$_i" -lt 20 ]; do
-    _n="$(psql -X -tAc "$_q" 2>/dev/null || echo "")"
-    [ "$_n" = "0" ] && return 0
-    if [ "$_i" -eq 8 ] && [ -n "$_n" ]; then
-      psql -X -tAc "select pg_terminate_backend(pid) from pg_stat_activity where application_name = '${PGAPPNAME}' and pid <> pg_backend_pid()" >/dev/null 2>&1 || true
+  local _q="select count(*) from pg_stat_activity where application_name = '${PGAPPNAME}' and pid <> pg_backend_pid()" _i=0
+  # 전체 예산: probe(응답 상한 0.5s, 시간초과 시 TERM→KILL 포함 ≈0.8s) × 3회 +
+  # terminate 1회 + 최종 probe — 최악 ≈ 4s 상한. 예산 초과는 포기·실패 반환
+  # (호출자가 경고 후 즉시 종료 — 신호 처리 전체가 unbounded가 되지 않는다).
+  while [ "$_i" -lt 3 ]; do
+    if _mig_probe "$_q" 2 && [ "$_MIG_PROBE_OUT" = "0" ]; then return 0; fi
+    if [ "$_i" -eq 1 ]; then
+      _mig_probe "select pg_terminate_backend(pid) from pg_stat_activity where application_name = '${PGAPPNAME}' and pid <> pg_backend_pid()" 2 || true
     fi
-    sleep 0.25; _i=$((_i+1))
+    _i=$((_i+1))
   done
-  [ "$(psql -X -tAc "$_q" 2>/dev/null || echo x)" = "0" ]
+  _mig_probe "$_q" 2 && [ "$_MIG_PROBE_OUT" = "0" ]
 }
 
 # 유일한 psql 실행 경로 — job control(set -m)로 별도 프로세스 그룹에 배치.
@@ -330,7 +364,7 @@ _MANIFEST="001_init a1296198221932cf0313dec362ef9ff5d4336ab935cdf17f9f1981b9efeb
 002_schema_contract_fixes 40965ac72a0442177abeff67bd53a0c6ec2e30be1e53bf19499f66a1aa6114c7
 003_soft_delete_invariant b7b7a364f1dc5418097e906f122c6eac221b676741381ca06e395b33c54855cb
 004_soft_delete_contract 94525fde054c473e87e06d060089f81e9475d65669cbe19953a12b5f591e66a4
-005_ownership_repair_and_lock_contract 023337f6aff2adbfcb04b4b10301ce03da40a244d4013d1da45b86bad3813396"
+005_ownership_repair_and_lock_contract 5278471dabfa05c4e380e74fcd0ab451667543026614cb3a194cdab52e77f7b6"
 _MANIFEST_MAX="005"
 
 _sha_of_blob() {  # $1=커밋 내 경로 → sha256 (blob bytes 그대로; 셸 변수 경유 없음)

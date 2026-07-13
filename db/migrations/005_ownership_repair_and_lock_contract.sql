@@ -432,7 +432,11 @@ BEGIN
   EXECUTE format('REVOKE ALL ON FUNCTION %I.app_soft_delete_user(bigint) FROM PUBLIC', current_schema);
   FOREACH _r IN ARRAY regexp_split_to_array(_roles, ',') LOOP
     _r := trim(_r);
-    CONTINUE WHEN _r = '';
+    -- 3라운드 P2: 빈 원소는 건너뛰지 않고 거부한다 — runner 검증을 우회한 경로
+    -- (직접 GUC 설정 등)에서도 malformed 목록이 조용히 통과하지 않는다.
+    IF _r = '' THEN
+      RAISE EXCEPTION 'shaman.app_roles에 빈 role 이름(선행/후행/중복 쉼표)이 있습니다: "%" (fail-closed)', _roles;
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = _r) THEN
       RAISE EXCEPTION 'app role "%"가 존재하지 않습니다 — MIGRATION_APP_ROLES가 가리키는 runtime role을 먼저 생성한 뒤 재실행하세요 (fail-closed)', _r;
     END IF;
