@@ -127,6 +127,20 @@ else
   _MIG_APP_ROLES="$(awk '!f && sub(/^MIGRATION_APP_ROLES=/, "") { v = $0; f = 1 } END { if (f) print v }' "$ENV_FILE")"
   _MIG_APP_ROLES="$(_strip_pair_quotes "$_MIG_APP_ROLES")"   # 4라운드 P2: 쌍 quote만 제거
 fi
+# 5라운드 live blocker(#7): 미지정을 경고+진행이 아니라 fail-closed로 — ACL 대상이
+# 실행 role로 "확정"되고 ledger 때문에 재실행되지 않으므로, 실행 role fallback은
+# 명시적 opt-in(@self)일 때만 허용한다. --status는 읽기 전용이라 요구하지 않는다.
+_MIG_SELF_OK=0
+if [ "$_MIG_APP_ROLES" = "@self" ]; then
+  _MIG_SELF_OK=1
+  _MIG_APP_ROLES=""
+fi
+if [ "$MODE" = "apply" ] && [ -z "$_MIG_APP_ROLES" ] && [ "$_MIG_SELF_OK" -ne 1 ]; then
+  echo "❌ MIGRATION_APP_ROLES가 지정되지 않았습니다 — 005의 진입점 ACL(EXECUTE·schema USAGE) 대상이 migration 실행 role로 '확정'되고, ledger 때문에 이후 변경해도 005는 재실행되지 않습니다 (fail-closed)." >&2
+  echo "   runtime role을 지정하세요: MIGRATION_APP_ROLES=<role[,role...]> (env 또는 ${ENV_FILE})." >&2
+  echo "   실행 role 자체가 runtime role이면 명시적으로 승인하세요: MIGRATION_APP_ROLES=@self" >&2
+  exit 2
+fi
 if [ -n "$_MIG_APP_ROLES" ]; then
   case "$_MIG_APP_ROLES" in
     *[!A-Za-z0-9_,]*)
@@ -188,19 +202,19 @@ command -v psql >/dev/null 2>&1 || { echo "❌ psql 이 PATH에 없습니다 (br
 # 이제 runner의 "모든" psql은 단 하나의 helper(_mig_psql)를 거친다: 별도 프로세스
 # 그룹의 background job + wait(신호에 즉시 깨어남) + 출력은 파일 경유로 부모 셸
 # 변수(_MIG_OUT)에 담는다 — 명령치환·foreground 대기 구조가 어디에도 남지 않는다.
-# 4라운드 P2: temp 목록은 개행 구분 — 공백 포함 TMPDIR에서도 cleanup이 경로를
-# 조각내지 않는다 (종전 공백 구분 + 무인용 word-splitting은 공백 경로를 누락).
-_MIG_TMPS=""
-_mig_tmp_add() { _MIG_TMPS="${_MIG_TMPS}${1}
-"; }
+# 4라운드 P2 → 5라운드 P2(#8): temp 목록은 bash 배열 — 공백만이 아니라 "개행"이
+# 포함된 TMPDIR에서도 경로가 조각나지 않는다 (개행 구분 목록은 개행 경로에서
+# dbmig-q.* 잔존, 실측).
+_MIG_TMPS=()
+_mig_tmp_add() { _MIG_TMPS+=("$1"); }
 _mig_cleanup_tmps() {
   local _t
-  while IFS= read -r _t; do
-    [ -n "$_t" ] && rm -f "$_t" 2>/dev/null || true
-  done <<MIG_TMPS_EOF
-$_MIG_TMPS
-MIG_TMPS_EOF
-  _MIG_TMPS=""
+  if [ "${#_MIG_TMPS[@]}" -gt 0 ]; then
+    for _t in "${_MIG_TMPS[@]}"; do
+      rm -f "$_t" 2>/dev/null || true
+    done
+  fi
+  _MIG_TMPS=()
 }
 _MIG_SIG=""
 _mig_sig_num() { case "$1" in INT) echo 2 ;; HUP) echo 1 ;; *) echo 15 ;; esac; }
@@ -509,11 +523,10 @@ else
     -c "$_bootstrap_ddl" || { echo "❌ schema/ledger 부트스트랩 실패: $_MIG_OUT" >&2; exit 3; }
 fi
 
-# 4라운드(live 적용 전 확인): role 미지정 fallback은 조용히 지나가지 않는다 —
-# 005의 ACL 대상이 "실행 role"로 확정되며, ledger 때문에 설정 변경 후에도 005는
-# 재실행되지 않는다. runtime이 별도 role이면 적용 "전"에 지정해야 한다.
+# 4라운드 → 5라운드(#7): 미지정은 위에서 fail-closed로 거부된다. 여기 도달하는
+# 빈 목록은 @self 명시 승인뿐 — 정보성 고지만 남긴다.
 if [ -z "$_MIG_APP_ROLES" ]; then
-  echo "ℹ️  MIGRATION_APP_ROLES 미지정 — 005 진입점 ACL(EXECUTE·schema USAGE)은 migration 실행 role(${PGUSER})로 fallback합니다. runtime이 별도 role이면 지금 지정하세요 (적용 후에는 ledger 때문에 005가 재실행되지 않아 후속 ACL migration이 필요합니다)." >&2
+  echo "ℹ️  MIGRATION_APP_ROLES=@self — 005 진입점 ACL(EXECUTE·schema USAGE)을 migration 실행 role(${PGUSER})에 부여합니다 (명시 승인됨)." >&2
 fi
 
 for _name in $_MIG_NAMES; do

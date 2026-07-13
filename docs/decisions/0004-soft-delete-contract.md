@@ -163,8 +163,10 @@ ID로 `set_config`할 수 있어 **증거가 아니었다** (실측: 위조 후 
    (env 또는 `.env.local`, 쉼표 구분)로 명시한다 — runner가 식별자 검증 후
    GUC(`shaman.app_roles`)로 주입하고, 005는 각 role의 존재를 확인(fail-closed)한
    뒤 **EXECUTE와 함께 대상 스키마 USAGE도** 부여한다 (custom schema에서는
-   EXECUTE만으로 함수를 호출할 수 없다). 지정이 없으면 migration 실행 role로
-   fallback한다 (단일-role 배포).
+   EXECUTE만으로 함수를 호출할 수 없다). 미지정 apply는 **거부**된다(5라운드 #7
+   — ACL 대상이 실행 role로 확정된 뒤 ledger 때문에 005가 재실행되지 않으므로,
+   경고+진행은 위험하다). 실행 role 자체가 runtime role인 배포만
+   `MIGRATION_APP_ROLES=@self`로 명시 승인한다. `--status`는 요구하지 않는다.
 4. **search_path 고정 (#2)**: `SET search_path FROM CURRENT`는 pg_temp를 명시하지
    않는데, PostgreSQL은 명시되지 않은 pg_temp를 **가장 먼저** 탐색한다 — 호출자가
    만든 `pg_temp.events`가 실제 테이블을 가려, 사용자는 삭제됐지만 events payload는
