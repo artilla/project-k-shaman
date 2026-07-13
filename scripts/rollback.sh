@@ -47,7 +47,13 @@ in_isolated_worktree() {
 TAG="cycle/${ID}-pre"
 if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   # 가드 1: 추적 파일 미커밋 변경 → 거부.
-  if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  # 재리뷰 P1(#5): git status의 "실패"(rc≠0, 빈 출력)를 clean으로 오인하지 않는다 —
+  # rc를 버리고 출력만 비교하던 세 지점(초기·공개 전·최종) 모두 rc 검사가 선행한다.
+  if ! _RB_ST0="$(git status --porcelain --untracked-files=no)"; then
+    echo "❌ git status 실패 — 작업트리 상태를 판정할 수 없어 중단합니다 (fail-closed)." >&2
+    exit 3
+  fi
+  if [ -n "$_RB_ST0" ]; then
     echo "❌ 추적 파일에 미커밋 변경이 있습니다 — reset --hard가 이를 파괴합니다." >&2
     echo "   commit 또는 stash 후 다시 실행하세요." >&2
     git status --short --untracked-files=no >&2
@@ -163,29 +169,42 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     #   (b) c가 바꾼 모든 경로에서 후보의 (mode, blob) == c^의 (mode, blob)
     #       — 즉 c 직전 상태로 정확히 복원됐다 (c가 추가한 경로는 부재여야 한다)
     # whitespace·mode·심볼릭 변조는 전부 blob OID/mode 불일치로 걸린다.
-    _rb_entry() {  # $1=commit-ish, $2=path → "<mode> <oid>" (부재면 빈 문자열)
-      git ls-tree --full-tree "$1" -- "$2" 2>/dev/null | awk '{print $1" "$3; exit}'
+    # 재리뷰 P1(#4): 경로 목록은 NUL(-z) 기반으로만 다룬다 — newline 기반
+    # `diff-tree | sort`는 개행 포함 파일명을 C-quote 문자열/조각으로 갈라,
+    # ls-tree가 양쪽 모두 빈 결과("부재 == 부재")를 반환해 위조 커밋이 "이미
+    # 되돌려짐"으로 인정됐다 (실측: rc=0 + post 태그 삭제). 경로는 raw bytes
+    # 그대로 전달하고, pathspec magic 오해석을 막기 위해 :(literal)로 고정한다.
+    _rb_entry() {  # $1=commit-ish, $2=path(raw) → "<mode> <oid>" (부재면 빈 문자열)
+      # mode·oid는 첫 두 필드 — 경로 quoting(C-quote)과 무관하게 안전하다.
+      git ls-tree --full-tree "$1" -- ":(literal)$2" 2>/dev/null | awk '{print $1" "$3; exit}'
     }
     _rb_verify_revert() {  # $1=후보 커밋, $2=그 parent, $3=소유 커밋
-      local _np _cp _pp _e_new _e_base
+      local _pp _q _e_new _e_base _cpf _npf _found
       git rev-parse -q --verify "${3}^{commit}" >/dev/null 2>&1 || return 1
       git rev-parse -q --verify "${3}^" >/dev/null 2>&1 || return 1   # root commit은 대상 아님
-      _cp="$(git diff-tree -r --name-only --no-commit-id "${3}^" "$3" 2>/dev/null | sort)"
-      [ -n "$_cp" ] || return 1
-      _np="$(git diff-tree -r --name-only --no-commit-id "$2" "$1" 2>/dev/null | sort)"
-      # (a) 소유 커밋이 건드리지 않은 경로를 바꿨으면 우리 revert가 아니다
-      if [ -n "$(comm -23 <(printf '%s\n' "$_np") <(printf '%s\n' "$_cp") 2>/dev/null)" ]; then
-        return 1
+      _cpf="$(mktemp "${TMPDIR:-/tmp}/rb-cp.XXXXXX")" || return 1
+      _npf="$(mktemp "${TMPDIR:-/tmp}/rb-np.XXXXXX")" || { rm -f "$_cpf"; return 1; }
+      # diff 실패는 검증 실패다 (fail-closed — 빈 목록으로 위장 금지)
+      if ! git diff-tree -r --name-only --no-commit-id -z "${3}^" "$3" > "$_cpf" 2>/dev/null \
+         || ! git diff-tree -r --name-only --no-commit-id -z "$2" "$1" > "$_npf" 2>/dev/null; then
+        rm -f "$_cpf" "$_npf"; return 1
       fi
-      # (b) 경로별 정확 identity
-      while IFS= read -r _pp; do
-        [ -n "$_pp" ] || continue
+      [ -s "$_cpf" ] || { rm -f "$_cpf" "$_npf"; return 1; }
+      # (a) 후보가 바꾼 경로 ⊆ 소유 커밋의 경로 — NUL 레코드의 "정확 일치" 비교
+      while IFS= read -r -d '' _pp; do
+        _found=0
+        while IFS= read -r -d '' _q; do
+          [ "$_pp" = "$_q" ] && { _found=1; break; }
+        done < "$_cpf"
+        [ "$_found" -eq 1 ] || { rm -f "$_cpf" "$_npf"; return 1; }
+      done < "$_npf"
+      # (b) 경로별 정확 identity — c^ 상태로 정확히 복원됐는가
+      while IFS= read -r -d '' _pp; do
         _e_new="$(_rb_entry "$1" "$_pp")"
         _e_base="$(_rb_entry "${3}^" "$_pp")"
-        [ "$_e_new" = "$_e_base" ] || return 1
-      done <<VERIFY_EOF
-$_cp
-VERIFY_EOF
+        [ "$_e_new" = "$_e_base" ] || { rm -f "$_cpf" "$_npf"; return 1; }
+      done < "$_cpf"
+      rm -f "$_cpf" "$_npf"
       return 0
     }
 
@@ -242,14 +261,34 @@ VERIFY_EOF
     _NEW=""
     _RB_SIG=""
     _RB_PHASE="main"
+    # 재리뷰 P1(#8): 복구 참조는 실행 소유권 + CAS로만 다룬다 —
+    #   - 생성은 create-only CAS(expected-old="", 즉 "존재하지 않을 때만") —
+    #     선행 실행이 남긴 복구 증거를 절대 덮지 않는다. 선점돼 있으면 이 실행
+    #     고유 이름(refs/rollback/<ID>-<ts>.<pid>)으로 기록한다.
+    #   - 삭제는 성공 경로에서 expected-old CAS로, "공개 결과에 포함된" 증거만.
+    # 메시지는 실제 기록된 이름($_RB_RREF)을 보고한다.
+    _RB_RREF="refs/rollback/${ID}"
+    _rb_save_recovery() {
+      [ -n "$_NEW" ] || return 0
+      git update-ref "$_RB_RREF" "$_NEW" "" >/dev/null 2>&1 && return 0
+      [ "$(git rev-parse -q --verify "$_RB_RREF" 2>/dev/null || true)" = "$_NEW" ] && return 0
+      _RB_RREF="refs/rollback/${ID}-$(date +%s).$$"
+      git update-ref "$_RB_RREF" "$_NEW" "" >/dev/null 2>&1 || true
+    }
     _rb_sig_report() {
       local _cur
       _cur="$(git rev-parse -q --verify "$HEAD_REF" 2>/dev/null || true)"
       if [ -n "$_NEW" ] && [ "$_cur" = "$_NEW" ]; then
-        git update-ref "refs/rollback/${ID}" "$_NEW" >/dev/null 2>&1 || true
-        echo "❌ 신호로 중단됨 — ref 공개는 이미 완료됐습니다(${HEAD_REF} = ${_NEW}, ${POST_TAG} 삭제됨). index/worktree는 이전 상태일 수 있습니다: 'git status' 확인 후 로컬 변경이 없으면 'git reset --hard HEAD'로 동기화하세요. 복구 참조: refs/rollback/${ID}" >&2
+        _rb_save_recovery
+        echo "❌ 신호로 중단됨 — ref 공개는 이미 완료됐습니다(${HEAD_REF} = ${_NEW}, ${POST_TAG} 삭제됨). index/worktree는 이전 상태일 수 있습니다: 'git status' 확인 후 로컬 변경이 없으면 'git reset --hard HEAD'로 동기화하세요. 복구 참조: ${_RB_RREF}" >&2
       else
-        echo "❌ 신호로 중단됨 — 격리 worktree만 정리했습니다 (메인 워크트리·index·HEAD는 변경되지 않았습니다)." >&2
+        # 재리뷰 P2: 메시지가 실제 tip을 보고한다 — 관측값과 다른 "무변경" 단정 금지.
+        if [ "$_cur" = "$HEAD_OID" ] || [ -z "$_cur" ]; then
+          echo "❌ 신호로 중단됨 — 격리 worktree만 정리했습니다 (메인 워크트리·index·HEAD는 변경되지 않았습니다)." >&2
+        else
+          _rb_save_recovery
+          echo "❌ 신호로 중단됨 — ${HEAD_REF}의 현재 tip은 ${_cur}입니다 (검증 시점 ${HEAD_OID}, 계산 결과 ${_NEW:-없음}): 'git status'와 ref 상태를 직접 확인하세요.$([ -n "$_NEW" ] && echo " 복구 참조: ${_RB_RREF}")" >&2
+        fi
       fi
     }
     _rb_on_sig() {
@@ -330,21 +369,21 @@ VERIFY_EOF
     # 등식이 성립하면 HEAD_OID.._NEW 전체가 위 루프에서 커밋별로 검증한 그
     # 체인이다 — 루프 이후의 교체·삽입은 여기서 탐지된다.
     if [ "$_NEW" != "$_rb_prev" ]; then
-      git update-ref "refs/rollback/${ID}" "$_NEW" >/dev/null 2>&1 || true
+      _rb_save_recovery
       _rb_cleanup_wt
       trap - INT TERM HUP
       echo "❌ 격리 rollback의 최종 HEAD(${_NEW})가 검증된 체인 종점(${_rb_prev})과 다릅니다 — 외부 개입, 공개하지 않았습니다 (fail-closed)." >&2
-      echo "   계산 결과는 refs/rollback/${ID} 에 보존했습니다." >&2
+      echo "   계산 결과는 ${_RB_RREF} 에 보존했습니다." >&2
       exit 3
     fi
     # 개수 검증은 유지한다 — 체인 검증의 이중 방어 (hook 무력화 포함 삼중).
     _rb_cnt="$(git rev-list --count "${HEAD_OID}..${_NEW}" 2>/dev/null || echo -1)"
     if [ "$_rb_cnt" != "$_rb_made" ]; then
-      git update-ref "refs/rollback/${ID}" "$_NEW" >/dev/null 2>&1 || true
+      _rb_save_recovery
       _rb_cleanup_wt
       trap - INT TERM HUP
       echo "❌ 격리 rollback 결과에 예상 밖 커밋이 있습니다 (revert ${_rb_made}건, 실제 ${_rb_cnt}건 — hook 등 외부 개입) — 공개하지 않았습니다 (fail-closed)." >&2
-      echo "   계산 결과는 refs/rollback/${ID} 에 보존했습니다." >&2
+      echo "   계산 결과는 ${_RB_RREF} 에 보존했습니다." >&2
       exit 3
     fi
 
@@ -353,18 +392,22 @@ VERIFY_EOF
     #   같은 경로 포함), (3) post 태그가 해석 시점의 tag object 그대로(태그가 새
     #   cycle로 이동했으면 이 결과는 낡은 것 — 경고가 아니라 거부, 7차 P1-6).
     _rb_publish_fail() {
-      git update-ref "refs/rollback/${ID}" "$_NEW" >/dev/null 2>&1 || true
+      _rb_save_recovery
       _rb_cleanup_wt
       trap - INT TERM HUP
       echo "❌ $1 — 공개하지 않았습니다 (fail-closed; 메인 워크트리·index 무변경)." >&2
-      echo "   계산된 롤백 결과는 refs/rollback/${ID} 에 보존했습니다 — 검토 후 수동 병합하거나 재실행하세요." >&2
+      echo "   계산된 롤백 결과는 ${_RB_RREF} 에 보존했습니다 — 검토 후 수동 병합하거나 재실행하세요." >&2
       exit 3
     }
     # 공개 전 사전 점검 (빠른 실패용 — "판정"은 아래 ref transaction의 CAS다):
     #   여전히 같은 branch 위에 있고, 추적 파일이 clean해야 한다.
     [ "$(git symbolic-ref -q HEAD || true)" = "$HEAD_REF" ] \
       || _rb_publish_fail "검증 후 checkout된 branch가 바뀌었습니다 (${HEAD_REF} → $(git symbolic-ref -q HEAD || echo detached))"
-    [ -z "$(git status --porcelain --untracked-files=no)" ] || _rb_publish_fail "추적 파일에 동시 변경(staged 포함)이 생겼습니다"
+    # 재리뷰 P1(#5): status 실패(rc≠0)는 clean이 아니라 판정 불가 — 공개하지 않는다.
+    if ! _rb_st_pre="$(git status --porcelain --untracked-files=no)"; then
+      _rb_publish_fail "git status 실패 — 작업트리 상태를 판정할 수 없습니다"
+    fi
+    [ -z "$_rb_st_pre" ] || _rb_publish_fail "추적 파일에 동시 변경(staged 포함)이 생겼습니다"
 
     # 8차 2회 P1(#4·#5) → 8라운드 후속 P1(#1): 공개는 "하나의 ref transaction"
     # 이며 checkout 결속까지 그 안에서 검증한다.
@@ -416,10 +459,10 @@ REF_TXN
     if [ "$(git symbolic-ref -q HEAD 2>/dev/null || true)" != "$HEAD_REF" ] \
        || [ "$(git rev-parse -q --verify "$HEAD_REF" 2>/dev/null || true)" != "$_NEW" ] \
        || [ "$(git rev-parse HEAD 2>/dev/null || true)" != "$_NEW" ]; then
-      git update-ref "refs/rollback/${ID}" "$_NEW" >/dev/null 2>&1 || true
+      _rb_save_recovery
       _rb_cleanup_wt
       trap - INT TERM HUP
-      echo "❌ ref 공개는 완료됐지만(${HEAD_REF} = ${_NEW}, ${POST_TAG} 삭제됨) 현재 checkout이 공개 branch와 결속되지 않습니다 — worktree를 건드리지 않았습니다. 해당 branch에서 'git status' 확인 후 동기화하세요. 복구 참조: refs/rollback/${ID}" >&2
+      echo "❌ ref 공개는 완료됐지만(${HEAD_REF} = ${_NEW}, ${POST_TAG} 삭제됨) 현재 checkout이 공개 branch와 결속되지 않습니다 — worktree를 건드리지 않았습니다. 해당 branch에서 'git status' 확인 후 동기화하세요. 복구 참조: ${_RB_RREF}" >&2
       exit 3
     fi
 
@@ -447,8 +490,11 @@ REF_TXN
         wait "$_rt_pid" 2>/dev/null || true
         _rb_cleanup_wt
         trap - INT TERM HUP
-        git update-ref "refs/rollback/${ID}" "$_NEW" >/dev/null 2>&1 || true
-        echo "❌ 신호로 중단됨 — ref 공개는 완료됐고(${HEAD_REF} = ${_NEW}, ${POST_TAG} 삭제됨) worktree 동기화는 미완일 수 있습니다: 'git status' 확인 후 로컬 변경이 없으면 'git reset --hard HEAD'로 동기화하세요. 복구 참조: refs/rollback/${ID}" >&2
+        _rb_save_recovery
+        # 재리뷰 P2: 신호 메시지는 "지금 관측한 tip"을 함께 보고한다 — 공개 시점
+        # 값만 단정하지 않는다.
+        _rb_cur_now="$(git rev-parse -q --verify "$HEAD_REF" 2>/dev/null || true)"
+        echo "❌ 신호로 중단됨 — ref 공개는 완료됐고(공개 시점 ${HEAD_REF} = ${_NEW}, 현재 tip ${_rb_cur_now:-?}, ${POST_TAG} 삭제됨) worktree 동기화는 미완일 수 있습니다: 'git status' 확인 후 로컬 변경이 없으면 'git reset --hard HEAD'로 동기화하세요. 복구 참조: ${_RB_RREF}" >&2
         exit 130
       fi
       kill -0 "$_rt_pid" 2>/dev/null || break
@@ -457,49 +503,91 @@ REF_TXN
     if [ "$_rt_rc" -ne 0 ]; then
       _rb_cleanup_wt
       trap - INT TERM HUP
-      git update-ref "refs/rollback/${ID}" "$_NEW" >/dev/null 2>&1 || true
-      echo "❌ ref 공개는 완료됐지만(${HEAD_REF} = ${_NEW}) 워크트리 동기화에 실패했습니다 — 로컬 변경과 충돌. 'git status' 확인 후 수동 동기화(git checkout -- <path>)가 필요합니다. 복구 참조: refs/rollback/${ID}" >&2
+      _rb_save_recovery
+      echo "❌ ref 공개는 완료됐지만(${HEAD_REF} = ${_NEW}) 워크트리 동기화에 실패했습니다 — 로컬 변경과 충돌. 'git status' 확인 후 수동 동기화(git checkout -- <path>)가 필요합니다. 복구 참조: ${_RB_RREF}" >&2
       exit 3
     fi
 
-    # (iii) 동기화 직후 결속 재검증 (재리뷰 P1(#7)): read-tree는 "그 시점의 ambient
-    # HEAD"가 가리키는 worktree에 적용된다. 사전 점검과 read-tree 사이에 같은 OID의
-    # 다른 branch로 전환되면 그 branch의 worktree/index를 바꾼 뒤에야 실패했다 (실측).
-    # Git은 "HEAD 결속 + worktree 갱신"의 원자 연산을 제공하지 않으므로, 결속이 깨진
-    # 것을 탐지하면 우리가 적용한 two-tree merge를 "역방향으로 되돌려" 그 worktree를
-    # 원상복구한다 — 엉뚱한 worktree를 바꾼 채로 끝나지 않는다.
+    # (iii) 동기화 직후 결속 재검증 (재리뷰 P1(#7) 재수정): read-tree는 "그 시점의
+    # ambient HEAD"가 가리키는 worktree에 적용된다. 사전 점검과 read-tree 사이에
+    # 다른 branch로 전환되면 그 branch의 worktree/index를 바꾼 뒤에야 탐지된다.
+    # 원상복구의 목표는 "지금 checkout된 그 commit의 tree"다 — 역방향
+    # read-tree(_NEW→HEAD_OID)는 원 branch의 tree를 적용할 뿐이라, 다른 OID의
+    # branch로 전환된 경우 tracked dirty가 남는데도 완료로 보고했다 (실측).
+    # 우리가 적용한 two-tree merge(_NEW 기준)를 "현재 HEAD의 tree"로 되돌리고,
+    # 되돌린 뒤 그 worktree가 실제로 clean한지까지 확인해서 보고한다.
     if [ "$(git symbolic-ref -q HEAD 2>/dev/null || true)" != "$HEAD_REF" ]; then
-      _rb_undo_note="worktree 원상복구 완료"
-      git read-tree -m -u "$_NEW" "$HEAD_OID" 2>/dev/null || _rb_undo_note="worktree 원상복구 실패 — 'git status'로 직접 확인하세요"
-      git update-ref "refs/rollback/${ID}" "$_NEW" >/dev/null 2>&1 || true
+      _rb_cur_oid="$(git rev-parse -q --verify HEAD 2>/dev/null || true)"
+      _rb_undo_note="worktree 원상복구 실패 — 'git status'로 직접 확인하세요"
+      if [ -n "$_rb_cur_oid" ] && git read-tree -m -u "$_NEW" "$_rb_cur_oid" 2>/dev/null; then
+        # 복구 주장은 관측으로만 — status 실패/dirty면 완료라고 말하지 않는다.
+        if _rb_undo_st="$(git status --porcelain --untracked-files=no 2>/dev/null)" && [ -z "$_rb_undo_st" ]; then
+          _rb_undo_note="worktree 원상복구 완료 (현재 HEAD ${_rb_cur_oid} tree 기준)"
+        else
+          _rb_undo_note="worktree 원상복구를 시도했으나 잔여 변경이 남았습니다 — 'git status'로 직접 확인하세요"
+        fi
+      fi
+      _rb_save_recovery
       _rb_cleanup_wt
       trap - INT TERM HUP
-      echo "❌ 동기화 도중 checkout branch가 바뀌었습니다 (${HEAD_REF} → $(git symbolic-ref -q HEAD 2>/dev/null || echo detached)) — ${_rb_undo_note}. ref 공개는 완료됐습니다(${HEAD_REF} = ${_NEW}, ${POST_TAG} 삭제됨): ${HEAD_REF}를 checkout한 뒤 'git status'로 동기화하세요. 복구 참조: refs/rollback/${ID}" >&2
+      echo "❌ 동기화 도중 checkout branch가 바뀌었습니다 (${HEAD_REF} → $(git symbolic-ref -q HEAD 2>/dev/null || echo detached)) — ${_rb_undo_note}. ref 공개는 완료됐습니다(${HEAD_REF} = ${_NEW}, ${POST_TAG} 삭제됨): ${HEAD_REF}를 checkout한 뒤 'git status'로 동기화하세요. 복구 참조: ${_RB_RREF}" >&2
       exit 3
     fi
     _rb_cleanup_wt
 
-    # 종료 직전 최종 검증 (8라운드 후속 P1(#4) + 재리뷰 P1(#7)): 성공 보고의 근거는
-    # "지금"의 ref·checkout·tracked 정합이다. 복구 참조 삭제를 검증 "앞"에 두어,
-    # 검증 통과와 성공 출력 사이에 git 서브프로세스가 끼지 않게 한다 — 검증이
-    # 실패하면 복구 참조를 다시 남기고 성공 문구를 내지 않는다 (fail-closed).
-    git update-ref -d "refs/rollback/${ID}" >/dev/null 2>&1 || true
+    # 선행 실행의 복구 참조 정리 (재리뷰 P1(#8)): expected-old CAS로만 — "공개
+    # 결과(_NEW)에 포함된" 증거만 삭제하고, 포함되지 않은 선행 증거는 보존·고지한다
+    # (무조건 삭제가 선행 복구 증거를 지우던 문제 제거).
+    _rb_stale="$(git rev-parse -q --verify "refs/rollback/${ID}" 2>/dev/null || true)"
+    if [ -n "$_rb_stale" ]; then
+      if [ "$_rb_stale" = "$_NEW" ] || git merge-base --is-ancestor "$_rb_stale" "$_NEW" 2>/dev/null; then
+        git update-ref -d "refs/rollback/${ID}" "$_rb_stale" >/dev/null 2>&1 || true
+      else
+        echo "ℹ️  선행 복구 참조 refs/rollback/${ID}(${_rb_stale})는 이번 공개 결과에 포함되지 않아 보존합니다 — 검토 후 수동 삭제하세요." >&2
+      fi
+    fi
+
+    # 종료 직전 최종 검증 (8라운드 후속 P1(#4) + 재리뷰 P1(#5·#6)): 성공 보고의
+    # 근거는 "지금"의 ref·checkout·tracked 정합이다. 검증과 성공 출력 사이에는 git
+    # 서브프로세스를 두지 않고, 성공 출력 "직후" 같은 항목을 한 번 더 재검증한다 —
+    # 검증~출력 창에 끼어든 foreign commit/reset은 rc=0이 되지 못하고 복구 참조가
+    # 남는다 (성공 문구는 공개 시점 값 ${_NEW}를 명시해, 이후의 동시 커밋과
+    # 구분된다).
     _rb_final_fail() {
-      git update-ref "refs/rollback/${ID}" "$_NEW" >/dev/null 2>&1 || true
+      _rb_save_recovery
       trap - INT TERM HUP
-      echo "❌ $1 — 공개(${HEAD_REF} = ${_NEW})는 수행됐지만 성공으로 보고하지 않습니다. 'git status'로 상태를 확인하세요. 복구 참조: refs/rollback/${ID}" >&2
+      echo "❌ $1 — 공개(${HEAD_REF} = ${_NEW})는 수행됐지만 성공으로 보고하지 않습니다. 'git status'로 상태를 확인하세요. 복구 참조: ${_RB_RREF}" >&2
       exit 3
     }
-    [ "$(git rev-parse -q --verify "$HEAD_REF" 2>/dev/null || true)" = "$_NEW" ] \
-      || _rb_final_fail "공개 후 ${HEAD_REF}에 예상 밖 커밋이 있습니다 (대상 ref ≠ 공개 결과)"
-    [ "$(git symbolic-ref -q HEAD 2>/dev/null || true)" = "$HEAD_REF" ] \
-      || _rb_final_fail "checkout branch가 공개 branch와 다릅니다"
-    [ "$(git rev-parse HEAD 2>/dev/null || true)" = "$_NEW" ] \
-      || _rb_final_fail "HEAD가 공개 결과와 다릅니다"
-    [ -z "$(git status --porcelain --untracked-files=no)" ] \
-      || _rb_final_fail "추적 파일이 clean하지 않습니다 (index/worktree 부정합)"
+    _rb_final_verify() {
+      [ "$(git rev-parse -q --verify "$HEAD_REF" 2>/dev/null || true)" = "$_NEW" ] || return 1
+      [ "$(git symbolic-ref -q HEAD 2>/dev/null || true)" = "$HEAD_REF" ] || return 2
+      [ "$(git rev-parse HEAD 2>/dev/null || true)" = "$_NEW" ] || return 3
+      # 재리뷰 P1(#5): status 실패는 clean이 아니다 — 판정 불가로 실패.
+      if ! _rb_fst="$(git status --porcelain --untracked-files=no 2>/dev/null)"; then return 4; fi
+      [ -z "$_rb_fst" ] || return 5
+      return 0
+    }
+    _rb_v=0; _rb_final_verify || _rb_v=$?
+    case "$_rb_v" in
+      0) : ;;
+      1) _rb_final_fail "공개 후 ${HEAD_REF}에 예상 밖 커밋이 있습니다 (대상 ref ≠ 공개 결과)" ;;
+      2) _rb_final_fail "checkout branch가 공개 branch와 다릅니다" ;;
+      3) _rb_final_fail "HEAD가 공개 결과와 다릅니다" ;;
+      4) _rb_final_fail "git status 실패 — 작업트리 상태를 판정할 수 없습니다" ;;
+      *) _rb_final_fail "추적 파일이 clean하지 않습니다 (index/worktree 부정합)" ;;
+    esac
+    echo "rolled back $ID by revert — ${HEAD_REF} = ${_NEW} (owned commits only; history preserved; 미추적 산출물은 보존됨)"
+    # 성공 출력 직후 재검증 (재리뷰 P1(#6)): 검증과 출력 사이의 동시 개입이 rc=0으로
+    # 위장되지 않는다 — 어긋났으면 복구 참조를 남기고 비-성공(rc=3)으로 종료한다.
+    _rb_v=0; _rb_final_verify || _rb_v=$?
+    if [ "$_rb_v" -ne 0 ]; then
+      _rb_save_recovery
+      trap - INT TERM HUP
+      echo "⚠️  성공 보고 직후 상태가 변했습니다 (검증 항목 ${_rb_v}) — 위 성공 문구는 공개 시점(${HEAD_REF} = ${_NEW}) 기준입니다. 현재 ${HEAD_REF} tip: $(git rev-parse -q --verify "$HEAD_REF" 2>/dev/null || echo '?'). 복구 참조: ${_RB_RREF}" >&2
+      exit 3
+    fi
     trap - INT TERM HUP
-    echo "rolled back $ID by revert (owned commits only; history preserved; 미추적 산출물은 보존됨)"
     exit 0
   fi
 
