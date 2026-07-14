@@ -218,12 +218,16 @@ diagnostic_termination_class() {
   esac
 }
 
+# 8라운드(이식성, 리뷰 12차와 동일 계열): GNU coreutils의 `stat -f`는 "파일시스템"
+# 모드라 rc≠0이어도 stdout에 fs 정보를 쏟아 fallback 출력과 합쳐졌다 (Linux에서
+# untracked-files.tsv의 size가 비숫자, 실측). -c(GNU)를 먼저, -f(BSD/macOS)를
+# fallback으로 — ticket_body.sh 등과 같은 순서.
 portable_stat_epoch() {
-  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || return 1
+  stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null || return 1
 }
 
 portable_stat_size() {
-  stat -f '%z' "$1" 2>/dev/null || stat -c '%s' "$1" 2>/dev/null || wc -c < "$1" 2>/dev/null
+  stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1" 2>/dev/null || wc -c < "$1" 2>/dev/null
 }
 
 portable_epoch_iso() {

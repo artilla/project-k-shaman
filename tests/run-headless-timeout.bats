@@ -230,8 +230,16 @@ _run_headless() {
   grandchild_pid="$(cat "$grandchild_pid_file")"
   sleep 1
   if kill -0 "$grandchild_pid" 2>/dev/null; then
-    kill -KILL "$grandchild_pid" 2>/dev/null || true
-    return 1
+    # 8라운드(환경 내성): zombie를 reap하지 않는 PID 1 컨테이너에서는 KILL된
+    # grandchild가 zombie로 남아 kill -0에 계속 잡힌다 — zombie는 죽은 것이다.
+    _gc_state="$(ps -o stat= -p "$grandchild_pid" 2>/dev/null | tr -d '[:space:]')"
+    case "$_gc_state" in
+      Z*|z*|"") : ;;
+      *)
+        kill -KILL "$grandchild_pid" 2>/dev/null || true
+        return 1
+        ;;
+    esac
   fi
 }
 
