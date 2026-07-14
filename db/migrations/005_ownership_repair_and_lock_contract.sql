@@ -334,22 +334,40 @@ BEGIN
   IF _canlogin THEN
     RAISE EXCEPTION 'role shaman_softdelete가 LOGIN 속성을 가지고 있습니다 — soft-delete 정의자 role은 NOLOGIN이어야 합니다 (이 role로 직접 접속하면 진입점을 우회할 수 있습니다). ALTER ROLE shaman_softdelete NOLOGIN 후 재실행하세요 (fail-closed)';
   END IF;
+  -- 11라운드 P1(#6): 위험 속성 검증도 "이 transaction 안"에서 — 사전 생성된
+  -- SUPERUSER/CREATEROLE/CREATEDB/REPLICATION/BYPASSRLS role을 신뢰한 채 005가
+  -- commit되면 ledger 때문에 재실행되지 않아 위험 속성이 영구 잔존했다 (실측:
+  -- runner의 사후 검증은 rc=1이지만 ledger는 이미 기록됨). RAISE는 transaction
+  -- 전체를 rollback시켜 ledger에 기록되지 않는다.
+  IF EXISTS (
+    SELECT 1 FROM pg_roles
+    WHERE rolname = 'shaman_softdelete'
+      AND (rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls)
+  ) THEN
+    RAISE EXCEPTION 'role shaman_softdelete에 허용되지 않은 속성(SUPERUSER/CREATEROLE/CREATEDB/REPLICATION/BYPASSRLS)이 있습니다 — SECURITY DEFINER 진입점이 이 권한으로 실행됩니다. ALTER ROLE shaman_softdelete NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS 후 재실행하세요 (fail-closed)';
+  END IF;
+  -- 15라운드 P2: 판정은 PG16의 membership 의미론을 따른다 — 위험한 것은
+  -- SET(전환)·INHERIT(상속)·ADMIN(재부여) 옵션이 켜진 membership이다.
+  -- GRANT ... WITH SET FALSE, INHERIT FALSE, ADMIN FALSE는 어느 능력도 주지
+  -- 않으므로 계약을 깨지 않는다 (허용).
   SELECT count(*) INTO _members
     FROM pg_auth_members m
     JOIN pg_roles r  ON r.oid  = m.roleid
     JOIN pg_roles mr ON mr.oid = m.member
    WHERE r.rolname = 'shaman_softdelete'
+     AND (m.set_option OR m.inherit_option OR m.admin_option)
      AND NOT mr.rolsuper
      AND mr.rolname <> current_user;
   IF _members > 0 THEN
-    RAISE EXCEPTION 'role shaman_softdelete에 허용되지 않은 member가 % 명 있습니다 — member는 SET ROLE로 진입점을 우회해 직접 삭제할 수 있습니다 (허용 예외: superuser·migration 실행 role 자신). 해당 membership을 REVOKE한 뒤 재실행하세요 (fail-closed)', _members;
+    RAISE EXCEPTION 'role shaman_softdelete에 허용되지 않은 member가 % 명 있습니다 — SET(전환)·INHERIT(상속)·ADMIN(재부여) 옵션이 켜진 member는 진입점을 우회해 직접 삭제할 수 있습니다 (허용 예외: superuser·migration 실행 role 자신·전 옵션 FALSE membership). 해당 membership을 REVOKE한 뒤 재실행하세요 (fail-closed)', _members;
   END IF;
   SELECT count(*) INTO _parents
     FROM pg_auth_members m
     JOIN pg_roles mr ON mr.oid = m.member
-   WHERE mr.rolname = 'shaman_softdelete';
+   WHERE mr.rolname = 'shaman_softdelete'
+     AND (m.set_option OR m.inherit_option OR m.admin_option);
   IF _parents > 0 THEN
-    RAISE EXCEPTION 'role shaman_softdelete가 상위 role %개의 member입니다 — 정의자 컨텍스트가 상속으로 최소 권한을 초과할 수 있습니다. REVOKE <role> FROM shaman_softdelete 후 재실행하세요 (fail-closed)', _parents;
+    RAISE EXCEPTION 'role shaman_softdelete가 상위 role %개의 member입니다(SET/INHERIT/ADMIN 옵션 보유) — 정의자 컨텍스트가 상속·전환으로 최소 권한을 초과할 수 있습니다. REVOKE <role> FROM shaman_softdelete (또는 전 옵션 FALSE로 재부여) 후 재실행하세요 (fail-closed)', _parents;
   END IF;
 END $role$;
 

@@ -152,9 +152,13 @@ ID로 `set_config`할 수 있어 **증거가 아니었다** (실측: 위조 후 
    기록되지 않는다). member 허용 예외는 둘뿐이다: **superuser**(이미 모든 경계
    밖)와 **migration 실행 role 자신**(아래 운영 전제의 비-superuser 경로가
    `OWNER TO`를 위해 요구한다 — 이 role은 정의상 신뢰된 배포 주체다). 그 외
-   member는 `SET ROLE`로 진입점을 우회할 수 있어 거부한다. `shaman_softdelete`가
-   **다른 role의 member인 것**(상위-role membership)도 거부한다 — 정의자
-   컨텍스트가 상속으로 최소 권한을 초과하면 안 된다 (재재리뷰 P2).
+   member는 진입점을 우회할 수 있어 거부한다. 판정은 **PG16 membership
+   의미론**을 따른다 (15라운드 P2): 거부 대상은 `SET`(전환)·`INHERIT`(상속)·
+   `ADMIN`(재부여) 옵션이 켜진 membership이며, `GRANT ... WITH SET FALSE,
+   INHERIT FALSE, ADMIN FALSE`는 어느 능력도 부여하지 않으므로 허용된다.
+   `shaman_softdelete`가 **다른 role의 member인 것**(상위-role membership)도
+   같은 기준으로 거부한다 — 정의자 컨텍스트가 상속·전환으로 최소 권한을
+   초과하면 안 된다 (재재리뷰 P2).
 3. **함수 ACL (#3 + 재재리뷰 #3)**: 기본 ACL은 EXECUTE를 PUBLIC에 연다 — SECURITY
    DEFINER에서는 아무 테이블 권한도 없는 CONNECT role이 삭제를 수행할 수 있다는
    뜻이다(실측). 005는 `REVOKE ALL ... FROM PUBLIC` 후 **runtime app role에만**
@@ -177,6 +181,26 @@ ID로 `set_config`할 수 있어 **증거가 아니었다** (실측: 위조 후 
 
 추가로, 정의자 role에는 대상 스키마의 **USAGE**를 부여한다 (#1 — 없으면 custom
 schema에서 `relation "events" does not exist`로 실패한다).
+
+5. **배포 소유자 anchor (15~16라운드 P1)**: 보호 테이블·helper·ledger의 소유자는
+   ACL·RLS와 무관하게 전권이므로 배포 identity의 일부다. 계약: **배포 소유자는
+   migration 실행 role**이며, runner는 소유자 이전을 수행하지 않는다(새로 만들어지는
+   객체는 실행 role 소유가 된다). 따라서 소유자 anchor는 우선순위대로 결정된다 —
+   (a) `MIGRATION_OWNER` 명시 pin, (b) 없으면 **기존 ledger 소유자**(이미 부분
+   배포된 DB), (c) 둘 다 없으면 실행 role(fresh). **pending migration이 있는데
+   실행 role이 이 anchor와 다르면 적용 "전"에 거부한다**(preflight) — 그대로 두면
+   Owner A의 부분 배포에 runner B가 005를 적용해 새 객체가 B 소유가 되는 비원자
+   drift가 생긴다(실측). `MIGRATION_OWNER`의 문법·존재도 bootstrap 이전에
+   확정한다. pin의 정당한 용도는 "이미 그 소유자로 배포된 DB(pending 없음)의
+   검증 승인"이다.
+6. **runtime app role → 배포 소유자 membership 금지 (15~16라운드 P1)**:
+   `MIGRATION_APP_ROLES`의 명시 role이 배포 소유자(미래 테이블 owner) role에 대해
+   `SET`(전환)·`INHERIT`(상속)·`ADMIN`(재부여) 중 **어느 경로라도** 가지면 —
+   진입점을 우회한 hard-delete(전환·상속)나 그 능력의 재부여(ADMIN으로 다른
+   login에 `SET` membership 부여)로 이어진다. 세 경로 전부를 `pg_has_role`
+   (`SET`/`USAGE`/`MEMBER WITH ADMIN OPTION`)로 적용 "전" preflight에서 검사하고,
+   `GRANT ... WITH SET FALSE, INHERIT FALSE, ADMIN FALSE`(어느 능력도 없는
+   membership)만 허용한다 — 정의자 role membership 판정(#2)과 같은 PG16 의미론이다.
 
 - app role 배포 계약: `users`에 대한 UPDATE는 **컬럼 목록 grant**로 부여하고
   `deleted_at`을 제외한다 — 권한층에서도 직접 DML이 차단된다 (트리거 경계는

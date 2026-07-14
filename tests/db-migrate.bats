@@ -1359,6 +1359,9 @@ SHIM
   _psql "drop role if exists zz_late44"
   _psql "create role zz_late44 login"
 
+  # 참고(8라운드): @self 시절의 실행 사용자(postgres) grant는 005의 OWNER TO가
+  # 구 소유자 ACL 항목을 새 소유자로 치환하면서 흡수된다 — 잔존 grantee가 아니다.
+  # (이후 "새로" 부여된 실행 사용자 EXECUTE는 정확 집합 위반으로 잡힌다 — DB47.)
   run env MIGRATION_APP_ROLES=zz_late44 ENV_FILE="$ENVF" "$RUNNER"
   [ "$status" -eq 1 ]
   [[ "$output" != *"up-to-date"* ]]
@@ -1411,6 +1414,841 @@ SHIM
   [[ "$output" == *"drift"* ]]
 }
 
+@test "DB47: catalog identity is verified - stray grant to the migration user, owner drift, SECURITY INVOKER, and search_path unpin are all refused" {
+  # 8라운드 P1(#6): (c') current_user 무조건 허용은 fail-open이었다 — migration
+  # 사용자에게 얹은 불필요 EXECUTE가 rc=0으로 통과했다. (e) 함수 "존재"만 검사해
+  # owner를 postgres로 바꾸거나 SECURITY INVOKER로 바꿔 실제 호출이 실패해도
+  # rc=0이었다 (실측, PG16). 이제 proowner·prosecdef·search_path 고정까지
+  # 카탈로그에서 검증한다.
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (c') 요청 집합 밖 role에 얹은 불필요 EXECUTE — 정확 집합 위반으로 거부
+  _psql "drop role if exists zz_extra47"
+  _psql "create role zz_extra47 login"
+  _psql "grant execute on function app_soft_delete_user(bigint) to zz_extra47"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"up-to-date"* ]]
+  [[ "$output" == *"zz_extra47"* ]]
+  _psql "revoke execute on function app_soft_delete_user(bigint) from zz_extra47"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (e-1) 함수 owner drift — 존재하지만 정의자 컨텍스트가 깨진 상태, 거부
+  _psql "alter function app_soft_delete_user(bigint) owner to postgres"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"up-to-date"* ]]
+  [[ "$output" == *"OWNER TO shaman_softdelete"* ]]
+  _psql "alter function app_soft_delete_user(bigint) owner to shaman_softdelete"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (e-2) SECURITY INVOKER 전환 — 진입점 무력화, 거부
+  _psql "alter function app_soft_delete_user(bigint) security invoker"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"up-to-date"* ]]
+  [[ "$output" == *"SECURITY DEFINER"* ]]
+  _psql "alter function app_soft_delete_user(bigint) security definer"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (e-3) search_path 고정 해제 — pg_temp shadowing 재개, 거부
+  _psql "alter function app_soft_delete_user(bigint) reset search_path"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"up-to-date"* ]]
+  [[ "$output" == *"search_path"* ]]
+  _psql "alter function app_soft_delete_user(bigint) set search_path = pg_catalog, public, pg_temp"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+}
+
+@test "DB48: the full deployment contract is re-verified - LOGIN drift, third-role membership, and trigger-function search_path unpin are refused" {
+  # 9라운드 P1(#7): 진입점 함수 하나의 identity만으로는 계약이 인증되지 않았다 —
+  # shaman_softdelete LOGIN 재부여, 제3 role membership, users_scrub_on_delete()의
+  # search_path 고정 해제 후에도 runner가 rc=0이었다 (실측, PG16). NOLOGIN·
+  # membership 불변식과 005가 고정한 7개 함수 전체를 성공 보고 전에 재검증한다.
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (f-1) LOGIN 재부여 → 거부
+  _psql "alter role shaman_softdelete login"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"up-to-date"* ]]
+  [[ "$output" == *"NOLOGIN"* ]]
+  _psql "alter role shaman_softdelete nologin"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (f-2) 제3 role에 membership 부여 → 거부 (SET ROLE 우회 경로)
+  _psql "drop role if exists zz_mem48; create role zz_mem48 login"
+  _psql "grant shaman_softdelete to zz_mem48"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"up-to-date"* ]]
+  [[ "$output" == *"member"* ]]
+  _psql "revoke shaman_softdelete from zz_mem48"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (g) 트리거 함수의 search_path 고정 해제 → 거부 (진입점만이 아니라 7개 전부)
+  _psql "alter function users_scrub_on_delete() reset search_path"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"up-to-date"* ]]
+  [[ "$output" == *"users_scrub_on_delete"* ]]
+  _psql "alter function users_scrub_on_delete() set search_path = pg_catalog, public, pg_temp"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (g-2) 설치 함수 DROP(drift) → 거부
+  _psql "drop trigger trg_purchases_user_id_immutable on purchases"
+  _psql "drop function purchases_user_id_immutable()"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"up-to-date"* ]]
+  [[ "$output" == *"purchases_user_id_immutable"* ]]
+}
+
+@test "DB49: trigger-function SECURITY DEFINER, trigger drop/disable, role attributes, and revoked definer privileges are all refused" {
+  # 10라운드 P1(#5·#6·#7): (5) 트리거 함수를 SECURITY DEFINER로 바꾸면 직접
+  # UPDATE에서도 current_user 검사가 통과해 진입점이 우회됐고, 트리거만 DROP해도
+  # rc=0이었다. (6) SUPERUSER/CREATEROLE 등 속성 drift, (7) 필수 객체 권한 회수도
+  # rc=0이었다 (실측, PG16). 전부 성공 보고 전에 재검증한다.
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (5a) 트리거 함수 SECURITY DEFINER → 거부 (진입점 role 경계 우회)
+  _psql "alter function users_scrub_on_delete() security definer"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"up-to-date"* ]]
+  # 12라운드 (g) 확장으로 메시지가 통합됐다 — secmode 위반은 'security' label
+  [[ "$output" == *"실행 계약"* ]]
+  [[ "$output" == *"security"* ]]
+  _psql "alter function users_scrub_on_delete() security invoker"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (5b) 계약 트리거 DROP → 거부
+  _psql "drop trigger trg_sessions_no_deleted_user on sessions"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"trg_sessions_no_deleted_user"* ]]
+  _psql "create trigger trg_sessions_no_deleted_user before insert or update of user_id on sessions for each row execute function sessions_guard()"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (5c) 계약 트리거 DISABLE → 거부
+  _psql "alter table events disable trigger trg_events_no_deleted_user"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"disabled"* ]]
+  _psql "alter table events enable trigger trg_events_no_deleted_user"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (6) 정의자 role 속성 drift → 거부
+  _psql "alter role shaman_softdelete createrole bypassrls"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CREATEROLE"* ]]
+  [[ "$output" == *"BYPASSRLS"* ]]
+  _psql "alter role shaman_softdelete nocreaterole nobypassrls"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (7) 정의자 필수 객체 권한 회수 → 거부
+  _psql "revoke update on users from shaman_softdelete"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"up-to-date"* ]]
+  [[ "$output" == *"UPDATE ON users"* ]]
+  _psql "grant update on users to shaman_softdelete"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up-to-date"* ]]
+}
+
+@test "DB50: trigger redefinition, foreign-schema rebind, body no-op replacement, and pre-existing dangerous role attributes are all refused" {
+  # 11라운드 P1(#4·#5·#6): (4) 동일 이름을 AFTER DELETE로 재생성하거나 다른
+  # schema의 동명 no-op에 연결해도 rc=0이었고, (5) 같은 signature/search_path의
+  # no-op 본문 교체·진입점 RETURN true 교체도 rc=0이었다. (6) 사전 생성된
+  # SUPERUSER 등 위험 속성 role은 최종 rc=1이어도 005 ledger가 이미 기록됐다
+  # (전부 실측, PG16). 이제 trigger 정의 전체·함수 fingerprint를 대조하고, role
+  # 속성 검증은 005 transaction 안에서 수행돼 ledger에 기록되지 않는다.
+  # (6) — 먼저: cluster-wide role에 위험 속성을 얹은 채 fresh apply
+  _psql "drop role if exists shaman_softdelete" || true
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "create role shaman_softdelete nologin superuser" >/dev/null 2>&1     || "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "alter role shaman_softdelete superuser" >/dev/null
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"허용되지 않은 속성"* ]]
+  # 005는 ledger에 기록되지 않았다 — transaction rollback (fail-closed)
+  [ "$(_psql "select count(*) from schema_migrations where version like '005%'")" = "0" ]
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "alter role shaman_softdelete nosuperuser" >/dev/null
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (4a) 같은 이름을 AFTER DELETE로 재생성 → tgtype 불일치 거부
+  _psql "drop trigger trg_sessions_no_deleted_user on sessions; create trigger trg_sessions_no_deleted_user after delete on sessions for each row execute function sessions_guard()"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"wrong-type"* ]]
+  _psql "drop trigger trg_sessions_no_deleted_user on sessions; create trigger trg_sessions_no_deleted_user before insert or update of user_id on sessions for each row execute function sessions_guard()"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (4b) 다른 schema의 동명 no-op 함수에 결속 → tgfoid(schema 포함) 불일치 거부
+  _psql "create schema if not exists evil50"
+  _psql "create or replace function evil50.sessions_guard() returns trigger language plpgsql as \$f\$ begin return new; end \$f\$"
+  _psql "drop trigger trg_sessions_no_deleted_user on sessions; create trigger trg_sessions_no_deleted_user before insert or update of user_id on sessions for each row execute function evil50.sessions_guard()"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"wrong-function=evil50.sessions_guard"* ]]
+  _psql "drop trigger trg_sessions_no_deleted_user on sessions; create trigger trg_sessions_no_deleted_user before insert or update of user_id on sessions for each row execute function sessions_guard()"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (5a) 트리거 함수 본문을 같은 signature/search_path의 no-op으로 교체 → fingerprint 거부
+  _psql "select pg_get_functiondef('users_scrub_on_delete()'::regprocedure)" > "$PGT/db50-orig-fn.sql"
+  _psql "create or replace function users_scrub_on_delete() returns trigger language plpgsql set search_path = pg_catalog, public, pg_temp as \$f\$ begin return new; end \$f\$"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"실행 계약"* && "$output" == *"body"* ]]
+  "$PGBIN/psql" -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" -f "$PGT/db50-orig-fn.sql" >/dev/null
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (5b) 진입점을 RETURN true no-op으로 교체 → fingerprint 거부
+  _psql "select pg_get_functiondef('app_soft_delete_user(bigint)'::regprocedure)" > "$PGT/db50-orig-entry.sql"
+  _psql "create or replace function app_soft_delete_user(p_user bigint) returns boolean language plpgsql security definer set search_path = pg_catalog, public, pg_temp as \$f\$ begin return true; end \$f\$"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"실행 계약"* && "$output" == *"body"* ]]
+  "$PGBIN/psql" -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" -f "$PGT/db50-orig-entry.sql" >/dev/null
+  _psql "alter function app_soft_delete_user(bigint) owner to shaman_softdelete"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (P2) users에 INSERT 초과 grant → 정확 집합 위반 거부
+  _psql "grant insert on users to shaman_softdelete"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"초과 권한"* ]]
+  [[ "$output" == *"INSERT"* ]]
+  _psql "revoke insert on users from shaman_softdelete"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up-to-date"* ]]
+}
+
+@test "DB51: function attribute drift - IMMUTABLE, extra proconfig, return type, argument names, helper owner - all refused" {
+  # 12라운드 P1(#4): fingerprint가 본문 md5·언어·search_path 존재에 그쳐
+  # IMMUTABLE 전환(결과 고정·재평가 회피), SET lock_timeout 추가, 인자명 변경,
+  # RETURNS text 재작성, helper 함수 owner 변경이 전부 rc=0이었다 (실측, PG16).
+  # 이제 volatility·strictness·retset·parallel·leakproof·반환형·인자명/모드/
+  # 타입·owner·"전체" proconfig가 공개 005의 값과 정확히 일치해야 한다.
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (a) IMMUTABLE 전환 → volatility 위반
+  _psql "alter function app_soft_delete_user(bigint) immutable"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"volatility"* ]]
+  _psql "alter function app_soft_delete_user(bigint) volatile"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (b) proconfig에 lock_timeout 추가 → "전체" proconfig 정확 비교 위반
+  _psql "alter function app_soft_delete_user(bigint) set lock_timeout = '1s'"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"config="* ]]
+  _psql "alter function app_soft_delete_user(bigint) reset lock_timeout"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (c) 인자명 p_user→p_uid 재생성 (owner·ACL은 충실히 복원해 다른 검사를 통과
+  # 시켜도) → argnames 위반. PG는 CREATE OR REPLACE로 인자명 변경을 거부하므로
+  # 공격자와 동일하게 DROP 후 재생성한다.
+  _psql "select pg_get_functiondef('app_soft_delete_user(bigint)'::regprocedure)" > "$PGT/db51-entry.sql"
+  sed 's/p_user/p_uid/g' "$PGT/db51-entry.sql" > "$PGT/db51-argdrift.sql"
+  _psql "drop function app_soft_delete_user(bigint)"
+  "$PGBIN/psql" -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" -f "$PGT/db51-argdrift.sql" >/dev/null
+  _psql "alter function app_soft_delete_user(bigint) owner to shaman_softdelete; revoke all on function app_soft_delete_user(bigint) from public; grant execute on function app_soft_delete_user(bigint) to postgres"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"argnames"* ]]
+  _psql "drop function app_soft_delete_user(bigint)"
+  "$PGBIN/psql" -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" -f "$PGT/db51-entry.sql" >/dev/null
+  _psql "alter function app_soft_delete_user(bigint) owner to shaman_softdelete; revoke all on function app_soft_delete_user(bigint) from public; grant execute on function app_soft_delete_user(bigint) to postgres"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (d) RETURNS text 재작성 → rettype 위반
+  sed 's/RETURNS boolean/RETURNS text/' "$PGT/db51-entry.sql" > "$PGT/db51-retdrift.sql"
+  _psql "drop function app_soft_delete_user(bigint)"
+  "$PGBIN/psql" -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" -f "$PGT/db51-retdrift.sql" >/dev/null
+  _psql "alter function app_soft_delete_user(bigint) owner to shaman_softdelete; revoke all on function app_soft_delete_user(bigint) from public; grant execute on function app_soft_delete_user(bigint) to postgres"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"rettype"* ]]
+  _psql "drop function app_soft_delete_user(bigint)"
+  "$PGBIN/psql" -X -q -v ON_ERROR_STOP=1 -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" -f "$PGT/db51-entry.sql" >/dev/null
+  _psql "alter function app_soft_delete_user(bigint) owner to shaman_softdelete; revoke all on function app_soft_delete_user(bigint) from public; grant execute on function app_soft_delete_user(bigint) to postgres"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (e) helper(trigger 함수) owner 변경 → owner 위반 (SECURITY INVOKER helper도
+  # 소유자가 계약 대상이다 — 소유자가 바뀌면 ALTER FUNCTION으로 본문을 바꿀 수 있다)
+  _psql "drop role if exists db51_owner" || true
+  _psql "create role db51_owner nologin"
+  _psql "alter function users_scrub_on_delete() owner to db51_owner"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"owner=db51_owner"* ]]
+  _psql "alter function users_scrub_on_delete() owner to postgres"
+  _psql "drop role db51_owner"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up-to-date"* ]]
+}
+
+@test "DB52: exact trigger set and sole-entrypoint ACL - extra trigger, PUBLIC grants, forbidden DELETE/TRUNCATE, owner membership - all refused" {
+  # 12라운드 P1(#5·#6): (5) 계약 trigger 8개가 온전해도 보호 테이블에 "추가"
+  # trigger를 붙이면 rc=0이었다 (실측: sessions의 추가 BEFORE trigger로 삭제
+  # 사용자 연결 성공). (6) ACL 검증이 정의자 직접 grant만 봐서 PUBLIC UPDATE,
+  # app role의 users DELETE, 정의자-UPDATE-회수+PUBLIC-UPDATE 조합이 전부
+  # rc=0이었다. 이제 내부 trigger를 제외한 전체 trigger 목록이 허용 집합과
+  # 정확히 일치하고, PUBLIC 권한 0·금지 파괴 권한·runtime role의 실효 권한을
+  # 검증한다.
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (a) sessions에 계약 밖 BEFORE trigger 추가 → 허용 집합 위반
+  _psql "create function db52_noop() returns trigger language plpgsql as \$f\$ begin return new; end \$f\$"
+  _psql "create trigger trg_extra_bypass before insert on sessions for each row execute function db52_noop()"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"계약 밖 트리거"* ]]
+  [[ "$output" == *"sessions.trg_extra_bypass"* ]]
+  _psql "drop trigger trg_extra_bypass on sessions; drop function db52_noop()"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (b) PUBLIC 테이블 grant → PUBLIC 권한 0 위반
+  _psql "grant update on users to public"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"PUBLIC에 보호 테이블 권한"* ]]
+  _psql "revoke update on users from public"
+  # (b-2) PUBLIC "컬럼" grant도 위반 (attacl까지 검사)
+  _psql "grant update (deleted_at) on users to public"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"users.deleted_at"* ]]
+  _psql "revoke update (deleted_at) on users from public"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (c) 임의 role에 users DELETE → 금지 파괴 권한 (진입점 우회 hard-delete)
+  _psql "drop role if exists db52_app" || true
+  _psql "create role db52_app nologin"
+  _psql "grant delete on users to db52_app"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"금지된 파괴 권한"* ]]
+  [[ "$output" == *"users:DELETE"* ]]
+  _psql "revoke delete on users from db52_app"
+  # (c-2) 보호 테이블 TRUNCATE는 어떤 grantee에게도 금지
+  _psql "grant truncate on events to db52_app"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"events:TRUNCATE"* ]]
+  _psql "revoke truncate on events from db52_app"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (d) 정의자 UPDATE 회수 + PUBLIC UPDATE — has_table_privilege(실효)로는
+  # 통과하던 조합 → "직접" grant 부재로 거부
+  _psql "revoke update on users from shaman_softdelete"
+  _psql "grant update on users to public"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"직접"* ]]
+  [[ "$output" == *"UPDATE ON users"* ]]
+  _psql "revoke update on users from public"
+  _psql "grant update on users to shaman_softdelete"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (e) 직접 grant 흔적 없는 실효 경로 — runtime role을 table owner(postgres)의
+  # member로 만들면 relacl에 흔적 없이 DELETE가 실효로 열린다. 직접-grant 검사
+  # (c)로는 보이지 않는다. @self(superuser)는 검사 제외이므로 명시 role 모드로
+  # 검증한다. 13라운드 P1(#4) 이후에는 더 강한 검사가 먼저 잡는다 — 소유자
+  # role membership은 상속(INHERIT) 여부와 무관하게 SET ROLE 경로이므로 실효
+  # 권한 계산 이전에 membership 자체가 거부된다 (NOINHERIT 우회까지 차단;
+  # DB55 참조).
+  _psql "grant usage on schema public to db52_app"
+  _psql "grant execute on function app_soft_delete_user(bigint) to db52_app"
+  _psql "revoke execute on function app_soft_delete_user(bigint) from postgres"
+  _psql "grant postgres to db52_app"
+  run env MIGRATION_APP_ROLES=db52_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  # 15라운드 이후에는 preflight가 SET 가능 membership을 배포 전에 먼저 잡는다
+  [[ "$output" == *"경로를 가집니다"* ]]
+  _psql "revoke postgres from db52_app"
+  run env MIGRATION_APP_ROLES=db52_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  # 원상 복구 (@self)
+  _psql "revoke execute on function app_soft_delete_user(bigint) from db52_app"
+  _psql "revoke usage on schema public from db52_app"
+  _psql "drop role db52_app"
+  _psql "grant execute on function app_soft_delete_user(bigint) to postgres"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up-to-date"* ]]
+}
+
+@test "DB53: protected-table owner identity and RLS drift are part of the deployment identity - owner transfer, RLS enable/force, and policies are all refused" {
+  # 13라운드 P1(#4·#6): (4) purchases 소유자를 다른 role로 이전해도 rc=0이었다 —
+  # 소유자는 ACL과 무관하게 전권이다. (6) users에 RLS를 켜면 SECURITY DEFINER
+  # 진입점의 UPDATE가 조용히 필터링되어 app_soft_delete_user()가 false를 반환하고
+  # 상태가 안 바뀌는데도 runner는 rc=0이었다 (전부 실측, PG16). 이제 6개 보호
+  # 테이블의 relowner는 ledger(schema_migrations) 소유자와 같아야 하고, RLS
+  # 플래그·policy는 존재 자체가 거부된다.
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (a) purchases 소유자 이전 → identity 위반
+  _psql "drop role if exists db53_owner" || true
+  _psql "create role db53_owner nologin"
+  _psql "alter table purchases owner to db53_owner"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"소유자가 배포 identity"* ]]
+  [[ "$output" == *"purchases=db53_owner"* ]]
+  _psql "alter table purchases owner to postgres"
+  _psql "drop role db53_owner"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (b) users RLS 활성화 → 거부 (진입점 no-op 경로)
+  _psql "alter table users enable row level security"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"users:rls-enabled"* ]]
+  _psql "alter table users disable row level security"
+  # (b-2) FORCE만 켜도 거부 (소유자 우회 경로까지 잠근다)
+  _psql "alter table events force row level security"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"events:rls-forced"* ]]
+  _psql "alter table events no force row level security"
+  # (b-3) RLS 비활성이어도 policy가 있으면 거부 (켜지는 순간 발효되는 잠복 drift)
+  _psql "create policy db53_p on users using (true)"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"users:policy=db53_p"* ]]
+  _psql "drop policy db53_p on users"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up-to-date"* ]]
+}
+
+@test "DB54: the exact ACL contract includes aclexplode.is_grantable - WITH GRANT OPTION on the entrypoint or protected tables is refused" {
+  # 13라운드 P1(#5): grantee 이름만 비교해 runtime role의 EXECUTE WITH GRANT
+  # OPTION이 rc=0으로 승인됐다 (실측) — 재부여 권한은 검증 창 밖에서 새 grant를
+  # 만들 수 있어 정확-집합 계약을 무의미하게 한다. 진입점 EXECUTE·정의자 직접
+  # grant·제3 role의 테이블 grant 전부에서 is_grantable을 대조한다.
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (a) 진입점 EXECUTE WITH GRANT OPTION (@self의 허용 grantee라도) → 거부
+  _psql "grant execute on function app_soft_delete_user(bigint) to postgres with grant option"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"EXECUTE가 WITH GRANT OPTION"* ]]
+  _psql "revoke grant option for execute on function app_soft_delete_user(bigint) from postgres"
+  _psql "grant execute on function app_soft_delete_user(bigint) to postgres"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (b) 정의자의 허용 권한이라도 WITH GRANT OPTION이면 정확-집합 위반
+  _psql "grant update on users to shaman_softdelete with grant option"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"WITH GRANT OPTION"* ]]
+  _psql "revoke grant option for update on users from shaman_softdelete"
+  _psql "grant update on users to shaman_softdelete"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (c) 제3 role의 테이블 grant도 GRANT OPTION이면 거부 (금지 priv가 아니어도)
+  _psql "drop role if exists db54_r" || true
+  _psql "create role db54_r nologin"
+  _psql "grant select on users to db54_r with grant option"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"users:SELECT=db54_r"* ]]
+  _psql "revoke select on users from db54_r"
+  _psql "drop role db54_r"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up-to-date"* ]]
+}
+
+@test "DB55: explicit runtime role escalation paths - SUPERUSER attribute, protected-table ownership, and NOINHERIT membership in the owner role are all refused" {
+  # 13라운드 P1(#4): 명시 runtime role이 (a) SUPERUSER거나 (b) 보호 테이블
+  # 소유자거나 (c) NOINHERIT로 소유자 role의 member면 — 셋 다 직접·실효 ACL
+  # 검사에 잡히지 않은 채 hard-delete가 가능한데 rc=0이었다 (실측: NOINHERIT
+  # member는 has_table_privilege가 false지만 SET ROLE로 소유자 전권을 얻는다).
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "drop role if exists db55_app" || true
+  _psql "create role db55_app nologin"
+  _psql "grant usage on schema public to db55_app"
+  _psql "grant execute on function app_soft_delete_user(bigint) to db55_app"
+  _psql "revoke execute on function app_soft_delete_user(bigint) from postgres"
+  run env MIGRATION_APP_ROLES=db55_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (a) SUPERUSER 속성 → 거부 (ACL·RLS 전부 우회)
+  _psql "alter role db55_app superuser"
+  run env MIGRATION_APP_ROLES=db55_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"SUPERUSER"* ]]
+  _psql "alter role db55_app nosuperuser"
+  run env MIGRATION_APP_ROLES=db55_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (b) NOINHERIT여도 소유자 role membership은 SET ROLE 경로 → 거부
+  # (15라운드 이후 preflight가 배포 전에 먼저 잡는다 — PG16 'SET' 판정)
+  _psql "alter role db55_app noinherit"
+  _psql "grant postgres to db55_app"
+  run env MIGRATION_APP_ROLES=db55_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"경로를 가집니다"* ]]
+  _psql "revoke postgres from db55_app"
+  _psql "alter role db55_app inherit"
+  run env MIGRATION_APP_ROLES=db55_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (b-2) 14라운드 P2: 판정 기준은 "실제 SET ROLE 가능성"(pg_has_role 'SET') —
+  # PG16의 GRANT ... SET FALSE, INHERIT FALSE membership은 전환도 상속도 불가라
+  # 계약을 깨지 않으므로 허용된다 (종전 MEMBER 판정은 이를 오진).
+  _psql "grant postgres to db55_app with set false, inherit false"
+  run env MIGRATION_APP_ROLES=db55_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  # (b-3) SET FALSE라도 INHERIT TRUE면 소유자 권한이 상속된다 — 16라운드
+  # 이후에는 preflight가 배포 "전"에 [INHERIT] 경로로 먼저 거부한다
+  _psql "revoke postgres from db55_app"
+  _psql "grant postgres to db55_app with set false, inherit true"
+  run env MIGRATION_APP_ROLES=db55_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"경로를 가집니다"* ]]
+  [[ "$output" == *"INHERIT"* ]]
+  _psql "revoke postgres from db55_app"
+  run env MIGRATION_APP_ROLES=db55_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+
+  # (c) runtime role의 보호 테이블 소유 → 거부 (identity 검사가 먼저 잡는다)
+  _psql "alter table purchases owner to db55_app"
+  run env MIGRATION_APP_ROLES=db55_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"purchases=db55_app"* ]]
+  _psql "alter table purchases owner to postgres"
+  run env MIGRATION_APP_ROLES=db55_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  # 원상 복구 (@self)
+  _psql "revoke execute on function app_soft_delete_user(bigint) from db55_app"
+  _psql "revoke usage on schema public from db55_app"
+  _psql "drop role db55_app"
+  _psql "grant execute on function app_soft_delete_user(bigint) to postgres"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up-to-date"* ]]
+}
+
+@test "DB56: column-level WITH GRANT OPTION on a protected table is refused (attacl is part of the exact ACL contract)" {
+  # 14라운드 P1(#4): is_grantable 전수 검사가 테이블 relacl만 봐서 "컬럼" 단위
+  # grant option이 rc=0/up-to-date였다 (실측, PG16) — 컬럼 재부여 권한도 검증
+  # 창 밖에서 새 grant를 만들 수 있다. attacl의 is_grantable까지 대조한다.
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "drop role if exists db56_r" || true
+  _psql "create role db56_r nologin"
+  _psql "grant update (deleted_at) on users to db56_r with grant option"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"WITH GRANT OPTION"* ]]
+  [[ "$output" == *"users.deleted_at:UPDATE=db56_r"* ]]
+  _psql "revoke update (deleted_at) on users from db56_r"
+  _psql "drop role db56_r"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up-to-date"* ]]
+}
+
+@test "DB57: inheritance topology is part of the deployment identity - a child of users or a parent over purchases is refused" {
+  # 14라운드 P1(#5): users의 상속 child를 추가해도 rc=0이었지만, child 행에는
+  # parent의 계약 trigger가 상속되지 않아 그 행의 soft-delete가 계약 밖에서
+  # 실패한다 (실측: CHECK 오류). pg_inherits에 보호 테이블이 부모/자식 어느
+  # 쪽으로든 나타나면 거부한다.
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  # (a) users의 상속 child
+  _psql "create table users_child_57 () inherits (users)"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"상속 관계"* ]]
+  [[ "$output" == *"users:child=users_child_57"* ]]
+  _psql "drop table users_child_57"
+  # (b) purchases가 남의 child가 되는 경우
+  _psql "create table p57 ()"
+  _psql "alter table purchases inherit p57"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"purchases:parent=p57"* ]]
+  _psql "alter table purchases no inherit p57"
+  _psql "drop table p57"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up-to-date"* ]]
+}
+
+@test "DB58: owner identity is anchored to the migration identity - a coordinated mass owner transfer is refused unless explicitly pinned via MIGRATION_OWNER" {
+  # 14라운드 P1(#6): 종전 owner 검사는 가변 객체끼리의 상대 비교(테이블 == ledger)
+  # 라 ledger·보호 테이블·helper를 같은 신규 role로 "일괄" 이전하면 rc=0이었다
+  # (실측). 계약을 명시한다: 배포 소유자 = migration 실행 role, 다른 소유자는
+  # MIGRATION_OWNER로 명시 pin해야만 허용된다 (절대 anchor).
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "drop role if exists db58_o" || true
+  _psql "create role db58_o nologin"
+  _psql "alter table schema_migrations owner to db58_o"
+  _psql "alter table users owner to db58_o; alter table sessions owner to db58_o; alter table streaks owner to db58_o; alter table user_fortunes owner to db58_o; alter table events owner to db58_o; alter table purchases owner to db58_o"
+  _psql "alter function users_scrub_on_delete() owner to db58_o; alter function reject_rows_for_deleted_user() owner to db58_o; alter function sessions_guard() owner to db58_o; alter function events_guard() owner to db58_o; alter function events_scrub_marker_immutable() owner to db58_o; alter function purchases_user_id_immutable() owner to db58_o"
+  # (a) 기본 anchor(실행 role=postgres)가 일괄 이전을 거부한다
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"ledger(schema_migrations) 소유자가 배포 identity와 다릅니다"* ]]
+  # (b) 정당한 소유자 변경은 MIGRATION_OWNER로 명시 승인해야만 통과한다
+  run env MIGRATION_APP_ROLES=@self MIGRATION_OWNER=db58_o ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  # (c) 원복 후 기본 anchor로 다시 rc=0
+  _psql "alter table schema_migrations owner to postgres"
+  _psql "alter table users owner to postgres; alter table sessions owner to postgres; alter table streaks owner to postgres; alter table user_fortunes owner to postgres; alter table events owner to postgres; alter table purchases owner to postgres"
+  _psql "alter function users_scrub_on_delete() owner to postgres; alter function reject_rows_for_deleted_user() owner to postgres; alter function sessions_guard() owner to postgres; alter function events_guard() owner to postgres; alter function events_scrub_marker_immutable() owner to postgres; alter function purchases_user_id_immutable() owner to postgres"
+  _psql "drop role db58_o"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up-to-date"* ]]
+}
+
+@test "DB59: explicit runtime roles are preflighted BEFORE any apply - a superuser or missing role leaves a fresh DB undeployed (atomicity)" {
+  # 14라운드 P2: 종전에는 fresh DB에서 잘못된 named role(예: SUPERUSER)로도 005와
+  # ledger 기록이 먼저 commit된 뒤 사후 검사에서야 rc=1이었다 — 비원자 배포 상태가
+  # 남았다. 이제 apply 루프 "이전" preflight가 role 존재·SUPERUSER를 거부한다.
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "drop role if exists db59_su" >/dev/null
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "create role db59_su superuser nologin" >/dev/null
+  # (a) SUPERUSER named role — fresh DB에 아무 migration도 적용되지 않는다
+  run env MIGRATION_APP_ROLES=db59_su ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"preflight"* ]]
+  [[ "$output" == *"SUPERUSER"* ]]
+  # 15라운드 P2: preflight가 bootstrap보다 앞이므로 빈 ledger 테이블조차 남지 않는다
+  [ "$(_psql "select coalesce(to_regclass('schema_migrations')::text, 'ABSENT')")" = "ABSENT" ]
+  [ "$(_psql "select count(*) from information_schema.tables where table_schema='public' and table_name='users'")" = "0" ]
+  # (b) 존재하지 않는 role — 동일하게 배포 전 거부
+  run env MIGRATION_APP_ROLES=db59_missing ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"preflight"* ]]
+  [[ "$output" == *"존재하지 않습니다"* ]]
+  [ "$(_psql "select count(*) from information_schema.tables where table_schema='public' and table_name='users'")" = "0" ]
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "drop role db59_su" >/dev/null
+  # (c) 정상 role이면 같은 fresh DB에 그대로 배포된다
+  _psql "drop role if exists db59_app" || true
+  _psql "create role db59_app nologin"
+  run env MIGRATION_APP_ROLES=db59_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "drop owned by db59_app" || true
+  _psql "drop role db59_app" || true
+}
+
+@test "DB60: MIGRATION_OWNER is confirmed in preflight - syntax, existence, and applicability are settled before bootstrap/apply (fresh deploy atomicity)" {
+  # 15라운드 P1(#2): owner pin 검증이 사후라 fresh 배포에서 001~005와 ledger
+  # 5행이 먼저 commit된 뒤에야 rc=1/2였다 (실측 — 비원자 배포 상태). 이제
+  # preflight가 문법(rc=2)·존재·적용 방식(runner는 소유자 이전을 하지 않으므로
+  # pending + 다른 owner pin은 거부)을 bootstrap 전에 확정한다.
+  _psql "drop role if exists db60_o" || true
+  _psql "create role db60_o nologin"
+  # (a) fresh + 존재하는 다른 owner pin → 아무것도 만들기 전에 거부
+  run env MIGRATION_APP_ROLES=@self MIGRATION_OWNER=db60_o ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"preflight"* ]]
+  [[ "$output" == *"실행 role"* ]]
+  [ "$(_psql "select coalesce(to_regclass('schema_migrations')::text, 'ABSENT')")" = "ABSENT" ]
+  # (b) 잘못된 문법 → rc=2, 역시 배포 전
+  run env MIGRATION_APP_ROLES=@self MIGRATION_OWNER='bad-name;' ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"유효한 식별자가 아닙니다"* ]]
+  # (c) 존재하지 않는 owner → rc=1, 배포 전
+  run env MIGRATION_APP_ROLES=@self MIGRATION_OWNER=db60_missing ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"존재하지 않습니다"* ]]
+  [ "$(_psql "select coalesce(to_regclass('schema_migrations')::text, 'ABSENT')")" = "ABSENT" ]
+  # (d) 정상 fresh 배포 후, 소유자 이전 + pin 승인(pending 없음)은 preflight를 통과한다
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "alter table schema_migrations owner to db60_o"
+  _psql "alter table users owner to db60_o; alter table sessions owner to db60_o; alter table streaks owner to db60_o; alter table user_fortunes owner to db60_o; alter table events owner to db60_o; alter table purchases owner to db60_o"
+  _psql "alter function users_scrub_on_delete() owner to db60_o; alter function reject_rows_for_deleted_user() owner to db60_o; alter function sessions_guard() owner to db60_o; alter function events_guard() owner to db60_o; alter function events_scrub_marker_immutable() owner to db60_o; alter function purchases_user_id_immutable() owner to db60_o"
+  run env MIGRATION_APP_ROLES=@self MIGRATION_OWNER=db60_o ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up-to-date"* ]]
+  # 원복
+  _psql "alter table schema_migrations owner to postgres"
+  _psql "alter table users owner to postgres; alter table sessions owner to postgres; alter table streaks owner to postgres; alter table user_fortunes owner to postgres; alter table events owner to postgres; alter table purchases owner to postgres"
+  _psql "alter function users_scrub_on_delete() owner to postgres; alter function reject_rows_for_deleted_user() owner to postgres; alter function sessions_guard() owner to postgres; alter function events_guard() owner to postgres; alter function events_scrub_marker_immutable() owner to postgres; alter function purchases_user_id_immutable() owner to postgres"
+  _psql "drop role db60_o"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+}
+
+@test "DB61: a named runtime role that can SET ROLE into the deploy owner is refused in preflight - nothing is deployed (PG16 SET semantics)" {
+  # 15라운드 P1(#3): 종전에는 이 role로 001~005가 전부 commit된 뒤에야 사후
+  # 검사에서 거부됐다 (실측). preflight가 pg_has_role(..., 'SET')으로 배포
+  # "전"에 거부하고, SET FALSE membership은 실제 전환이 불가능하므로 통과한다.
+  _psql "drop role if exists db61_app" || true
+  _psql "create role db61_app nologin"
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "grant postgres to db61_app" >/dev/null
+  run env MIGRATION_APP_ROLES=db61_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"preflight"* ]]
+  [[ "$output" == *"경로를 가집니다"* ]]
+  [ "$(_psql "select coalesce(to_regclass('schema_migrations')::text, 'ABSENT')")" = "ABSENT" ]
+  [ "$(_psql "select count(*) from information_schema.tables where table_schema='public' and table_name='users'")" = "0" ]
+  # SET FALSE, INHERIT FALSE membership은 계약을 깨지 않는다 — 그대로 배포된다
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "revoke postgres from db61_app; grant postgres to db61_app with set false, inherit false" >/dev/null
+  run env MIGRATION_APP_ROLES=db61_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "revoke postgres from db61_app" >/dev/null
+  run env MIGRATION_APP_ROLES=db61_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "revoke execute on function app_soft_delete_user(bigint) from db61_app" || true
+  _psql "revoke usage on schema public from db61_app" || true
+  _psql "drop role db61_app" || true
+}
+
+@test "DB62: definer-role membership judgments follow PG16 option semantics - all-FALSE memberships are allowed, any of SET/INHERIT/ADMIN is refused" {
+  # 15라운드 P2: 종전 (f)·005는 "모든" membership을 거부해 PG16의 GRANT ...
+  # SET FALSE, INHERIT FALSE(어느 능력도 없는 membership)를 오진했다. 코드·005·
+  # ADR을 실제 SET/INHERIT/ADMIN 의미로 통일한다.
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  _psql "drop role if exists db62_m" || true
+  _psql "create role db62_m nologin"
+  # (a) 전 옵션 FALSE member — 허용
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "grant shaman_softdelete to db62_m with set false, inherit false, admin false" >/dev/null
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  # (b) SET TRUE member — 거부
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "revoke shaman_softdelete from db62_m; grant shaman_softdelete to db62_m with set true, inherit false" >/dev/null
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"허용되지 않은 member"* ]]
+  # (b-2) 16라운드 P2: ADMIN TRUE member(SET/INHERIT FALSE)도 거부 — 재부여 능력은
+  # 다른 login에 SET 가능 membership을 찍어 우회 escalation한다
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "revoke shaman_softdelete from db62_m; grant shaman_softdelete to db62_m with set false, inherit false, admin true" >/dev/null
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"허용되지 않은 member"* ]]
+  # (b-3) INHERIT TRUE member(SET/ADMIN FALSE)도 거부
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "revoke shaman_softdelete from db62_m; grant shaman_softdelete to db62_m with set false, inherit true, admin false" >/dev/null
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"허용되지 않은 member"* ]]
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "revoke shaman_softdelete from db62_m" >/dev/null
+  # (c) 상위 membership도 같은 기준 — 전 옵션 FALSE는 허용, INHERIT TRUE는 거부
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "grant db62_m to shaman_softdelete with set false, inherit false, admin false" >/dev/null
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "revoke db62_m from shaman_softdelete; grant db62_m to shaman_softdelete with set false, inherit true" >/dev/null
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"상위 role"* ]]
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "revoke db62_m from shaman_softdelete" >/dev/null
+  _psql "drop role db62_m"
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"up-to-date"* ]]
+}
+
+@test "DB63: a named runtime role with SET/INHERIT/ADMIN into the deploy owner is refused in preflight - not just SET (PG16 semantics)" {
+  # 16라운드 P1(#1·#2): 15라운드 preflight는 SET만 봐서 INHERIT TRUE(사후 실효
+  # 검사에서야 rc=1)와 ADMIN TRUE(최종까지 rc=0)를 놓쳤다 (실측, PG16). 이제
+  # SET·INHERIT(USAGE)·ADMIN(MEMBER WITH ADMIN OPTION) 세 경로를 배포 "전"에
+  # 검사한다.
+  _psql "drop role if exists db63_app" || true
+  _psql "create role db63_app nologin"
+  # (a) INHERIT TRUE (SET/ADMIN FALSE) → preflight 거부, 아무것도 배포 안 됨
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "grant postgres to db63_app with set false, inherit true, admin false" >/dev/null
+  run env MIGRATION_APP_ROLES=db63_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"preflight"* ]]
+  [[ "$output" == *"INHERIT"* ]]
+  [ "$(_psql "select coalesce(to_regclass('schema_migrations')::text, 'ABSENT')")" = "ABSENT" ]
+  # (b) ADMIN TRUE (SET/INHERIT FALSE) → preflight 거부
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "revoke postgres from db63_app; grant postgres to db63_app with set false, inherit false, admin true" >/dev/null
+  run env MIGRATION_APP_ROLES=db63_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"preflight"* ]]
+  [[ "$output" == *"ADMIN"* ]]
+  [ "$(_psql "select coalesce(to_regclass('schema_migrations')::text, 'ABSENT')")" = "ABSENT" ]
+  # (c) 전 옵션 FALSE → 통과, 배포
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "revoke postgres from db63_app; grant postgres to db63_app with set false, inherit false, admin false" >/dev/null
+  run env MIGRATION_APP_ROLES=db63_app ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc "revoke postgres from db63_app" >/dev/null
+  _psql "drop owned by db63_app" || true
+  _psql "drop role db63_app" || true
+}
+
+@test "DB64: applying a pending migration to a partially-deployed DB owned by another role is refused before apply (ledger-owner anchor)" {
+  # 16라운드 P1(#3): 15라운드 pending 가드는 explicit MIGRATION_OWNER만 봤다 —
+  # 기존 ledger 소유자는 읽지 않아, Owner A의 001~004 배포에 runner B(@self)가
+  # 005를 적용하면 preflight 통과 후 005가 commit되고 ledger 4→5가 된 뒤에야
+  # 사후 mismatch였다 (실측). 이제 기존 ledger 소유자를 배포 소유자 anchor로
+  # 결속하고, 실행 role이 그와 다르면 pending 적용 "전"에 거부한다.
+  _psql "drop role if exists db64_owner" || true
+  _psql "create role db64_owner nologin"
+  # 001~004까지 배포된 상태를 재현하고 ledger 소유자를 A(db64_owner)로 만든다
+  _deploy_upto 001_init 002_schema_contract_fixes 003_soft_delete_invariant 004_soft_delete_contract
+  _psql "alter table schema_migrations owner to db64_owner"
+  [ "$(_psql "select r.rolname from pg_class c join pg_roles r on r.oid=c.relowner where c.relname='schema_migrations'")" = "db64_owner" ]
+  [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
+  # runner B(@self = postgres)가 005를 적용하려 하면 배포 전에 거부된다
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"preflight"* ]]
+  [[ "$output" == *"기존 ledger 소유자"* ]]
+  # 005는 적용되지 않았다 — ledger는 그대로 4행
+  [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
+  # MIGRATION_OWNER=db64_owner로 pin해도 실행 role(postgres)≠소유자이므로 여전히 거부
+  run env MIGRATION_APP_ROLES=@self MIGRATION_OWNER=db64_owner ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"preflight"* ]]
+  [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
+  _psql "alter table schema_migrations owner to postgres"
+  _psql "drop role db64_owner" || true
+}
+
 @test "DB46: TERM during the last --status query is not lost as rc=0" {
   # 7라운드 P1(#5): 마지막 status 조회의 자손 정리 중 기록된 신호가 최종 검사
   # 없이 exit 0으로 유실됐다 (실측: rc=0 + applied 5). 종료 직전 _mig_check_sig가
@@ -1439,4 +2277,117 @@ SHIM
   wait "$rpid" || rc=$?
   [ "$rc" -eq 143 ]
   [ -z "$(ls "$TROOT/tmp"/dbmig* 2>/dev/null || true)" ]
+}
+
+@test "DB65: a MIGRATION_OWNER pin that disagrees with the existing ledger owner is refused before apply - a pin approves, never reassigns (atomicity)" {
+  # 재재리뷰 P1(#1): 기존 ledger 소유자 A가 있는데 그와 다른 pin(=실행 role B)을
+  # 주면, 종전에는 pin이 anchor를 무조건 이겨(_mig_expected_owner=pin) 기존 소유자
+  # A를 가린 채 실행 role B로 005를 적용하고 ledger가 4→5가 된 뒤에야 사후 anchor
+  # 검사에서 rc=1이었다 (실측). pin은 소유자를 재지정하지 않는다 — 기존 ledger
+  # 소유자와 다른 pin은 배포 "전"에 거부한다.
+  _psql "drop role if exists db65_a" || true
+  _psql "create role db65_a nologin"
+  _deploy_upto 001_init 002_schema_contract_fixes 003_soft_delete_invariant 004_soft_delete_contract
+  _psql "alter table schema_migrations owner to db65_a"
+  [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
+  # 실행 role(postgres)로 pin해도 기존 ledger 소유자(db65_a)와 다르므로 거부된다
+  run env MIGRATION_APP_ROLES=@self MIGRATION_OWNER=postgres ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"preflight"* ]]
+  [[ "$output" == *"기존 ledger 소유자"* ]]
+  # 005는 적용되지 않았다 — ledger 그대로 4행
+  [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
+  _psql "alter table schema_migrations owner to postgres"
+  _psql "drop role db65_a" || true
+}
+
+@test "DB66: protected-object owner drift is refused before apply even when the ledger owner is consistent (full pre-apply owner identity)" {
+  # 재재리뷰 P1(#2): 배포 소유자 anchor는 ledger(schema_migrations) 소유자만 봐서,
+  # 보호 테이블·helper 소유자 drift(예: events가 다른 role 소유)는 apply 후
+  # _mig_verify_acl에서야 잡혀 005가 commit되고 ledger가 4→5가 된 뒤 rc=1이었다
+  # (실측). 이제 pending 적용 "전"에 보호 테이블·helper 소유자 전체를 확인한다.
+  _psql "drop role if exists db66_b" || true
+  _psql "create role db66_b nologin"
+  _deploy_upto 001_init 002_schema_contract_fixes 003_soft_delete_invariant 004_soft_delete_contract
+  # ledger 소유자는 그대로 postgres(정합), 보호 테이블 events만 다른 role로 drift
+  _psql "alter table events owner to db66_b"
+  [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"preflight"* ]]
+  [[ "$output" == *"보호 객체 소유자"* ]]
+  [[ "$output" == *"events=db66_b"* ]]
+  # 005 미적용 — ledger 4행
+  [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
+  _psql "alter table events owner to postgres"
+  _psql "drop role db66_b" || true
+}
+
+@test "DB67: an owner swap in the apply window (after preflight) is caught inside the advisory transaction - 005 rolls back, ledger unchanged (TOCTOU)" {
+  # 재재리뷰 P1(#3): preflight의 owner 검사는 advisory lock "밖"에서 수행되므로,
+  # preflight 직후~apply 트랜잭션 사이에 소유자가 바뀌면 종전에는 005가 그대로
+  # commit됐다 (실측: apply 창에서 events 소유자 교체 시 ledger 4→5). 배포 소유자
+  # guard 전체를 advisory 트랜잭션 안에서 EXECUTE 직전 재검증하므로, drift가 있으면
+  # 트랜잭션 전체가 rollback되어 ledger가 늘지 않는다.
+  _psql "drop role if exists db67_b" || true
+  _psql "create role db67_b nologin"
+  _deploy_upto 001_init 002_schema_contract_fixes 003_soft_delete_invariant 004_soft_delete_contract
+  [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
+  # shim: apply(-f 래퍼) 호출 "직전"에 events 소유자를 한 번 바꾼다 — preflight
+  # 조회(-tAc)는 정상 소유자를 봤고, apply 트랜잭션만 drift 상태를 만난다.
+  mkdir -p "$PGT/stbin_${BATS_TEST_NUMBER}"
+  cat > "$PGT/stbin_${BATS_TEST_NUMBER}/psql" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  if [ "\$a" = "-f" ] && [ ! -e "$PGT/stbin_${BATS_TEST_NUMBER}/.fired" ]; then
+    : > "$PGT/stbin_${BATS_TEST_NUMBER}/.fired"
+    "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" -tAc "alter table events owner to db67_b" >/dev/null 2>&1 || true
+  fi
+done
+exec "$PGBIN/psql" "\$@"
+SHIM
+  chmod +x "$PGT/stbin_${BATS_TEST_NUMBER}/psql"
+  run env PATH="$PGT/stbin_${BATS_TEST_NUMBER}:$PATH" MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"deploy owner guard"* ]]
+  # 트랜잭션 rollback — ledger는 그대로 4행 (005 미기록)
+  [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
+  _psql "alter table events owner to postgres" || true
+  _psql "drop role db67_b" || true
+}
+
+@test "DB68: an owner swap after preflight is serialized by transaction-held object locks - ledger stays unchanged" {
+  # DB67은 wrapper 시작 전에 owner를 바꾼다. 이 테스트는 외부 transaction이 005의
+  # 첫 대상(events)을 이미 잠근 상태에서 runner를 시작한다: catalog guard만 있으면
+  # guard가 통과한 뒤 EXECUTE가 lock 대기하고, 외부 session이 owner를 바꾼 후 005가
+  # commit됐다. runner가 object lock을 guard보다 먼저 확보하면 외부 commit 뒤 새
+  # owner를 관측해 EXECUTE 전에 rollback한다.
+  _psql "drop role if exists db68_b" || true
+  _psql "create role db68_b nologin"
+  _deploy_upto 001_init 002_schema_contract_fixes 003_soft_delete_invariant 004_soft_delete_contract
+  [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
+
+  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" \
+    >"$PGT/db68-locker.log" 2>&1 <<SQL &
+BEGIN;
+LOCK TABLE events IN ACCESS EXCLUSIVE MODE;
+SELECT 'locked';
+SELECT pg_sleep(5);
+ALTER TABLE events OWNER TO db68_b;
+COMMIT;
+SQL
+  local locker=$! i=0
+  while [ "$i" -lt 100 ]; do
+    grep -q locked "$PGT/db68-locker.log" 2>/dev/null && break
+    sleep 0.1; i=$((i+1))
+  done
+  grep -q locked "$PGT/db68-locker.log"
+
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  wait "$locker"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"deploy owner guard(table)"* ]]
+  [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
+  _psql "alter table events owner to postgres" || true
+  _psql "drop role db68_b" || true
 }
