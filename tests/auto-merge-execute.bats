@@ -391,7 +391,11 @@ MOCK
 
   [ "$status" -eq 1 ]
   [[ "$output" == *"git merge failed"* ]]
-  [[ "$output" == *"rollback"* ]]
+  # 8라운드(이식성): 'rollback' substring은 플랫폼 git의 conflict hint에 의존해
+  # Linux(git 2.43)에서 출력에 존재하지 않았다 — 스크립트 자신의 계약 문구
+  # ("aborted")로 판정한다. 실제 rollback 성립은 아래 base SHA 복원·clean·
+  # ROLLED_BACK 감사 검증이 더 강하게 보장한다.
+  [[ "$output" == *"aborted"* ]]
 
   local after_sha
   after_sha="$(git -C "$d" rev-parse HEAD)"
@@ -583,7 +587,12 @@ EOF
   local d="$TEST_HOME/repo"
   mkdir -p "$d"
   make_repo "$d" 1 docs
+  # 9~10라운드: live lock은 사전 구성 rename으로 항상 pid+token을 담고 존재하고,
+  # 빈 dir·token-only 잔재는 안전 회수 대상이 됐다 — 동시 실행 fixture는 실제처럼
+  # "살아 있는 pid"를 담은 lock이어야 한다.
   mkdir -p "$TEST_HOME/state/auto_merge.lock.d"
+  echo "$$" > "$TEST_HOME/state/auto_merge.lock.d/pid"
+  printf 'foreign' > "$TEST_HOME/state/auto_merge.lock.d/token"
 
   local base_sha
   base_sha="$(git -C "$d" rev-parse HEAD)"
@@ -1429,7 +1438,11 @@ MOCK
   mkdir -p "$d/state/ticket_write.lock.d"
   echo "$fpid" > "$d/state/ticket_write.lock.d/pid"
   local ino_before gap_pid
-  ino_before="$(stat -f '%i' "$d/state/ticket_write.lock.d/pid" 2>/dev/null || stat -c '%i' "$d/state/ticket_write.lock.d/pid")"
+  # 8라운드(이식성): GNU stat은 -f를 '파일시스템 모드'로 해석해 '%i'를 파일명으로
+  # 취급한다 — rc≠0인데 stdout에는 fs 정보가 섞여 fallback과 합쳐진 값이 free-block
+  # drift로 매번 달라졌다 (Linux 위양성 실패). -c(GNU)를 먼저, -f(BSD/macOS)를
+  # fallback으로 — auto_merge의 _dev_of와 같은 순서.
+  ino_before="$(stat -c '%i' "$d/state/ticket_write.lock.d/pid" 2>/dev/null || stat -f '%i' "$d/state/ticket_write.lock.d/pid")"
   # 관찰자: canonical lock이 한순간이라도 사라지면 GAP 기록
   ( while :; do [ -d "$d/state/ticket_write.lock.d" ] || echo GAP >> "$TEST_HOME/fw.gaps"; sleep 0.01; done ) &
   gap_pid=$!
@@ -1449,7 +1462,7 @@ MOCK
   [ ! -f "$TEST_HOME/fw.gaps" ]
   # foreign lock은 내용·inode 그대로 — 들어냈다 되돌린 것도 아니다
   [ "$(cat "$d/state/ticket_write.lock.d/pid")" = "$fpid" ]
-  [ "$(stat -f '%i' "$d/state/ticket_write.lock.d/pid" 2>/dev/null || stat -c '%i' "$d/state/ticket_write.lock.d/pid")" = "$ino_before" ]
+  [ "$(stat -c '%i' "$d/state/ticket_write.lock.d/pid" 2>/dev/null || stat -f '%i' "$d/state/ticket_write.lock.d/pid")" = "$ino_before" ]
   # 들어낸 흔적(.rel/.acq)이 없다
   [ -z "$(ls -d "$d/state/ticket_write.lock.d.rel."* "$d/state/ticket_write.lock.d.acq."* 2>/dev/null || true)" ]
   # writer lock을 못 잡으므로 복원은 포기 — 잔상 보존(REF_ONLY)
@@ -1856,4 +1869,855 @@ MOCK
   [ -n "$sidep" ]
   [ -f "$sidep" ]
   grep -q "B-CONCURRENT" "$sidep"
+}
+
+# 8라운드 P1(#2): stranded 기록은 fail-open이 아니다 — intent append/fsync가
+# 실패하면 side와 같은 소유 디렉터리에 sidecar 마커를 남긴다 (결정적 복구 매핑
+# 유지). 종전에는 실패가 전부 무시돼 side 파일만 남고 매핑이 사라졌다 (실측).
+@test "execute: stranded record falls back to a sidecar marker when the intent is unwritable (fail-closed record)" {
+  [ "$(id -u)" = "0" ] && skip "root는 파일 모드를 우회한다 — 기록 실패 재현 불가"
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_sc.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/sc.flag" ]; then touch "$TEST_HOME/sc.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_sc.sh"
+
+  local realln realmv
+  realln="$(command -v ln)"
+  realmv="$(command -v mv)"
+  mkdir -p "$TEST_HOME/scbin"
+  cat > "$TEST_HOME/scbin/ln" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+"$realln" "\$@"; rc=\$?
+case "\$last" in *.amrb-bak.*payload.*)
+  if [ \$rc -eq 0 ] && [ ! -f "$TEST_HOME/sc.b" ]; then
+    touch "$TEST_HOME/sc.b"
+    printf 'B-CONCURRENT\n' > "$d/docs/.b.tmp"
+    "$realmv" "$d/docs/.b.tmp" "$d/docs/file-1.md"
+  fi
+;; esac
+exit \$rc
+MOCK
+  # side 캡처 직후: C 선점 + intent를 read-only로 — stranded append가 실패한다
+  cat > "$TEST_HOME/scbin/mv" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+case "\$last" in *.amrb-bak.*side.*)
+  "$realmv" "\$@"; rc=\$?
+  printf 'C-THIRD\n' > "$d/docs/.c.tmp"
+  "$realmv" "$d/docs/.c.tmp" "$d/docs/file-1.md"
+  chmod 444 "$d/.git/auto_merge.trash.d/"*.intent 2>/dev/null || true
+  exit \$rc
+;; esac
+exec "$realmv" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/scbin/ln" "$TEST_HOME/scbin/mv"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/scbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_sc.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+  grep -q "C-THIRD" "$d/docs/file-1.md"
+  # 매핑은 sidecar 마커로 남았다 — side 파일 옆, stranded 경로를 가리킨다
+  local marker sidep
+  marker="$(ls "$d/docs/".amrb-bak.*.d/side.*.stranded 2>/dev/null | head -1)"
+  [ -n "$marker" ]
+  sidep="$(awk -F'\t' '$1=="stranded"{print $2}' "$marker")"
+  [ -n "$sidep" ]
+  [ -f "$sidep" ]
+  grep -q "B-CONCURRENT" "$sidep"
+  # durable 기록이 성립했으므로 recovery marker까지는 가지 않는다
+  [ ! -e "$TEST_HOME/state/auto_merge.recovery" ]
+  chmod -R u+w "$d/.git/auto_merge.trash.d" 2>/dev/null || true
+}
+
+# 8라운드 P1(#2): intent와 sidecar가 "모두" 실패하면 recovery marker로
+# 에스컬레이션한다 — 증거 없는 stranded가 조용히 지나가는 경로가 없다.
+@test "execute: stranded record failing everywhere escalates to a recovery marker (no silent evidence loss)" {
+  [ "$(id -u)" = "0" ] && skip "root는 파일 모드를 우회한다 — 기록 실패 재현 불가"
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_se.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/se.flag" ]; then touch "$TEST_HOME/se.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_se.sh"
+
+  local realln realmv
+  realln="$(command -v ln)"
+  realmv="$(command -v mv)"
+  mkdir -p "$TEST_HOME/sebin"
+  cat > "$TEST_HOME/sebin/ln" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+"$realln" "\$@"; rc=\$?
+case "\$last" in *.amrb-bak.*payload.*)
+  if [ \$rc -eq 0 ] && [ ! -f "$TEST_HOME/se.b" ]; then
+    touch "$TEST_HOME/se.b"
+    printf 'B-CONCURRENT\n' > "$d/docs/.b.tmp"
+    "$realmv" "$d/docs/.b.tmp" "$d/docs/file-1.md"
+  fi
+;; esac
+exit \$rc
+MOCK
+  # side 캡처 직후: C 선점 + intent read-only + 소유 dir도 read-only —
+  # stranded 기록의 모든 경로(intent append·sidecar)가 실패한다
+  cat > "$TEST_HOME/sebin/mv" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+case "\$last" in *.amrb-bak.*side.*)
+  "$realmv" "\$@"; rc=\$?
+  printf 'C-THIRD\n' > "$d/docs/.c.tmp"
+  "$realmv" "$d/docs/.c.tmp" "$d/docs/file-1.md"
+  chmod 444 "$d/.git/auto_merge.trash.d/"*.intent 2>/dev/null || true
+  chmod 555 "\${last%/*}" 2>/dev/null || true
+  exit \$rc
+;; esac
+exec "$realmv" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/sebin/ln" "$TEST_HOME/sebin/mv"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/sebin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_se.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  local st=$status out="$output"
+  chmod -R u+w "$d/docs" "$d/.git/auto_merge.trash.d" 2>/dev/null || true
+  [ "$st" -eq 1 ]
+  grep -q "C-THIRD" "$d/docs/file-1.md"
+  # 기록이 어디에도 성립하지 못했다 — recovery marker로 에스컬레이션됐다
+  [ -e "$TEST_HOME/state/auto_merge.recovery" ]
+  [[ "$out" == *"recovery marker"* ]]
+}
+
+# 8라운드 P1(#3): capture 실패 경로의 payload unlink는 무조건이 아니다 — 원경로가
+# 이미 교체된 이중 교체에서 payload는 원본 inode의 "마지막 링크"이며, 열린 FD의
+# 늦은 write는 unlink 후 orphan inode로 사라졌다 (실측). _fd_busy가 감지하면
+# unlink하지 않고 intent(capture 필드)와 함께 보존한다.
+@test "execute: double replacement with an open FD on the original keeps the payload (late write preserved, no unlink)" {
+  command -v lsof >/dev/null 2>&1 || command -v fuser >/dev/null 2>&1 \
+    || skip "lsof/fuser 없음 — open-FD 가드는 fail-closed(보존)로만 동작"
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  # post-check가 merge 결과 파일(원본 inode A)에 FD를 연 writer를 남기고 실패한다
+  cat > "$TEST_HOME/mock_checks_kp.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/kp.flag" ]; then touch "$TEST_HOME/kp.flag"; exit 0; fi
+set -m
+bash -c 'exec 3>>"$d/docs/file-1.md"; echo held > "$TEST_HOME/kp.held"; j=0; while [ ! -f "$TEST_HOME/kp.release" ] && [ "\$j" -lt 600 ]; do sleep 0.05; j=\$((j+1)); done; echo LATE-WRITE >&3' &
+i=0; while [ ! -f "$TEST_HOME/kp.held" ] && [ "\$i" -lt 100 ]; do sleep 0.05; i=\$((i+1)); done
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_kp.sh"
+
+  local realln realmv
+  realln="$(command -v ln)"
+  realmv="$(command -v mv)"
+  mkdir -p "$TEST_HOME/kpbin"
+  cat > "$TEST_HOME/kpbin/ln" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+"$realln" "\$@"; rc=\$?
+case "\$last" in *.amrb-bak.*payload.*)
+  if [ \$rc -eq 0 ] && [ ! -f "$TEST_HOME/kp.b" ]; then
+    touch "$TEST_HOME/kp.b"
+    printf 'B-CONCURRENT\n' > "$d/docs/.b.tmp"
+    "$realmv" "$d/docs/.b.tmp" "$d/docs/file-1.md"
+  fi
+;; esac
+exit \$rc
+MOCK
+  cat > "$TEST_HOME/kpbin/mv" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+case "\$last" in *.amrb-bak.*side.*)
+  "$realmv" "\$@"; rc=\$?
+  printf 'C-THIRD\n' > "$d/docs/.c.tmp"
+  "$realmv" "$d/docs/.c.tmp" "$d/docs/file-1.md"
+  exit \$rc
+;; esac
+exec "$realmv" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/kpbin/ln" "$TEST_HOME/kpbin/mv"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/kpbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_kp.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  grep -q $'\tROLLED_BACK_REF_ONLY$' "$TEST_HOME/state/auto_merge.log"
+  grep -q "C-THIRD" "$d/docs/file-1.md"
+  # intent가 보존되고 capture 필드가 payload를 가리키며, payload는 unlink되지 않았다
+  local intent cap
+  intent="$(ls "$d/.git/auto_merge.trash.d/"*.intent 2>/dev/null | head -1)"
+  [ -n "$intent" ]
+  cap="$(awk -F'\t' '$1=="capture"{print $2}' "$intent")"
+  [ -n "$cap" ]
+  [ -f "$cap" ]
+  grep -q "content 1" "$cap"
+  # 열린 FD의 늦은 write가 보존된 inode(payload)에 남는다 — 시간 의존 없음
+  touch "$TEST_HOME/kp.release"
+  local k=0
+  while ! grep -q 'LATE-WRITE' "$cap" 2>/dev/null && [ "$k" -lt 100 ]; do sleep 0.05; k=$((k+1)); done
+  grep -q 'LATE-WRITE' "$cap"
+}
+
+# 9라운드 P1(#3) → 11라운드 P1(#3): STATE_DIR marker 기록이 실패하면 독립적인
+# durable fallback(common git dir)에 차단 증거를 남기고, 다음 실행은 그것으로
+# 차단된다.
+@test "execute: recovery-marker falls back to the common git dir and still blocks the next run" {
+  [ "$(id -u)" = "0" ] && skip "root는 파일 모드를 우회한다 — 기록 실패 재현 불가"
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_mr.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/mr.flag" ]; then touch "$TEST_HOME/mr.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_mr.sh"
+
+  local realln realmv
+  realln="$(command -v ln)"
+  realmv="$(command -v mv)"
+  mkdir -p "$TEST_HOME/mrbin"
+  cat > "$TEST_HOME/mrbin/ln" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+"$realln" "\$@"; rc=\$?
+case "\$last" in *.amrb-bak.*payload.*)
+  if [ \$rc -eq 0 ] && [ ! -f "$TEST_HOME/mr.b" ]; then
+    touch "$TEST_HOME/mr.b"
+    printf 'B-CONCURRENT\n' > "$d/docs/.b.tmp"
+    "$realmv" "$d/docs/.b.tmp" "$d/docs/file-1.md"
+  fi
+;; esac
+exit \$rc
+MOCK
+  # side 캡처 직후: C 선점 + intent·소유 dir·STATE_DIR 전부 쓰기 불가 —
+  # stranded 기록(intent·sidecar)과 recovery marker가 모두 실패한다
+  cat > "$TEST_HOME/mrbin/mv" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+case "\$last" in *.amrb-bak.*side.*)
+  "$realmv" "\$@"; rc=\$?
+  printf 'C-THIRD\n' > "$d/docs/.c.tmp"
+  "$realmv" "$d/docs/.c.tmp" "$d/docs/file-1.md"
+  chmod 444 "$d/.git/auto_merge.trash.d/"*.intent 2>/dev/null || true
+  chmod 555 "\${last%/*}" 2>/dev/null || true
+  chmod 555 "$TEST_HOME/state-mr" 2>/dev/null || true
+  exit \$rc
+;; esac
+exec "$realmv" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/mrbin/ln" "$TEST_HOME/mrbin/mv"
+  mkdir -p "$TEST_HOME/state-mr"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/mrbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_mr.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state-mr' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  local st=$status out="$output"
+  chmod -R u+w "$TEST_HOME/state-mr" "$d/docs" "$d/.git/auto_merge.trash.d" 2>/dev/null || true
+  [ "$st" -eq 1 ]
+  grep -q "C-THIRD" "$d/docs/file-1.md"
+  # 주 marker는 없지만(비쓰기 STATE_DIR) fallback이 common git dir에 남았다
+  [ ! -e "$TEST_HOME/state-mr/auto_merge.recovery" ]
+  [ -e "$d/.git/auto_merge.recovery" ]
+  [[ "$out" == *"recovery marker를 남겼습니다"* ]]
+  # 그리고 fallback만으로 다음 실행이 실제로 차단된다 (worktree를 정리해 다른
+  # 사전 검사(clean tree)가 아니라 recovery 차단이 판정 지점이 되게 한다)
+  # (main에는 docs/가 추적되지 않는다 — REF_ONLY가 보존한 C-THIRD·capture 잔재
+  # 전부가 untracked dirty이므로 통째로 치운다; 이미 위에서 검증을 마쳤다)
+  rm -rf "$d/docs" 2>/dev/null || true
+  rm -f "$TEST_HOME/mr.flag"
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_mr.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state-mr2' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RECOVERY_REQUIRED 상태"* ]]
+}
+
+# 10라운드 P1(#1): dangling symlink는 -e에 잡히지 않아 recovery 차단이 우회됐고,
+# marker 기록도 symlink를 따라 다른 경로에 쓰였다 — 어떤 형태의 항목이든(-e/-L)
+# 차단으로 취급한다.
+@test "execute: a dangling recovery-marker symlink still blocks new merges (no -e bypass)" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  mkdir -p "$TEST_HOME/state-sl"
+  ln -s "/nonexistent-target-$$" "$TEST_HOME/state-sl/auto_merge.recovery"
+
+  local base_sha
+  base_sha="$(git -C "$d" rev-parse main)"
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state-sl' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RECOVERY_REQUIRED 상태"* ]]
+  # merge는 일어나지 않았다
+  [ "$(git -C "$d" rev-parse main)" = "$base_sha" ]
+  # symlink는 따라 쓰이지 않았다 (marker 경로는 여전히 dangling symlink)
+  [ -L "$TEST_HOME/state-sl/auto_merge.recovery" ]
+  [ ! -e "$TEST_HOME/state-sl/auto_merge.recovery" ]
+}
+
+# 12라운드 P1(#3): marker 두 곳(주 STATE_DIR + fallback common git dir)이 "모두"
+# 실패하면 `_am_mark_recovery || true`가 실패를 버려 다음 실행이 허용됐다 (실측:
+# 검증 안 된 상태에서 새 병합 진행). 이제 merge "시작 전"에 inflight blocker를
+# common git dir에 선점하고, recovery 표시가 시도된 실행은 이를 지우지 않는다 —
+# marker가 어디에도 남지 못해도 inflight가 다음 실행을 차단한다.
+@test "execute: BOTH recovery markers failing still blocks the next run (pre-emptive inflight blocker)" {
+  [ "$(id -u)" = "0" ] && skip "root는 파일 모드를 우회한다 — 기록 실패 재현 불가"
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  cat > "$TEST_HOME/mock_checks_if.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/if.flag" ]; then touch "$TEST_HOME/if.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_if.sh"
+
+  local realln realmv realmktemp
+  realln="$(command -v ln)"
+  realmv="$(command -v mv)"
+  realmktemp="$(command -v mktemp)"
+  mkdir -p "$TEST_HOME/ifbin"
+  cat > "$TEST_HOME/ifbin/ln" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+"$realln" "\$@"; rc=\$?
+case "\$last" in *.amrb-bak.*payload.*)
+  if [ \$rc -eq 0 ] && [ ! -f "$TEST_HOME/if.b" ]; then
+    touch "$TEST_HOME/if.b"
+    printf 'B-CONCURRENT\n' > "$d/docs/.b.tmp"
+    "$realmv" "$d/docs/.b.tmp" "$d/docs/file-1.md"
+  fi
+;; esac
+exit \$rc
+MOCK
+  # side 캡처 직후: C 선점 + intent·소유 dir·STATE_DIR 쓰기 불가 → stranded 기록
+  # (intent·sidecar)이 실패하고 recovery marker로 에스컬레이션된다
+  cat > "$TEST_HOME/ifbin/mv" <<MOCK
+#!/usr/bin/env bash
+last=""
+for a in "\$@"; do last="\$a"; done
+case "\$last" in *.amrb-bak.*side.*)
+  "$realmv" "\$@"; rc=\$?
+  printf 'C-THIRD\n' > "$d/docs/.c.tmp"
+  "$realmv" "$d/docs/.c.tmp" "$d/docs/file-1.md"
+  chmod 444 "$d/.git/auto_merge.trash.d/"*.intent 2>/dev/null || true
+  chmod 555 "\${last%/*}" 2>/dev/null || true
+  chmod 555 "$TEST_HOME/state-if" 2>/dev/null || true
+  exit \$rc
+;; esac
+exec "$realmv" "\$@"
+MOCK
+  # marker 기록의 source temp 생성만 실패시킨다 — 주·fallback 모두 (inflight의
+  # temp는 template이 다르므로 영향 없다)
+  cat > "$TEST_HOME/ifbin/mktemp" <<MOCK
+#!/usr/bin/env bash
+for a in "\$@"; do case "\$a" in *auto_merge.recovery.new.*) exit 1 ;; esac; done
+exec "$realmktemp" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/ifbin/ln" "$TEST_HOME/ifbin/mv" "$TEST_HOME/ifbin/mktemp"
+  mkdir -p "$TEST_HOME/state-if"
+
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/ifbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_if.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state-if' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  local st=$status out="$output"
+  chmod -R u+w "$TEST_HOME/state-if" "$d/docs" "$d/.git/auto_merge.trash.d" 2>/dev/null || true
+  [ "$st" -eq 1 ]
+  # marker는 주·fallback "어디에도" 남지 못했고, 그 실패가 경고로 드러났다
+  [ ! -e "$TEST_HOME/state-if/auto_merge.recovery" ]
+  [ ! -e "$d/.git/auto_merge.recovery" ]
+  [[ "$out" == *"recovery marker 기록 실패(주·fallback 모두)"* ]]
+  # merge 시작 전에 선점된 inflight blocker는 남아 있다
+  [ -e "$d/.git/auto_merge.inflight" ]
+  # 다음 실행은 marker 없이도 inflight만으로 거부된다 (fail-closed) — worktree를
+  # 치워 clean-tree 사전 검사가 아니라 inflight가 판정 지점이 되게 한다
+  rm -rf "$d/docs" 2>/dev/null || true
+  rm -f "$TEST_HOME/if.flag"
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_if.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state-if2' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"inflight"* ]]
+  [[ "$output" == *"회계 없이 종료"* ]]
+}
+
+# 13라운드 P1(#2): 성공 경로의 inflight 해제가 rm 실패를 무시한 채 PASS(rc=0)를
+# 보고했다 — blocker가 잔존해 다음 실행이 차단되는데도 false-green이었다 (실측).
+# 이제 성공 보고 "전"에 소유권(inode)에 결속해 삭제하고 부재를 확인하며, 확인
+# 실패면 PASS로 보고하지 않는다.
+@test "execute: PASS is reported only after the inflight blocker is verifiably gone (no false-green on rm failure)" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+
+  # (a) 정상 성공 — inflight와 own 사이드카가 남지 않는다
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"auto-merge executed"* ]]
+  [ ! -e "$d/.git/auto_merge.inflight" ]
+  run bash -c "ls '$d/.git'/auto_merge.inflight.own.* 2>/dev/null"
+  [ -z "$output" ]
+
+  # (b) inflight rm이 실패하는 실행 — PASS 대신 fail-closed
+  local d2="$TEST_HOME/repo2"
+  mkdir -p "$d2"
+  make_repo "$d2" 1 docs
+  local base2
+  base2="$(git -C "$d2" rev-parse main)"
+  local realrm
+  realrm="$(command -v rm)"
+  mkdir -p "$TEST_HOME/ifpbin"
+  cat > "$TEST_HOME/ifpbin/rm" <<MOCK
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in */auto_merge.inflight) exit 1 ;; esac
+done
+exec "$realrm" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/ifpbin/rm"
+  run bash -c "cd '$d2' && \
+    PATH='$TEST_HOME/ifpbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state-ifp' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"[PASS] auto-merge executed"* ]]
+  [[ "$output" == *"inflight blocker 해제를 확인하지 못했습니다"* ]]
+  # merge 자체는 검증 완료(EXECUTED) — blocker만 잔존한다
+  grep -q $'\tEXECUTED$' "$TEST_HOME/state-ifp/auto_merge.log"
+  [ -e "$d2/.git/auto_merge.inflight" ]
+  # (c) 다음 실행은 잔존 inflight로 거부된다 (fail-closed) — merge 이전 상태로
+  # 되돌려 eligibility가 아니라 inflight 차단이 판정 지점이 되게 한다
+  git -C "$d2" reset --hard -q "$base2"
+  run bash -c "cd '$d2' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state-ifp' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"inflight"* ]]
+  [[ "$output" == *"회계 없이 종료"* ]]
+}
+
+# 14라운드 P1(#1): merge 실패(conflict) 후 abort가 끝나기 전(merge-failed 창)의
+# TERM — 종전 handler는 merging/merged만 회계하고 무조건 ACCOUNTED=1을 세워,
+# MERGE_HEAD·UU 잔존 상태에서 inflight와 marker가 모두 사라졌다 (실측: rc=143,
+# 차단 없음). 이제 merge-failed도 abort·검증 대상이고, MERGE_HEAD 잔존 검사는
+# phase와 무관하게 수행된다.
+@test "execute: TERM during merge-failed (abort pending) keeps the blockers - unresolved conflict never clears inflight" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  # main에 같은 경로를 다른 내용으로 커밋해 merge가 conflict로 실패하게 만든다
+  mkdir -p "$d/docs"
+  printf 'main-side\n' > "$d/docs/file-1.md"
+  git -C "$d" add docs/file-1.md
+  git -C "$d" commit -q -m "main: conflicting docs"
+
+  # git shim: 첫 'merge --abort'는 준비 신호 후 지연·실패 — merge-failed 창을 연다
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$TEST_HOME/mfbin"
+  cat > "$TEST_HOME/mfbin/git" <<MOCK
+#!/usr/bin/env bash
+is_abort=0
+for a in "\$@"; do case "\$a" in --abort) is_abort=1 ;; esac; done
+if [ "\$is_abort" -eq 1 ]; then
+  # abort는 항상 실패한다 (미해소 conflict 고정) — 첫 호출만 지연해 TERM 창을 연다
+  if [ ! -f "$TEST_HOME/mf.flag" ]; then
+    touch "$TEST_HOME/mf.flag"
+    sleep 4
+  fi
+  exit 1
+fi
+exec "$realgit" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/mfbin/git"
+
+  ( cd "$d" && \
+    PATH="$TEST_HOME/mfbin:$PATH" \
+    LINT_EXTERNAL_DOCS_CMD="$MOCK_LINT" \
+    RUN_CHECKS_CMD="$MOCK_CHECKS" \
+    CHECK_SCOPE_OMISSION_CMD="$MOCK_SCOPE" \
+    STATE_DIR="$TEST_HOME/state-mf" \
+    exec "$SCRIPT_PATH" "$TEST_HOME/T999-test.md" --execute --branch ralph/T999 --base main ) \
+    > "$TEST_HOME/mf.log" 2>&1 & local ap=$!
+  local i=0
+  while [ ! -f "$TEST_HOME/mf.flag" ] && [ "$i" -lt 100 ]; do sleep 0.2; i=$((i+1)); done
+  [ -f "$TEST_HOME/mf.flag" ]
+  kill -TERM "$ap" 2>/dev/null || true
+  local rc=0
+  wait "$ap" || rc=$?
+  [ "$rc" -eq 143 ]
+  # 미해소 merge 상태가 남았다면(handler의 실제 abort가 shim으로 실패했으므로
+  # MERGE_HEAD 잔존) — 차단 장치가 반드시 남아 있어야 한다
+  [ -e "$d/.git/auto_merge.inflight" ]
+  { [ -e "$TEST_HOME/state-mf/auto_merge.recovery" ] || [ -e "$d/.git/auto_merge.recovery" ]; }
+  # 다음 실행은 거부된다 (fail-closed) — conflict 잔재를 수동 정리해(clean-tree
+  # 사전 검사가 아니라) marker/inflight 차단이 판정 지점이 되게 한다
+  git -C "$d" merge --abort >/dev/null 2>&1 || true
+  git -C "$d" reset --hard -q HEAD 2>/dev/null || true
+  rm -rf "$d/docs" 2>/dev/null || true
+  git -C "$d" checkout -q -- docs 2>/dev/null || true
+  run bash -c "cd '$d' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state-mf' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"RECOVERY_REQUIRED 상태"* || "$output" == *"inflight"* ]]
+}
+
+# 14라운드 P1(#3): [PASS]는 main lock 해제가 "검증된 뒤에만" — 종전에는 PASS 출력
+# 뒤 EXIT trap의 release가 실패 경고를 내며 nonzero로 끝나 PASS와 rc가 어긋났다.
+@test "execute: PASS is reported only after the main lock release is verified (no PASS-then-release-warning divergence)" {
+  [ "$(id -u)" = "0" ] && skip "root는 파일 모드를 우회한다 — rm 실패 재현 불가"
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  local realrm
+  realrm="$(command -v rm)"
+  mkdir -p "$TEST_HOME/plbin"
+  cat > "$TEST_HOME/plbin/rm" <<MOCK
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in */auto_merge.lock.d/pid) exit 1 ;; esac
+done
+exec "$realrm" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/plbin/rm"
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/plbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state-pl' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"[PASS] auto-merge executed"* ]]
+  [[ "$output" == *"lock 해제를 검증하지 못했습니다"* ]]
+  # merge 자체는 검증 완료(EXECUTED), 소유 증거는 유지되어 재시도 가능하다
+  grep -q $'\tEXECUTED$' "$TEST_HOME/state-pl/auto_merge.log"
+  run bash -c "ls '$TEST_HOME/state-pl'/auto_merge.lock.d.own.* 2>/dev/null | head -1"
+  [ -n "$output" ]
+}
+
+# 15라운드 P1(#1): "부분 abort" — MERGE_HEAD만 지우고 unmerged index(AA 항목)를
+# 남기는 abort에서 종전 handler는 HEAD·MERGE_HEAD만 보고 통과, inflight와 marker
+# 없이 rc=143으로 끝났다 (실측). 이제 merge를 시작한 실행의 신호 회계는
+# HEAD·branch·clean status·unmerged 항목 부재·MERGE_HEAD 부재가 전부 성립해야
+# blocker 없이 끝난다.
+@test "execute: a partial abort (MERGE_HEAD removed, unmerged index left) never clears the blockers on TERM" {
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  mkdir -p "$d/docs"
+  printf 'main-side\n' > "$d/docs/file-1.md"
+  git -C "$d" add docs/file-1.md
+  git -C "$d" commit -q -m "main: conflicting docs"
+
+  # git shim: abort는 "부분"만 수행한다 — MERGE_HEAD를 지우고 rc=0을 돌려주지만
+  # unmerged index는 그대로 남긴다. 첫 호출만 지연해 TERM 창을 연다.
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$TEST_HOME/pabin"
+  cat > "$TEST_HOME/pabin/git" <<MOCK
+#!/usr/bin/env bash
+is_abort=0
+for a in "\$@"; do case "\$a" in --abort) is_abort=1 ;; esac; done
+if [ "\$is_abort" -eq 1 ]; then
+  gd="\$("$realgit" rev-parse --git-dir 2>/dev/null)"
+  if [ ! -f "$TEST_HOME/pa.flag" ]; then
+    touch "$TEST_HOME/pa.flag"
+    sleep 4
+  fi
+  command rm -f "\$gd/MERGE_HEAD" 2>/dev/null
+  exit 0
+fi
+exec "$realgit" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/pabin/git"
+
+  ( cd "$d" && \
+    PATH="$TEST_HOME/pabin:$PATH" \
+    LINT_EXTERNAL_DOCS_CMD="$MOCK_LINT" \
+    RUN_CHECKS_CMD="$MOCK_CHECKS" \
+    CHECK_SCOPE_OMISSION_CMD="$MOCK_SCOPE" \
+    STATE_DIR="$TEST_HOME/state-pa" \
+    exec "$SCRIPT_PATH" "$TEST_HOME/T999-test.md" --execute --branch ralph/T999 --base main ) \
+    > "$TEST_HOME/pa.log" 2>&1 & local ap=$!
+  local i=0
+  while [ ! -f "$TEST_HOME/pa.flag" ] && [ "$i" -lt 100 ]; do sleep 0.2; i=$((i+1)); done
+  [ -f "$TEST_HOME/pa.flag" ]
+  kill -TERM "$ap" 2>/dev/null || true
+  local rc=0
+  wait "$ap" || rc=$?
+  [ "$rc" -eq 143 ]
+  # 부분 abort 상태 그대로다: MERGE_HEAD는 없지만 unmerged index가 남았다
+  [ ! -e "$d/.git/MERGE_HEAD" ]
+  [ -n "$(git -C "$d" ls-files -u)" ]
+  # 전체-상태 검증이 편차를 잡아 blocker가 반드시 남는다
+  [ -e "$d/.git/auto_merge.inflight" ]
+  { [ -e "$TEST_HOME/state-pa/auto_merge.recovery" ] || [ -e "$d/.git/auto_merge.recovery" ]; }
+  grep -q 'RECOVERY_REQUIRED:signal-state' "$TEST_HOME/state-pa/auto_merge.log"
+}
+
+# 15라운드 P1(#4) + P2: inflight 해제의 소유 증거 계약 — (a) canonical 삭제가
+# 실패하면 .own을 지우지 않는다 (종전: blocker 잔존 + 소유 증거 소실 = 수동
+# 잔재), (b) 성공 경로의 verified-clear는 .own 삭제까지 검증한다 (종전: sidecar
+# 잔존인데 rc=0 + PASS).
+@test "execute: inflight clear retries transient own failures and the next run GCs a persistent own-only orphan" {
+  [ "$(id -u)" = "0" ] && skip "root는 파일 모드를 우회한다 — rm 실패 재현 불가"
+  # (a) rollback(ROLLED_BACK) 경로: EXIT trap의 best-effort clear에서 canonical
+  # rm이 실패하면 own이 남아 재시도 가능해야 한다
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  make_ticket "$TEST_HOME/T999-test.md" true
+  cat > "$TEST_HOME/mock_checks_ic.sh" <<MOCK
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/ic.flag" ]; then touch "$TEST_HOME/ic.flag"; exit 0; fi
+exit 1
+MOCK
+  chmod +x "$TEST_HOME/mock_checks_ic.sh"
+  local realrm
+  realrm="$(command -v rm)"
+  mkdir -p "$TEST_HOME/icbin"
+  cat > "$TEST_HOME/icbin/rm" <<MOCK
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in */auto_merge.inflight) exit 1 ;; esac
+done
+exec "$realrm" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/icbin/rm"
+  run bash -c "cd '$d' && \
+    PATH='$TEST_HOME/icbin:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$TEST_HOME/mock_checks_ic.sh' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state-ic' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"post-merge run_checks 실패"* ]]
+  # canonical rm 실패 → blocker와 소유 증거가 "함께" 남는다 (재시도 가능)
+  [ -e "$d/.git/auto_merge.inflight" ]
+  run bash -c "ls '$d/.git'/auto_merge.inflight.own.* 2>/dev/null | head -1"
+  [ -n "$output" ]
+
+  # (b) 성공 경로: own 사이드카 rm 실패 → PASS 대신 fail-closed
+  local d2="$TEST_HOME/repo2"
+  mkdir -p "$d2"
+  make_repo "$d2" 1 docs
+  local base2
+  base2="$(git -C "$d2" rev-parse main)"
+  mkdir -p "$TEST_HOME/icbin2"
+  cat > "$TEST_HOME/icbin2/rm" <<MOCK
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in */auto_merge.inflight.own.*) exit 1 ;; esac
+done
+exec "$realrm" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/icbin2/rm"
+  run bash -c "cd '$d2' && \
+    PATH='$TEST_HOME/icbin2:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state-ic2' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"[PASS] auto-merge executed"* ]]
+  [[ "$output" == *"inflight"* ]]
+  # canonical은 지워졌지만 지속 실패로 own-only 잔재가 남는다.
+  [ ! -e "$d2/.git/auto_merge.inflight" ]
+  run bash -c "ls '$d2/.git'/auto_merge.inflight.own.* 2>/dev/null | head -1"
+  [ -n "$output" ]
+  local orphan="$output"
+
+  # 다음 실행은 main lock 아래에서 dead creator의 고유 sidecar만 GC한다.
+  git -C "$d2" reset --hard "$base2" >/dev/null
+  run bash -c "cd '$d2' && \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state-ic2-retry' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 0 ]
+  [ ! -e "$orphan" ]
+  run bash -c "ls '$d2/.git'/auto_merge.inflight.own.* 2>/dev/null"
+  [ -z "$output" ]
+
+  # (c) own 삭제가 한 번만 실패하면 verified-clear의 실패 뒤 EXIT cleanup이 재시도해
+  # 다음 실행을 기다리지 않고 잔재를 없앤다.
+  local d3="$TEST_HOME/repo3"
+  mkdir -p "$d3"
+  make_repo "$d3" 1 docs
+  mkdir -p "$TEST_HOME/icbin3"
+  cat > "$TEST_HOME/icbin3/rm" <<MOCK
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    */auto_merge.inflight.own.*)
+      if [ ! -f "$TEST_HOME/ic-own-once" ]; then touch "$TEST_HOME/ic-own-once"; exit 1; fi ;;
+  esac
+done
+exec "$realrm" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/icbin3/rm"
+  run bash -c "cd '$d3' && \
+    PATH='$TEST_HOME/icbin3:'\"\$PATH\" \
+    LINT_EXTERNAL_DOCS_CMD='$MOCK_LINT' \
+    RUN_CHECKS_CMD='$MOCK_CHECKS' \
+    CHECK_SCOPE_OMISSION_CMD='$MOCK_SCOPE' \
+    STATE_DIR='$TEST_HOME/state-ic3' \
+    '$SCRIPT_PATH' '$TEST_HOME/T999-test.md' --execute --branch ralph/T999 --base main"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"[PASS] auto-merge executed"* ]]
+  [ ! -e "$d3/.git/auto_merge.inflight" ]
+  run bash -c "ls '$d3/.git'/auto_merge.inflight.own.* 2>/dev/null"
+  [ -z "$output" ]
+}
+
+# 16라운드 P2: TERM 경로의 best-effort inflight clear가 own 사이드카 삭제까지
+# 검증하고(canonical만 지운 sidecar 잔재 방지), canonical rm 실패가 EXIT trap을
+# 중단시켜 뒤의 main-lock release가 생략되지 않는다.
+@test "execute: on TERM, a canonical-inflight rm failure preserves blocker ownership, releases the main lock, and restores base" {
+  [ "$(id -u)" = "0" ] && skip "root는 파일 모드를 우회한다 — rm 실패 재현 불가"
+  local d="$TEST_HOME/repo"
+  mkdir -p "$d"
+  make_repo "$d" 1 docs
+  local base_sha
+  base_sha="$(git -C "$d" rev-parse main)"
+  make_ticket "$TEST_HOME/T999-test.md" true
+  # post-check를 지연시켜 TERM 창을 연다 (merged 이후 신호 → CAS 롤백 경로)
+  cat > "$TEST_HOME/mock_checks_t16.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -f "$TEST_HOME/t16.pre" ]; then touch "$TEST_HOME/t16.pre"; exit 0; fi
+touch "$TEST_HOME/t16.flag"
+sleep 271831
+EOF
+  chmod +x "$TEST_HOME/mock_checks_t16.sh"
+  # rm shim: main-lock own(.own) 삭제는 정상, 하지만 처음 한 번의 canonical
+  # inflight 삭제만 실패시켜 best-effort clear가 rc=1이 되게 한다
+  local realrm
+  realrm="$(command -v rm)"
+  mkdir -p "$TEST_HOME/t16bin"
+  cat > "$TEST_HOME/t16bin/rm" <<MOCK
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in
+    */auto_merge.inflight)
+      if [ ! -f "$TEST_HOME/t16.rmhit" ]; then touch "$TEST_HOME/t16.rmhit"; exit 1; fi ;;
+  esac
+done
+exec "$realrm" "\$@"
+MOCK
+  chmod +x "$TEST_HOME/t16bin/rm"
+
+  ( cd "$d" && \
+    PATH="$TEST_HOME/t16bin:$PATH" \
+    LINT_EXTERNAL_DOCS_CMD="$MOCK_LINT" \
+    RUN_CHECKS_CMD="$TEST_HOME/mock_checks_t16.sh" \
+    CHECK_SCOPE_OMISSION_CMD="$MOCK_SCOPE" \
+    STATE_DIR="$TEST_HOME/state-t16" \
+    exec "$SCRIPT_PATH" "$TEST_HOME/T999-test.md" --execute --branch ralph/T999 --base main ) \
+    > "$TEST_HOME/t16.log" 2>&1 & local ap=$!
+  local i=0
+  while [ ! -f "$TEST_HOME/t16.flag" ] && [ "$i" -lt 50 ]; do sleep 0.2; i=$((i+1)); done
+  sleep 0.5
+  kill -TERM "$ap" 2>/dev/null || true
+  local rc=0
+  wait "$ap" || rc=$?
+  pkill -f 'sleep 271831' 2>/dev/null || true
+  [ "$rc" -eq 143 ]
+  # main writer-lock(auto_merge.lock.d)은 trap이 중단되지 않아 해제됐다 —
+  # canonical과 own 사이드카 모두 남지 않는다 (재획득 가능)
+  run bash -c "ls -d '$TEST_HOME/state-t16'/auto_merge.lock.d 2>/dev/null"
+  [ -z "$output" ]
+  run bash -c "ls '$TEST_HOME/state-t16'/auto_merge.lock.d.own.* 2>/dev/null"
+  [ -z "$output" ]
+  # canonical 삭제 실패는 fail-closed blocker와 그 inode 소유 증거를 함께 보존한다.
+  [ -e "$d/.git/auto_merge.inflight" ]
+  run bash -c "ls '$d/.git'/auto_merge.inflight.own.* 2>/dev/null | head -1"
+  [ -n "$output" ]
+  # merge는 CAS로 base에서 롤백됐다 (미검증 merge 잔존 없음)
+  [ "$(git -C "$d" rev-parse main)" = "$base_sha" ]
+  [ -z "$(git -C "$d" status --porcelain)" ]
 }

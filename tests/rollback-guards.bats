@@ -1148,3 +1148,262 @@ WRAP
   git -C "$repo" rev-parse -q --verify "refs/tags/cycle/T200-post" >/dev/null
   [ ! -e "$repo/state/ticket_write.lock.d" ]
 }
+
+@test "R38: TERM in the reset success-report window is honored - lock released, rc=130, no KILL needed" {
+  # 8라운드 P1(#4): 마지막 _rs_check_sig와 성공 출력 사이(또는 blocking stdout)의
+  # TERM이 flag로만 기록된 채 출력에 잡혀, writer lock을 쥔 프로세스가 강제 KILL
+  # 까지 잔존했다 (실측: post 태그는 이미 삭제된 부분 완료 상태). 이제 성공 출력도
+  # bounded 자식(_rs_run)으로 돌린다 — 신호가 오면 출력 자식을 reap하고 130으로
+  # 종료하며 EXIT trap이 lock을 해제한다.
+  local repo="$TEST_BASE/.ralph/wt-x"
+  _make_repo "$repo"
+  # stdout을 "가득 찬 pipe"로: reader는 열되 읽지 않고, filler가 버퍼를 채운다.
+  mkfifo "$TEST_BASE/out.p"
+  ( exec 9<"$TEST_BASE/out.p"; while [ ! -f "$TEST_BASE/r38.done" ]; do sleep 0.1; done ) &
+  local reader=$!
+  ( exec 8>"$TEST_BASE/out.p"; head -c 262144 /dev/zero >&8; while [ ! -f "$TEST_BASE/r38.done" ]; do sleep 0.1; done ) &
+  local filler=$!
+  sleep 0.5
+  ( cd "$repo" && exec ./scripts/rollback.sh T200 > "$TEST_BASE/out.p" 2> "$TEST_BASE/r38.err" < /dev/null ) &
+  local rpid=$!
+  # 마지막 단계(post 태그 CAS 삭제)까지 진행된 뒤 — 성공 출력에서 block된 시점
+  local i=0
+  while git -C "$repo" rev-parse -q --verify refs/tags/cycle/T200-post >/dev/null 2>&1 && [ "$i" -lt 200 ]; do
+    sleep 0.05; i=$((i+1))
+  done
+  ! git -C "$repo" rev-parse -q --verify refs/tags/cycle/T200-post >/dev/null 2>&1
+  sleep 0.3
+  local t0 t1 rc=0
+  t0="$(date +%s)"
+  kill -TERM "$rpid" 2>/dev/null || true
+  wait "$rpid" || rc=$?
+  t1="$(date +%s)"
+  touch "$TEST_BASE/r38.done"
+  [ "$rc" -eq 130 ]
+  [ $(( t1 - t0 )) -lt 8 ]
+  # writer lock은 해제됐다 — 강제 KILL이 필요 없다
+  [ ! -e "$repo/state/ticket_write.lock.d" ]
+  # 이 시점의 실제 상태(rollback 완료, 보고만 중단)를 정직하게 보고한다
+  grep -q "완료된 상태" "$TEST_BASE/r38.err"
+  kill "$reader" "$filler" 2>/dev/null || true
+}
+
+@test "R39: worktree remove/prune succeeding as rc=0 no-ops cannot fake success - registration absence is verified" {
+  # 8라운드 P1(#5): remove/prune이 rc=0 no-op이면 Git 등록(.git/worktrees·
+  # git worktree list)이 남는데도 'rolled back'이 출력됐다 (실측). 판정은 명령
+  # rc가 아니라 "실제 등록 부재" 관측이다 (fail-closed).
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  local realgit
+  realgit="$(command -v git)"
+  mkdir -p "$TEST_BASE/r39bin"
+  cat > "$TEST_BASE/r39bin/git" <<SHIM
+#!/usr/bin/env bash
+if [ "\$1" = "worktree" ] && { [ "\$2" = "remove" ] || [ "\$2" = "prune" ]; }; then
+  exit 0
+fi
+exec "$realgit" "\$@"
+SHIM
+  chmod +x "$TEST_BASE/r39bin/git"
+  # 9라운드 P1(#4): macOS TMPDIR(/var → /private/var)처럼 "symlink를 경유한
+  # TMPDIR"에서 재현한다 — 논리 경로와 Git이 등록한 물리 경로가 문자열로 다르면
+  # 등록-부재 검증이 stale을 놓치고 rc=0을 위장했다 (실측, Mac). 경로는 생성
+  # 즉시 물리 경로로 고정되므로 이 조건에서도 검증이 성립해야 한다.
+  mkdir -p "$TEST_BASE/r39real"
+  ln -s "$TEST_BASE/r39real" "$TEST_BASE/r39lnk"
+
+  run bash -c 'cd "$1" && PATH="$2:$PATH" TMPDIR="$3" ./scripts/rollback.sh T200 --yes < /dev/null' _ "$repo" "$TEST_BASE/r39bin" "$TEST_BASE/r39lnk"
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"rolled back"* ]]
+  [[ "$output" == *"성공으로 보고하지 않습니다"* ]]
+  # ref 공개 자체는 완료된 상태 — 복구 참조가 남고 worktree는 동기화됐다
+  git -C "$repo" rev-parse -q --verify refs/rollback/T200 >/dev/null
+  grep -q "v1" "$repo/file.txt"
+}
+
+@test "R40: dead lock artifacts (.own/.acq/meta .rec.d) are gc'ed on the next acquisition" {
+  # 8라운드 P2: EXIT trap을 우회한 종료(강제 KILL 등)가 남긴 lock 부속물과
+  # meta-lock(.rec.d)이 영구 잔존했다 — 다음 획득 시점에 이름/내용의 pid가 죽어
+  # 있으면 gc된다 (live pid는 무접촉).
+  local repo="$TEST_BASE/.ralph/wt-x"
+  _make_repo "$repo"
+  local deadpid
+  ( : ) & deadpid=$!
+  wait "$deadpid" 2>/dev/null || true
+  # 9라운드 프로토콜(incarnation-고유 이름)의 죽은 meta
+  mkdir -p "$repo/state/ticket_write.lock.d.rec.d"
+  echo "$deadpid" > "$repo/state/ticket_write.lock.d.rec.d/pid.$deadpid.0.42"
+  printf 'meta.x' > "$repo/state/ticket_write.lock.d.rec.d/token.$deadpid.0.42"
+  echo dead > "$repo/state/ticket_write.lock.d.own.$deadpid"
+  mkdir -p "$repo/state/ticket_write.lock.d.acq.$deadpid"
+  echo dead > "$repo/state/ticket_write.lock.d.rec.d.own.$deadpid"
+
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 < /dev/null' _ "$repo"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"restored T200"* ]]
+  [ ! -e "$repo/state/ticket_write.lock.d.rec.d" ]
+  [ ! -e "$repo/state/ticket_write.lock.d.own.$deadpid" ]
+  [ ! -e "$repo/state/ticket_write.lock.d.acq.$deadpid" ]
+  [ ! -e "$repo/state/ticket_write.lock.d.rec.d.own.$deadpid" ]
+}
+
+@test "R41: an EMPTY meta-lock dir (death mid-teardown) and a legacy fixed-name meta are both reclaimed (no permanent wedge)" {
+  # 9라운드 P1(#1b): 해체 도중 죽어 파일이 하나도 남지 않은 .rec.d는 종전 GC가
+  # (내부 pid가 없어서) 영구 방치했다 — 빈 meta는 비어 있을 때만 성공하는 rmdir로
+  # 누구든 안전 회수한다. 8라운드까지의 고정 이름(pid/token) meta도 호환 경로로
+  # 회수된다.
+  local repo="$TEST_BASE/.ralph/wt-x"
+  _make_repo "$repo"
+  local deadpid
+  ( : ) & deadpid=$!
+  wait "$deadpid" 2>/dev/null || true
+  # (a) 빈 meta — 해체 도중 죽음
+  mkdir -p "$repo/state/ticket_write.lock.d.rec.d"
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 < /dev/null' _ "$repo"
+  [ "$status" -eq 0 ]
+  [ ! -e "$repo/state/ticket_write.lock.d.rec.d" ]
+  # rollback을 되돌려 두 번째 시나리오 준비 (post 태그 재생성)
+  git -C "$repo" reset -q --hard
+  echo "v2" > "$repo/file.txt"
+  git -C "$repo" add file.txt
+  git -C "$repo" commit -q -m "T200: cycle change 2"
+  git -C "$repo" tag -f -a "cycle/T200-post" -m "owned-commits
+$(git -C "$repo" rev-parse HEAD)"
+  # (b) 구 프로토콜 고정 이름 meta (죽은 pid)
+  mkdir -p "$repo/state/ticket_write.lock.d.rec.d"
+  echo "$deadpid" > "$repo/state/ticket_write.lock.d.rec.d/pid"
+  printf 'meta.x' > "$repo/state/ticket_write.lock.d.rec.d/token"
+  run bash -c 'cd "$1" && ./scripts/rollback.sh T200 < /dev/null' _ "$repo"
+  [ "$status" -eq 0 ]
+  [ ! -e "$repo/state/ticket_write.lock.d.rec.d" ]
+}
+
+@test "R42: TERM right AFTER the reset success line is read is not lost as rc=0" {
+  # 9라운드 P1(#5): 성공 출력 "이후"의 TERM이 flag로만 기록된 채 exit 0으로
+  # 유실됐다 (실측: restored 직후 TERM 40/40 rc=0, stderr 없음). 이제 출력 후에는
+  # 즉시-종료 handler가 exit(EXIT trap 포함)까지 유지된다 — "살아 있는 parent에
+  # 전달된" TERM은 반드시 rc=130이다. kill이 이미 죽은 프로세스에 갔다면(전달
+  # 실패) 그 시도는 무효이므로 재시도한다.
+  local repo="$TEST_BASE/.ralph/wt-x"
+  _make_repo "$repo"
+  local attempt rpid line rc
+  for attempt in 1 2 3 4 5; do
+    mkfifo "$TEST_BASE/r42.$attempt.p"
+    ( cd "$repo" && exec ./scripts/rollback.sh T200 > "$TEST_BASE/r42.$attempt.p" 2> "$TEST_BASE/r42.$attempt.err" < /dev/null ) &
+    rpid=$!
+    line=""
+    IFS= read -r line < "$TEST_BASE/r42.$attempt.p"
+    [[ "$line" == *"restored T200"* ]]
+    if kill -TERM "$rpid" 2>/dev/null; then
+      # 살아 있는 parent에 전달됐다 — rc=0 성공 위장은 허용되지 않는다.
+      rc=0
+      wait "$rpid" || rc=$?
+      [ "$rc" -eq 130 ]
+      grep -q "완료된 상태" "$TEST_BASE/r42.$attempt.err"
+      return 0
+    fi
+    # parent가 이미 종료 — 창 관측 실패, 상태 복구 후 재시도
+    wait "$rpid" 2>/dev/null || true
+    echo "v2" > "$repo/file.txt"
+    git -C "$repo" add file.txt
+    git -C "$repo" commit -q -m "T200: cycle change r42-$attempt"
+    git -C "$repo" tag -f -a "cycle/T200-post" -m "owned-commits
+$(git -C "$repo" rev-parse HEAD)"
+  done
+  skip "5회 시도 모두 TERM 전달 전에 parent가 종료 — 창 관측 불가 (rc=0 위장 없음은 확인됨)"
+}
+
+@test "R44: a writer-lock release failure (pid stage) is not disguised as 'rolled back' rc=0 - success is reported only after verified release" {
+  # 14라운드 P1(#2·#3): rollback의 writer lock 해제 복제 구현이 pid/rmdir 실패를
+  # 무시하고 .own을 지운 채 0을 반환해, pid 삭제 실패를 주입해도 'rolled back' +
+  # rc=0이었다 (실측 — 소유 증거 없는 pid-only lock 잔존). 이제 해제는 단계별
+  # 검증이고, 성공 보고 "전"에 해제를 검증한다.
+  [ "$(id -u)" = "0" ] && skip "root는 파일 모드를 우회한다 — rm 실패 재현 불가"
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  local realrm
+  realrm="$(command -v rm)"
+  mkdir -p "$TEST_BASE/r44bin"
+  cat > "$TEST_BASE/r44bin/rm" <<MOCK
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in */ticket_write.lock.d/pid) exit 1 ;; esac
+done
+exec "$realrm" "\$@"
+MOCK
+  chmod +x "$TEST_BASE/r44bin/rm"
+  run bash -c "cd '$repo' && PATH='$TEST_BASE/r44bin:'\"\$PATH\" exec ./scripts/rollback.sh T200 --yes"
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"rolled back"* ]]
+  [[ "$output" == *"writer lock 해제를 검증하지 못했습니다"* ]]
+  # 소유 증거(.own)가 유지되어 재시도 가능하고, 잔재는 shim 없는 다음 획득이 회수한다
+  run bash -c 'ls "$1/state"/ticket_write.lock.d.own.* 2>/dev/null | head -1' _ "$repo"
+  [ -n "$output" ]
+  # 14라운드 P2 → 15라운드 P2: "즉시 회수"를 실제 잔재가 있는 이 지점에서
+  # 시간 상한으로 고정하고(acquire의 10초 재시도 한도에 기대지 않는다),
+  # 회수 후 사이드카까지 전부 무잔재임을 단언한다.
+  local _t0=$SECONDS
+  run bash -c 'cd "$1" && _TW_LOCK="state/ticket_write.lock.d" && source "$2/scripts/lib/write_lock.sh" && _acquire_write_lock && _release_write_lock' _ "$repo" "$REPO_ROOT"
+  [ "$status" -eq 0 ]
+  [ $((SECONDS - _t0)) -le 2 ]
+  run bash -c 'ls -d "$1/state"/ticket_write.lock.d* 2>/dev/null' _ "$repo"
+  [ -z "$output" ]
+}
+
+@test "R43: TERM right AFTER the revert success line - no rc=0 disguise; lock released or immediately reclaimable (diagnostics best-effort)" {
+  # 10라운드 P1(#4): revert 경로는 성공 출력 직후 trap을 해제해, exit(EXIT trap의
+  # release 포함) 도중의 TERM이 기본 처분(143)으로 죽으며 진단 없이 writer lock과
+  # .own 파일이 남았다 (실측 20/20). 이제 즉시-종료 handler가 exit까지 유지된다.
+  # 12라운드 P2: 계약을 실제 보장 수준으로 명시한다 — 정확한 EXIT-release 창에
+  # TERM이 들어오면 (handler 재무장 전) 기본 처분 143 + 진단 부재 + lock 잔재가
+  # 짧게 남을 수 있다 (실측: 0.15초 뒤 다음 acquire가 회수). 불변 계약은 세 가지:
+  # (1) 성공은 이미 공개되었고 rc=0으로 위장하지 않는다, (2) handler가 잡았다면
+  # (rc=130) 완료-상태 진단이 나온다, (3) lock은 해제되었거나 다음 writer의
+  # acquire 재시도 루프 안에서 즉시 회수 가능하다.
+  local repo="$TEST_BASE/main"
+  _make_repo "$repo"
+  local attempt rpid line rc
+  for attempt in 1 2 3 4 5; do
+    mkfifo "$TEST_BASE/r43.$attempt.p"
+    ( cd "$repo" && exec ./scripts/rollback.sh T200 --yes > "$TEST_BASE/r43.$attempt.p" 2> "$TEST_BASE/r43.$attempt.err" < /dev/null ) &
+    rpid=$!
+    line=""
+    while IFS= read -r line; do
+      case "$line" in *"rolled back T200 by revert"*) break ;; esac
+    done < "$TEST_BASE/r43.$attempt.p"
+    [[ "$line" == *"rolled back T200 by revert"* ]]
+    if kill -TERM "$rpid" 2>/dev/null; then
+      rc=0
+      wait "$rpid" || rc=$?
+      # rc=0 위장만이 위반이다 — handler가 잡으면 130, 정확한 EXIT-release 창
+      # (handler 재무장 전·trap 리셋 직후)이면 기본 처분 143이 가능하다.
+      { [ "$rc" -eq 130 ] || [ "$rc" -eq 143 ]; }
+      # 13라운드 P2: 진단은 rc와 "무관하게" best-effort다 — Mac Bash 3.2에서
+      # 정확한 EXIT-release 창의 rc=130 + 진단 부재가 실측됐다 (handler 진입과
+      # stderr flush 사이에도 창이 있다). 진단 문구는 단언하지 않는다. 대신
+      # 계약의 실체를 단언한다: (1) 성공은 이미 공개됐고 rc=0으로 위장하지
+      # 않는다(위), (2) 다음 writer가 즉시 회수 가능하다(아래), (3) 회수 후
+      # 잔재가 없다(아래).
+      # 11라운드 P2 → 12라운드 P2 → 14라운드 P2: "해제 또는 즉시 회수 가능"을
+      # 관측으로 증명한다 — 다음 writer가 이 상태에서 즉시 lock을 획득·해제할
+      # 수 있어야 하고, "즉시"는 시간으로 고정한다 (acquire의 10초 재시도 한도에
+      # 기대지 않는다 — 실측 회수는 ~100ms였다).
+      local _t0=$SECONDS
+      run bash -c 'cd "$1" && _TW_LOCK="state/ticket_write.lock.d" && source "$2/scripts/lib/write_lock.sh" && _acquire_write_lock && _release_write_lock' _ "$repo" "$REPO_ROOT"
+      [ "$status" -eq 0 ]
+      [ $((SECONDS - _t0)) -le 2 ]
+      # 최종 무잔재 — lock 본체·meta뿐 아니라 .own/.acq/.obs 사이드카 전부
+      run bash -c 'ls -d "$1/state"/ticket_write.lock.d* 2>/dev/null' _ "$repo"
+      [ -z "$output" ]
+      return 0
+    fi
+    wait "$rpid" 2>/dev/null || true
+    # 다음 시도 준비 — 새 소유 커밋 + post 태그
+    echo "v$((attempt+2))" > "$repo/file.txt"
+    git -C "$repo" add file.txt
+    git -C "$repo" commit -q -m "T200: cycle change r43-$attempt"
+    git -C "$repo" tag -f -a "cycle/T200-post" -m "owned-commits
+$(git -C "$repo" rev-parse HEAD)"
+  done
+  skip "5회 시도 모두 TERM 전달 전에 parent가 종료 — 창 관측 불가 (rc=0 위장 없음은 확인됨)"
+}

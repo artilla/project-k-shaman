@@ -67,51 +67,227 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   # inode를 하드링크(.obs.$$)로 결속하고, dead 재검증 후 -ef가 성립할 때만 각
   # 파일을 제거하고 rmdir한다. 그 사이 교체된 live lock은 inode가 달라 무접촉이며
   # rmdir 실패로 canonical에 그대로 남는다 (foreign lock 무이동 — 상호배제 공백 없음).
-  _rb_reclaim_dead() {  # $1=lock dir → 0=해체 완료, 1=회수 불가
-      local _lk="$1" _obs="$1.obs.$$" _meta="$1.rec.d" _p _mp _rc=1
-      rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
-      _p="$(cat "$_lk/pid" 2>/dev/null || true)"
-      [ -n "$_p" ] || return 1
-      kill -0 "$_p" 2>/dev/null && return 1
-      # 7라운드 P1(#2): -ef 확인과 경로 기반 rm 사이에 다른 reclaimer가 구 lock을
-      # 제거하고 새 owner가 획득하면 새 token이 삭제됐다 (실측: writer 고착) —
-      # 회수를 meta-lock(mkdir 원자)으로 직렬화한다. canonical 제거는 meta-lock
-      # 보유자만 수행한다. meta-lock stale은 pid-dead 시 정리(내용물 처분 가능).
-      if ! mkdir "$_meta" 2>/dev/null; then
-        _mp="$(cat "$_meta/pid" 2>/dev/null || true)"
-        if [ -n "$_mp" ] && ! kill -0 "$_mp" 2>/dev/null; then
-          rm -rf "$_meta" 2>/dev/null || true
-        fi
-        return 1
+  # 9라운드 P1(#1): meta-lock의 내용물 파일명은 "incarnation-고유"다 —
+  # pid.<mid>/token.<mid> (mid = pid.시각.난수). 경로 기반 rm은 항상 "-ef 확인과
+  # rm 사이" 창에서 successor의 파일을 지울 수 있었다 (실측: R1 정지 → R2 해체 →
+  # R3 획득 → R1 재개 시 R3 token 삭제). 고유 이름에서는 그 창이 구조적으로 없다:
+  #   - 죽은 incarnation의 파일명은 successor의 이름공간과 절대 겹치지 않는다.
+  #   - canonical 제거는 rmdir뿐 — live incarnation은 사전 구성 rename으로 항상
+  #     파일을 담은 채 도착하므로 rmdir이 successor를 제거하는 일도 없다.
+  #   - 빈 meta(해체 도중 죽음)는 누구든 rmdir로 안전 회수, token-only 상태는
+  #     발생하지 않는다(pid를 항상 마지막에 지운다) — 영구 고착 제거.
+  _RB_META_MID=""
+  _rb_meta_acquire() {  # $1=main lock dir → 0=meta 획득(소유 증거 .rec.d.own.$$), 1=실패(양보)
+    local _meta="$1.rec.d" _mpre="$1.rec.d.pre.$$" _mown="$1.rec.d.own.$$" _mobs="$1.rec.d.obs.$$"
+    local _mid _mp _pf _f _dmid _cp
+    _mid="$$.$(date +%s 2>/dev/null || echo 0).${RANDOM}${RANDOM}"
+    rm -rf "$_mpre" 2>/dev/null || true
+    rm -f "$_mown" "$_mobs.p" 2>/dev/null || true
+    mkdir "$_mpre" 2>/dev/null || return 1
+    echo "$$" > "$_mpre/pid.$_mid" 2>/dev/null || { rm -rf "$_mpre" 2>/dev/null || true; return 1; }
+    printf 'meta.%s' "$_mid" > "$_mpre/token.$_mid" 2>/dev/null || { rm -rf "$_mpre" 2>/dev/null || true; return 1; }
+    ln "$_mpre/token.$_mid" "$_mown" 2>/dev/null || { rm -rf "$_mpre" 2>/dev/null || true; return 1; }
+    if [ ! -e "$_meta" ] && mv "$_mpre" "$_meta" 2>/dev/null; then
+      if [ "$_meta/token.$_mid" -ef "$_mown" ] && [ ! -d "$_meta/${_mpre##*/}" ]; then
+        _RB_META_MID="$_mid"
+        return 0
       fi
-      if ! echo "$$" > "$_meta/pid" 2>/dev/null; then
+      rm -rf "$_meta/${_mpre##*/}" 2>/dev/null || true
+      rm -f "$_mown" 2>/dev/null || true
+      return 1
+    fi
+    rm -rf "$_mpre" 2>/dev/null || true
+    rm -f "$_mown" 2>/dev/null || true
+    # ── 기존 meta 처리 (해체 후에도 이번 획득은 양보 — 호출자 루프가 재시도) ──
+    _pf=""
+    for _f in "$_meta"/pid.*; do
+      [ -e "$_f" ] && { _pf="$_f"; break; }
+    done
+    if [ -z "$_pf" ]; then
+      # 11라운드 P1(#1): pid 파일 없는 meta의 잔재 회수 — 단일 glob 스냅샷의
+      # 이름만 다룬다. token.<mid>는 mid에 creator pid가 박혀 있어(mid=pid.시각.난수)
+      # creator가 죽었을 때만 회수한다: live incarnation의 token은 creator가 살아
+      # 있어 무접촉이고(이 glob이 successor를 잡아도 안전), 부분 해제(token rm
+      # 실패 + pid rm 성공)가 남긴 죽은 token.<mid>는 회수돼 영구 고착이 없다.
+      for _f in "$_meta"/*; do
+        [ -e "$_f" ] || continue
+        case "${_f##*/}" in
+          pid.*) : ;;   # 이 스냅샷에 pid가 보이면 새 incarnation일 수 있다 — 무접촉 양보
+          token.*)
+            _cp="${_f##*/token.}"; _cp="${_cp%%.*}"
+            case "$_cp" in
+              ''|*[!0-9]*) : ;;
+              *) kill -0 "$_cp" 2>/dev/null || rm -f "$_f" 2>/dev/null ;;
+            esac
+            ;;
+          pid|token)
+            # (구버전 호환) 고정 이름 잔재 — 구버전 pid가 죽었을 때만 정리
+            _mp="$(cat "$_meta/pid" 2>/dev/null || true)"
+            if [ -z "$_mp" ] || ! kill -0 "$_mp" 2>/dev/null; then
+              rm -f "$_f" 2>/dev/null
+            fi
+            ;;
+        esac
+      done
+      # pid 없는 meta = 죽은 incarnation의 잔재뿐 (live는 pid를 담고 도착하고
+      # pid는 마지막에 지워진다) — 고유 이름 잔재 정리 후 rmdir(비어 있을 때만).
+      # rmdir은 비어 있을 때만 성공한다 — 잔재가 남았으면(live successor 포함)
+      # 그대로 두고 양보한다 (무접촉).
+      rmdir "$_meta" 2>/dev/null || true
+      return 1
+    fi
+    _mp="$(cat "$_pf" 2>/dev/null || true)"
+    [ -n "$_mp" ] || return 1
+    kill -0 "$_mp" 2>/dev/null && return 1
+    # dead 재검증은 관찰한 pid 파일 inode에 결속 — 이후의 rm들은 incarnation-고유
+    # 이름이라 언제 재개되어도 successor를 건드릴 수 없다.
+    # 10라운드 P1(#2): 검증 "이후"의 glob 재확장 금지 — 정지~재개 사이에 dir이
+    # 교체되면 재확장된 token.* glob이 successor의 token을 지웠다 (실측). 파괴
+    # 대상 이름은 전부 관찰한 pid 파일의 mid에서 유도한다(token.<mid>) — 죽은
+    # incarnation의 고정 이름뿐이라 언제 재개돼도 successor와 겹치지 않는다.
+    _dmid="${_pf##*/pid.}"
+    if ln "$_pf" "$_mobs.p" 2>/dev/null; then
+      if [ "$(cat "$_mobs.p" 2>/dev/null || true)" = "$_mp" ] && ! kill -0 "$_mp" 2>/dev/null \
+         && [ "$_pf" -ef "$_mobs.p" ]; then
+        rm -f "$_meta/token.$_dmid" 2>/dev/null || true
+        rm -f "$_meta/pid.$_dmid" 2>/dev/null || true
         rmdir "$_meta" 2>/dev/null || true
+      fi
+      rm -f "$_mobs.p" 2>/dev/null || true
+    fi
+    return 1
+  }
+  _rb_meta_release() {  # $1=main lock dir
+    local _meta="$1.rec.d" _mown="$1.rec.d.own.$$" _mid="${_RB_META_MID:-}"
+    # 12라운드 P1(#1) → 13라운드 P1(#3): 해체는 token.<mid>→pid.<mid>→rmdir "각
+    # 단계를 검증"하며 진행한다. 어느 단계든 실패하면 소유 증거(.own·mid)를
+    # 유지한 채 rc=1을 전파해 재호출이 남은 단계부터 이어간다 — 종전에는 token
+    # 삭제 성공 후 pid 삭제 실패가 rc=0으로 위장됐고(반대편 부분 실패), token
+    # 삭제 실패 시 .own을 지워 재시도 자체가 불가능했다 (실측). mid-고유
+    # 이름이므로 어떤 재시도 단계도 남의 파일과 겹치지 않는다.
+    if [ -n "$_mid" ] && [ -f "$_mown" ]; then
+      if [ "$_meta/token.$_mid" -ef "$_mown" ]; then
+        rm -f "$_meta/token.$_mid" 2>/dev/null || true
+        if [ -e "$_meta/token.$_mid" ]; then
+          echo "[WARN] meta-lock token 삭제 실패 — 소유 증거를 유지하고 실패를 전파합니다 (재시도 가능): $_meta/token.$_mid" >&2
+          return 1
+        fi
+      elif [ -e "$_meta/token.$_mid" ] || [ -L "$_meta/token.$_mid" ]; then
+        echo "[WARN] meta-lock token.<mid>가 내 inode가 아닙니다(예상 밖 재생성) — 무접촉, 해제 실패: $_meta/token.$_mid" >&2
         return 1
       fi
-      if [ -f "$_lk/token" ]; then
-        ln "$_lk/token" "$_obs.t" 2>/dev/null || { rm -rf "$_meta" 2>/dev/null || true; return 1; }
-      fi
-      if ! ln "$_lk/pid" "$_obs.p" 2>/dev/null; then
-        rm -f "$_obs.t" 2>/dev/null || true
-        rm -rf "$_meta" 2>/dev/null || true
-        return 1
-      fi
-      if [ "$(cat "$_obs.p" 2>/dev/null || true)" = "$_p" ] && ! kill -0 "$_p" 2>/dev/null; then
-        if [ ! -f "$_obs.t" ] || [ "$_lk/token" -ef "$_obs.t" ]; then
-          [ -f "$_obs.t" ] && rm -f "$_lk/token" 2>/dev/null
-          if [ "$_lk/pid" -ef "$_obs.p" ]; then
-            rm -f "$_lk/pid" 2>/dev/null || true
-          fi
-          rmdir "$_lk" 2>/dev/null && _rc=0
+      if [ -e "$_meta/pid.$_mid" ]; then
+        rm -f "$_meta/pid.$_mid" 2>/dev/null || true
+        if [ -e "$_meta/pid.$_mid" ]; then
+          echo "[WARN] meta-lock pid 삭제 실패 — 소유 증거를 유지하고 실패를 전파합니다 (재시도 가능): $_meta/pid.$_mid" >&2
+          return 1
         fi
       fi
-      rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
-      rm -rf "$_meta" 2>/dev/null || true
+      if [ -d "$_meta" ]; then
+        rmdir "$_meta" 2>/dev/null || true
+        if [ -d "$_meta" ]; then
+          echo "[WARN] meta-lock 디렉터리 정리 실패(예상 밖 잔여물) — 소유 증거를 유지하고 실패를 전파합니다: $_meta" >&2
+          return 1
+        fi
+      fi
+    fi
+    rm -f "$_mown" 2>/dev/null || true
+    if [ -e "$_mown" ] || [ -L "$_mown" ]; then
+      echo "[WARN] meta-lock 소유 증거(.own) 삭제 실패 — 실패를 전파합니다 (재시도 가능): $_mown" >&2
+      return 1
+    fi
+    _RB_META_MID=""
+    return 0
+  }
+  # 8라운드 P2: EXIT trap을 우회한 종료(강제 KILL 등)가 남긴 lock 부속물(.own/.acq/
+  # .obs)과 meta-lock(.rec.d 및 그 .pre/.own/.obs)을 다음 획득 시점에 gc한다 —
+  # 이름에 박힌 pid(meta 본체는 내부 pid)가 죽어 있을 때만 치운다
+  # (write_lock.sh의 _twl_gc_artifacts와 동일 계약).
+  _rb_gc_lock_artifacts() {  # $1=lock canonical 경로
+    local _f _pid _pf
+    # 9라운드 P1(#1b): pid 파일이 "없는" meta(해체 도중 죽음)도 회수한다 —
+    # _rb_meta_acquire의 기존-meta 처리 경로가 잔재 정리와 rmdir을 수행한다.
+    if [ -d "$1.rec.d" ]; then
+      _pf=""
+      for _f in "$1.rec.d"/pid.*; do
+        [ -e "$_f" ] && { _pf="$_f"; break; }
+      done
+      _pid=""
+      [ -n "$_pf" ] && _pid="$(cat "$_pf" 2>/dev/null || true)"
+      if [ -z "$_pid" ] || ! kill -0 "$_pid" 2>/dev/null; then
+        _rb_meta_acquire "$1" >/dev/null 2>&1 && _rb_meta_release "$1"
+      fi
+    fi
+    for _f in "$1".own.* "$1".acq.* "$1".obs.*.t "$1".obs.*.p \
+              "$1".rec.d.pre.* "$1".rec.d.own.* "$1".rec.d.obs.*; do
+      [ -e "$_f" ] || continue
+      _pid="${_f##*.}"
+      case "$_pid" in t|p) _pid="${_f%.*}"; _pid="${_pid##*.}" ;; esac
+      case "$_pid" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      kill -0 "$_pid" 2>/dev/null && continue
+      rm -rf "$_f" 2>/dev/null || true
+    done
+    return 0
+  }
+
+  _rb_reclaim_dead() {  # $1=lock dir → 0=해체 완료, 1=회수 불가(live/교체/경합/잔여물)
+    local _lk="$1" _obs="$1.obs.$$" _p _rc=1
+    rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
+    _p="$(cat "$_lk/pid" 2>/dev/null || true)"
+    if [ -z "$_p" ]; then
+      # 10라운드 P1(#3): 해제 도중 'token rm 실패 + pid rm 성공'이 남긴 token-only
+      # 잔재 — live lock은 항상 pid를 갖는다(사전 구성 rename + 해제는 token→pid
+      # 순서라 pid 없는 live 상태가 없다). 내용물이 "정확히 token 하나"일 때만,
+      # meta 직렬화 아래에서 회수한다: meta를 쥔 동안에는 canonical이 교체될 수
+      # 없으므로(교체는 선행 해체가 필요하고 해체는 meta 직렬화) 고정 이름 rm이
+      # successor를 건드릴 수 없다. 그 외 pid 없는 lock은 기존 계약대로 무접촉.
+      [ -d "$_lk" ] || return 1
+      [ -f "$_lk/token" ] || return 1
+      [ "$(ls -A "$_lk" 2>/dev/null | wc -l | tr -d ' ')" = "1" ] || return 1
+      _rb_meta_acquire "$_lk" || return 1
+      if [ -d "$_lk" ] && [ ! -f "$_lk/pid" ] && [ -f "$_lk/token" ] \
+         && [ "$(ls -A "$_lk" 2>/dev/null | wc -l | tr -d ' ')" = "1" ]; then
+        rm -f "$_lk/token" 2>/dev/null || true
+        rmdir "$_lk" 2>/dev/null && _rc=0
+      fi
+      _rb_meta_release "$_lk"
       return "$_rc"
+    fi
+    kill -0 "$_p" 2>/dev/null && return 1
+    # 7라운드 P1(#2): 해체는 meta-lock 아래에서만 — 참여자 간 -ef→rm 창 제거.
+    # 8라운드 P1(#1): meta-lock 자체도 원자 rename + inode 결속 (_rb_meta_acquire).
+    _rb_meta_acquire "$_lk" || return 1
+    if [ -f "$_lk/token" ]; then
+      if ! ln "$_lk/token" "$_obs.t" 2>/dev/null; then
+        _rb_meta_release "$_lk"
+        return 1
+      fi
+    fi
+    if ! ln "$_lk/pid" "$_obs.p" 2>/dev/null; then
+      rm -f "$_obs.t" 2>/dev/null || true
+      _rb_meta_release "$_lk"
+      return 1
+    fi
+    if [ "$(cat "$_obs.p" 2>/dev/null || true)" = "$_p" ] && ! kill -0 "$_p" 2>/dev/null; then
+      if [ ! -f "$_obs.t" ] || [ "$_lk/token" -ef "$_obs.t" ]; then
+        [ -f "$_obs.t" ] && rm -f "$_lk/token" 2>/dev/null
+        if [ "$_lk/pid" -ef "$_obs.p" ]; then
+          rm -f "$_lk/pid" 2>/dev/null || true
+        fi
+        rmdir "$_lk" 2>/dev/null && _rc=0
+      fi
+    fi
+    rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
+    _rb_meta_release "$_lk"
+    return "$_rc"
   }
   _rb_wl_acquire() {
     local _i=0 _p _pt _mp _mt _pre="$_RB_WL.acq.$$" _own="$_RB_WL.own.$$"
     mkdir -p state 2>/dev/null || true
+    # 8라운드 P2: 죽은 실행이 남긴 lock 부속물(meta-lock 포함) gc — 획득 전 한 번.
+    _rb_gc_lock_artifacts "$_RB_WL"
     _rb_wl_mkpre() {
       rm -rf "$_pre" 2>/dev/null || true
       rm -f "$_own" 2>/dev/null || true
@@ -141,24 +317,81 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
         # 훔치지 않고 bounded 대기로 재시도한다.
         _rb_reclaim_dead "$_RB_WL" && continue
       fi
+      # 9라운드 P1(#5) 파생: "완전히 빈" canonical lock 디렉터리는 해제 마무리(rmdir)
+      # 직전에 죽은 잔재다 — live lock은 사전 구성 rename으로 항상 내용을 담고 도착하고
+      # 내용이 있는 동안은 무접촉 계약이 유지된다. 빈 디렉터리 회수는 rmdir뿐이라
+      # (비어 있을 때만 성공) 어떤 race에서도 live lock을 제거할 수 없다.
+      if [ -z "$_p" ] && [ -d "$_RB_WL" ]; then
+        if [ -z "$(ls -A "$_RB_WL" 2>/dev/null)" ]; then
+          rmdir "$_RB_WL" 2>/dev/null || true
+        else
+          # 10라운드 P1(#3): token-only 잔재(해제 도중 token rm 실패 + pid rm 성공)는
+          # meta 직렬화 아래에서 회수한다 — 그 외 조합은 기존대로 무접촉 대기.
+          _rb_reclaim_dead "$_RB_WL" && continue
+        fi
+      fi
       _i=$((_i+1))
       if [ "$_i" -ge 100 ]; then rm -rf "$_pre" 2>/dev/null || true; rm -f "$_own" 2>/dev/null || true; return 1; fi
       sleep 0.1
     done
   }
   _rb_wl_release() {
-    local _own="$_RB_WL.own.$$"
+    local _own="$_RB_WL.own.$$" _p
     rm -rf "$_RB_WL.acq.$$" 2>/dev/null || true
     rm -f "$_RB_WL.obs.$$.t" "$_RB_WL.obs.$$.p" 2>/dev/null || true
-    if [ -f "$_own" ] && [ "$_RB_WL/token" -ef "$_own" ]; then
-      rm -f "$_RB_WL/token" "$_RB_WL/pid" 2>/dev/null || true
-      rmdir "$_RB_WL" 2>/dev/null \
-        || echo "⚠️  writer lock 디렉터리 정리 실패(예상 밖 잔여물) — 확인 필요: ${_RB_WL}" >&2
+    # 12라운드 P1(#1) → 14라운드 P1(#2): token→pid→rmdir→own 각 단계를 "검증"하며
+    # 해체한다. 어느 단계든 실패하면 소유 증거(.own)를 유지한 채 rc=1을 전파해
+    # 재호출이 남은 단계부터 이어간다 — 종전 복제 구현은 pid/rmdir 실패를 무시하고
+    # .own을 지운 뒤 0을 반환해, 살아 있는 내 pid의 pid-only lock이 소유 증거 없이
+    # 남았다 (실측).
+    if [ -f "$_own" ]; then
+      if [ "$_RB_WL/token" -ef "$_own" ]; then
+        rm -f "$_RB_WL/token" 2>/dev/null || true
+        if [ -e "$_RB_WL/token" ]; then
+          echo "⚠️  writer lock token 삭제 실패 — 소유 증거를 유지하고 실패를 전파합니다 (재시도 가능): ${_RB_WL}" >&2
+          return 1
+        fi
+      elif [ -e "$_RB_WL/token" ] || [ -L "$_RB_WL/token" ]; then
+        rm -f "$_own" 2>/dev/null || true   # 남의 lock 무접촉, stale own만 정리
+        if [ -e "$_own" ] || [ -L "$_own" ]; then
+          echo "⚠️  writer lock 소유 증거(.own) 삭제 실패 (재시도 가능): $_own" >&2
+          return 1
+        fi
+        return 0
+      fi
+      if [ -d "$_RB_WL" ]; then
+        if [ -f "$_RB_WL/pid" ]; then
+          _p="$(cat "$_RB_WL/pid" 2>/dev/null || true)"
+          if [ "$_p" != "$$" ]; then
+            rm -f "$_own" 2>/dev/null || true   # 내 pid가 아니다 — 남의 잔재 무접촉
+            if [ -e "$_own" ] || [ -L "$_own" ]; then
+              echo "⚠️  writer lock 소유 증거(.own) 삭제 실패 (재시도 가능): $_own" >&2
+              return 1
+            fi
+            return 0
+          fi
+          rm -f "$_RB_WL/pid" 2>/dev/null || true
+          if [ -e "$_RB_WL/pid" ]; then
+            echo "⚠️  writer lock pid 삭제 실패 — 소유 증거를 유지하고 실패를 전파합니다 (재시도 가능): ${_RB_WL}" >&2
+            return 1
+          fi
+        fi
+        rmdir "$_RB_WL" 2>/dev/null || true
+        if [ -d "$_RB_WL" ]; then
+          echo "⚠️  writer lock 디렉터리 정리 실패(예상 밖 잔여물) — 소유 증거를 유지하고 실패를 전파합니다: ${_RB_WL}" >&2
+          return 1
+        fi
+      fi
     fi
     rm -f "$_own" 2>/dev/null || true
+    if [ -e "$_own" ] || [ -L "$_own" ]; then
+      echo "⚠️  writer lock 소유 증거(.own) 삭제 실패 — 실패를 전파합니다 (재시도 가능): $_own" >&2
+      return 1
+    fi
+    :
     return 0
   }
-  trap '_rb_wl_release' EXIT
+  trap '_rb_wl_release || true' EXIT
   if ! _rb_wl_acquire; then
     echo "❌ 시스템 writer lock(${_RB_WL}) 획득 실패 — clean 판정과 rollback을 직렬화할 수 없어 중단합니다 (fail-closed)." >&2
     exit 3
@@ -398,6 +631,11 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     # 버리고(메인 무변경, all-or-nothing), 성공 시에만 공개 전 재검증을 통과한
     # 결과를 ff-only로 원자 공개한다.
     _WT_BASE="$(mktemp -d "${TMPDIR:-/tmp}/rollback-wt.XXXXXX")" || { echo "❌ 격리 worktree temp 생성 실패." >&2; exit 3; }
+    # 9라운드 P1(#4): 경로는 생성 즉시 "물리 경로"로 고정한다 — macOS의
+    # TMPDIR(/var/... → /private/var/...)처럼 symlink를 경유하면 Git이 등록하는
+    # 물리 경로와 문자열이 달라, cleanup의 등록-부재 검증(worktree list·
+    # .git/worktrees/*/gitdir 대조)이 stale 등록을 놓치고 성공을 위장했다 (실측).
+    _WT_BASE="$(cd "$_WT_BASE" 2>/dev/null && pwd -P)" || { echo "❌ 격리 worktree temp 경로 정규화 실패." >&2; exit 3; }
     _WT="${_WT_BASE}/wt"
     # 6라운드 P1(#4): cleanup 자식도 deadline 아래에서 — worktree remove가 지연/
     # TERM 무시면 rollback과 writer lock이 무한정 남았다 (실측 7s+). 실패는 삼키지
@@ -422,15 +660,54 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     _rb_cleanup_wt() {
       # 7라운드 P2: remove·prune 각각이 아니라 cleanup "전체"가 하나의 deadline(5s)을
       # 공유한다 (합산 10s+ 방지).
-      local _cl_dl
+      # 8라운드 P1(#5):
+      #   (a) 판정은 명령 rc가 아니라 "실제 상태 관측"뿐이다 — remove/prune이
+      #       rc=0 no-op이어도 Git 등록이 남아 있으면 정리 완료가 아니고, 반대로
+      #       개별 명령이 실패했어도 최종 상태가 깨끗하면(재호출 멱등 포함) 완료다.
+      #       관측 = 디렉터리 부재 + `git worktree list` 부재 + .git/worktrees
+      #       등록(gitdir 파일) 부재. 관측 자체가 실패하면 완료로 판정하지 않는다
+      #       (fail-closed).
+      #   (b) rm -rf도 같은 공용 deadline 아래의 bounded 자식이다 — 지연 재현
+      #       (30s)에서 rollback과 writer lock이 deadline 밖에 무한정 남았다.
+      #   (P2) 명령 stderr는 삼키지 않는다 — 실패 진단을 stderr로 중계한다.
+      local _cl_dl _wtl _reg _d _err
       _cl_dl=$(( $(date +%s) + 5 ))
+      _err="$(mktemp "${TMPDIR:-/tmp}/rb-clerr.XXXXXX" 2>/dev/null || true)"
       # 멱등: 이미 정리된 뒤의 재호출이 실패로 오인되지 않도록 존재할 때만 시도
       if [ -d "$_WT" ]; then
-        _rb_bounded "$_cl_dl" git worktree remove --force "$_WT" >/dev/null 2>&1 || _RB_WT_CLEAN_OK=0
+        if ! _rb_bounded "$_cl_dl" git worktree remove --force "$_WT" >/dev/null 2>"${_err:-/dev/null}"; then
+          [ -n "$_err" ] && [ -s "$_err" ] && sed 's/^/   [git worktree remove] /' "$_err" >&2
+        fi
       fi
-      _rb_bounded "$_cl_dl" git worktree prune >/dev/null 2>&1 || true
-      rm -rf "$_WT_BASE" 2>/dev/null || true
-      [ -d "$_WT" ] && _RB_WT_CLEAN_OK=0
+      if ! _rb_bounded "$_cl_dl" git worktree prune >/dev/null 2>"${_err:-/dev/null}"; then
+        [ -n "$_err" ] && [ -s "$_err" ] && sed 's/^/   [git worktree prune] /' "$_err" >&2
+      fi
+      if [ -e "$_WT_BASE" ]; then
+        _rb_bounded "$_cl_dl" rm -rf "$_WT_BASE" >/dev/null 2>/dev/null || true
+      fi
+      # ── 실제 상태 관측 — 이것만이 _RB_WT_CLEAN_OK의 근거다 ──
+      _RB_WT_CLEAN_OK=1
+      [ -e "$_WT" ] && _RB_WT_CLEAN_OK=0
+      [ -e "$_WT_BASE" ] && _RB_WT_CLEAN_OK=0
+      _wtl="$(mktemp "${TMPDIR:-/tmp}/rb-wtl.XXXXXX" 2>/dev/null || true)"
+      if [ -n "$_wtl" ] && _rb_bounded "$_cl_dl" git worktree list --porcelain > "$_wtl" 2>/dev/null; then
+        grep -Fxq "worktree ${_WT}" "$_wtl" && _RB_WT_CLEAN_OK=0
+      else
+        _RB_WT_CLEAN_OK=0   # 등록 목록을 관측하지 못함 — 완료라고 말하지 않는다
+      fi
+      [ -n "$_wtl" ] && rm -f "$_wtl" 2>/dev/null
+      _reg="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || git rev-parse --git-common-dir 2>/dev/null || true)"
+      if [ -n "$_reg" ] && [ -d "$_reg/worktrees" ]; then
+        for _d in "$_reg/worktrees"/*/; do
+          [ -f "${_d}gitdir" ] || continue
+          [ "$(cat "${_d}gitdir" 2>/dev/null || true)" = "${_WT}/.git" ] && _RB_WT_CLEAN_OK=0
+        done
+      elif [ -z "$_reg" ]; then
+        _RB_WT_CLEAN_OK=0   # common git dir 관측 실패 — fail-closed
+      fi
+      [ -n "$_err" ] && rm -f "$_err" 2>/dev/null
+      # 신호 경로가 남길 수 있는 진단 temp도 회수 (내용은 각 실패 경로가 이미 중계)
+      rm -f "${_RB_TXN_ERR:-}" "${_RB_WTA_ERR:-}" 2>/dev/null || true
       return 0
     }
     # 8차 2회 P1(#6) → 8라운드 후속 P1(#2): 공개 여부를 shell boolean으로 들지
@@ -541,12 +818,19 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
       _RB_PHASE="main"
       return "$_rc"
     }
-    if ! _rb_run git worktree add --detach "$_WT" "$HEAD_OID" >/dev/null 2>&1; then
+    # 8라운드 P2: 실패 진단(git stderr)을 숨기지 않는다 — 파일로 받아 실패 시 중계.
+    _RB_WTA_ERR="$(mktemp "${TMPDIR:-/tmp}/rb-wtaerr.XXXXXX" 2>/dev/null || true)"
+    if ! _rb_run git worktree add --detach "$_WT" "$HEAD_OID" >/dev/null 2>"${_RB_WTA_ERR:-/dev/null}"; then
+      echo "❌ 격리 worktree 생성 실패 — 자동 롤백을 중단합니다 (fail-closed)." >&2
+      if [ -n "${_RB_WTA_ERR:-}" ]; then
+        [ -s "$_RB_WTA_ERR" ] && sed 's/^/   [git worktree add] /' "$_RB_WTA_ERR" >&2
+        rm -f "$_RB_WTA_ERR" 2>/dev/null || true
+      fi
       _rb_cleanup_wt
       trap - INT TERM HUP
-      echo "❌ 격리 worktree 생성 실패 — 자동 롤백을 중단합니다 (fail-closed)." >&2
       exit 3
     fi
+    [ -n "${_RB_WTA_ERR:-}" ] && rm -f "$_RB_WTA_ERR" 2>/dev/null
 
     # 8차 2회 P1(#7): 격리 worktree의 revert도 "저장소의" hook(post-commit 등)을
     # 실행한다 — hook이 만든 외부 커밋이 격리 HEAD에 쌓여 rollback 결과에 포함된
@@ -673,7 +957,8 @@ if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
     [ "$(git symbolic-ref -q HEAD || true)" = "$HEAD_REF" ] \
       || _rb_publish_fail "검증 후 checkout된 branch가 바뀌었습니다 (${HEAD_REF} → $(git symbolic-ref -q HEAD || echo detached))"
     _rb_txn_ok=1
-    git update-ref --stdin >/dev/null 2>&1 <<REF_TXN || _rb_txn_ok=0
+    _RB_TXN_ERR="$(mktemp "${TMPDIR:-/tmp}/rb-txnerr.XXXXXX" 2>/dev/null || true)"
+    git update-ref --stdin >/dev/null 2>"${_RB_TXN_ERR:-/dev/null}" <<REF_TXN || _rb_txn_ok=0
 start
 update ${HEAD_REF} ${_NEW} ${HEAD_OID}
 delete refs/tags/${POST_TAG} ${POST_TAGOBJ}
@@ -682,6 +967,11 @@ commit
 REF_TXN
     if [ "$_rb_txn_ok" != "1" ]; then
       # 어떤 old-value가 어긋났는지 진단해 보고한다 (모두 무변경 — 원자 거부)
+      # 8라운드 P2: Git 자신의 거부 사유도 숨기지 않는다.
+      if [ -n "${_RB_TXN_ERR:-}" ] && [ -s "$_RB_TXN_ERR" ]; then
+        sed 's/^/   [git update-ref] /' "$_RB_TXN_ERR" >&2
+      fi
+      [ -n "${_RB_TXN_ERR:-}" ] && rm -f "$_RB_TXN_ERR" 2>/dev/null
       _rb_tag_now="$(git rev-parse -q --verify "refs/tags/${POST_TAG}" 2>/dev/null || true)"
       _rb_br_now="$(git rev-parse -q --verify "$HEAD_REF" 2>/dev/null || true)"
       if [ "$_rb_tag_now" != "$POST_TAGOBJ" ]; then
@@ -692,6 +982,8 @@ REF_TXN
         _rb_publish_fail "ref transaction 거부 (CAS 실패 — checkout branch 결속 또는 동시 변경)"
       fi
     fi
+
+    [ -n "${_RB_TXN_ERR:-}" ] && rm -f "$_RB_TXN_ERR" 2>/dev/null
 
     # 공개 직후 재검증 (8라운드 후속 P1(#1)): worktree 동기화는 "현재 checkout
     # == 공개한 branch == _NEW"일 때만 수행한다 — 결속이 깨졌으면 다른 branch의
@@ -712,10 +1004,20 @@ REF_TXN
     # child가 있어도 전달 → bounded 대기 → KILL → reap으로 수명을 소유한다.
     # 공개 후 미동기화 상태는 복구 참조(refs/rollback/<ID>)로 명시한다.
     _RB_PHASE="readtree"
+    # 8라운드 P2: 공개 "후" 단계의 진단을 /dev/null로 숨기지 않는다 — read-tree의
+    # stderr를 파일로 받아 실패·신호 보고에 함께 중계한다 (부분 완료의 원인 식별).
+    _RT_ERR="$(mktemp "${TMPDIR:-/tmp}/rb-rterr.XXXXXX" 2>/dev/null || true)"
     set -m
-    git read-tree -m -u "$HEAD_OID" "$_NEW" 2>/dev/null &
+    git read-tree -m -u "$HEAD_OID" "$_NEW" 2>"${_RT_ERR:-/dev/null}" &
     _rt_pid=$!
     set +m
+    _rt_err_dump() {
+      [ -n "${_RT_ERR:-}" ] || return 0
+      [ -s "$_RT_ERR" ] && sed 's/^/   [git read-tree] /' "$_RT_ERR" >&2
+      rm -f "$_RT_ERR" 2>/dev/null || true
+      _RT_ERR=""
+      return 0
+    }
     _rt_rc=0
     while :; do
       _rt_rc=0
@@ -736,6 +1038,7 @@ REF_TXN
         # 값만 단정하지 않는다.
         _rb_cur_now="$(git rev-parse -q --verify "$HEAD_REF" 2>/dev/null || true)"
         echo "❌ 신호로 중단됨 — ref 공개는 완료됐고(공개 시점 ${HEAD_REF} = ${_NEW}, 현재 tip ${_rb_cur_now:-?}, ${POST_TAG} 삭제됨) worktree 동기화는 미완일 수 있습니다: 'git status' 확인 후 로컬 변경이 없으면 'git reset --hard HEAD'로 동기화하세요. $(_rb_rref_note)" >&2
+        _rt_err_dump
         exit 130
       fi
       kill -0 "$_rt_pid" 2>/dev/null || break
@@ -753,9 +1056,11 @@ REF_TXN
       _rb_cleanup_wt
       trap - INT TERM HUP
       _rb_save_recovery || true
-      echo "❌ ref 공개는 완료됐지만(${HEAD_REF} = ${_NEW}) 워크트리 동기화에 실패했습니다 — 로컬 변경과 충돌. 'git status' 확인 후 수동 동기화(git checkout -- <path>)가 필요합니다. $(_rb_rref_note)" >&2
+      echo "❌ ref 공개는 완료됐지만(${HEAD_REF} = ${_NEW}) 워크트리 동기화에 실패했습니다 (rc=${_rt_rc}) — 'git status' 확인 후 수동 동기화(git checkout -- <path>)가 필요합니다. $(_rb_rref_note)" >&2
+      _rt_err_dump
       exit 3
     fi
+    _rt_err_dump
 
     # (iii) 동기화 직후 결속 재검증 (재리뷰 P1(#7) 재수정): read-tree는 "그 시점의
     # ambient HEAD"가 가리키는 worktree에 적용된다. 사전 점검과 read-tree 사이에
@@ -768,7 +1073,17 @@ REF_TXN
     if [ "$(git symbolic-ref -q HEAD 2>/dev/null || true)" != "$HEAD_REF" ]; then
       _rb_cur_oid="$(git rev-parse -q --verify HEAD 2>/dev/null || true)"
       _rb_undo_note="worktree 원상복구 실패 — 'git status'로 직접 확인하세요"
-      if [ -n "$_rb_cur_oid" ] && git read-tree -m -u "$_NEW" "$_rb_cur_oid" 2>/dev/null; then
+      # 8라운드 P2: 원상복구 read-tree의 진단도 숨기지 않는다.
+      _rb_undo_err="$(mktemp "${TMPDIR:-/tmp}/rb-uerr.XXXXXX" 2>/dev/null || true)"
+      _rb_undo_ok=0
+      if [ -n "$_rb_cur_oid" ] && git read-tree -m -u "$_NEW" "$_rb_cur_oid" 2>"${_rb_undo_err:-/dev/null}"; then
+        _rb_undo_ok=1
+      fi
+      if [ -n "${_rb_undo_err:-}" ]; then
+        [ -s "$_rb_undo_err" ] && sed 's/^/   [git read-tree undo] /' "$_rb_undo_err" >&2
+        rm -f "$_rb_undo_err" 2>/dev/null || true
+      fi
+      if [ "$_rb_undo_ok" -eq 1 ]; then
         # 복구 주장은 관측으로만 — status 실패/dirty면 완료라고 말하지 않는다.
         if _rb_undo_st="$(git status --porcelain --untracked-files=no 2>/dev/null)" && [ -z "$_rb_undo_st" ]; then
           _rb_undo_note="worktree 원상복구 완료 (현재 HEAD ${_rb_cur_oid} tree 기준)"
@@ -839,8 +1154,32 @@ REF_TXN
       4) _rb_final_fail "git status 실패 — 작업트리 상태를 판정할 수 없습니다" ;;
       *) _rb_final_fail "추적 파일이 clean하지 않습니다 (index/worktree 부정합)" ;;
     esac
-    echo "rolled back $ID by revert — ${HEAD_REF} = ${_NEW} (owned commits only; history preserved; 미추적 산출물은 보존됨; writer lock 하에 검증됨)"
-    trap - INT TERM HUP
+    # 8라운드 P1(#4): 성공 보고 출력도 신호·수명 관리 아래에서 — 마지막 검사와
+    # 출력 사이(또는 출력이 막힌 동안)의 TERM이 flag로만 기록되면, blocking
+    # stdout에 잡힌 프로세스가 writer lock을 쥔 채 KILL만 기다렸다 (실측 재현).
+    # _rb_run은 출력을 별도 그룹의 자식으로 돌리고, 신호 수신 시 bounded reap 후
+    # "실제 ref 상태" 기준으로 보고하고 130으로 종료한다 (EXIT trap이 lock 해제).
+    # 14라운드 P1(#2·#3): 성공 보고 "전"에 writer lock 해제를 검증한다 — 종전에는
+    # pid/rmdir 삭제 실패가 EXIT trap에서 무시되어 'rolled back' + rc=0으로
+    # 위장됐다 (실측). 공개·최종 검증은 위에서 완료된 상태이므로, 해제 실패면
+    # 성공 대신 실패를 보고한다 (소유 증거는 유지되어 재시도 가능).
+    if ! _rb_wl_release; then
+      trap - INT TERM HUP
+      echo "❌ rollback(공개·검증)은 완료됐지만 writer lock 해제를 검증하지 못했습니다(${_RB_WL}) — 성공으로 보고하지 않습니다. lock 상태 확인 후 정리하세요 (fail-closed)." >&2
+      exit 3
+    fi
+    if ! _rb_run printf '%s\n' "rolled back $ID by revert — ${HEAD_REF} = ${_NEW} (owned commits only; history preserved; 미추적 산출물은 보존됨; writer lock 하에 검증됨)"; then
+      _rb_save_recovery || true
+      trap - INT TERM HUP
+      echo "❌ 성공 보고 출력에 실패했습니다 — rollback 자체(공개·태그 정리·동기화·격리 worktree 정리)는 완료된 상태입니다. $(_rb_rref_note)" >&2
+      exit 3
+    fi
+    # 10라운드 P1(#4): reset 경로와 동일하게, 성공 출력 "이후"의 신호도 즉시-종료
+    # handler로 집행한다 — 종전의 trap 해제는 exit(EXIT trap의 release 포함) 도중
+    # TERM을 기본 처분(143, 진단 없음, release 중단으로 lock·.own 잔존)으로
+    # 흘려보냈다 (실측 20/20). handler는 exit까지 유지되고, release가 그 시점에
+    # 중단되어도 남는 상태(pid-only dead lock/빈 dir)는 전부 회수 가능하다.
+    trap 'trap - TERM INT HUP; echo "❌ 신호 수신 — rollback(공개·태그 정리·동기화·격리 worktree 정리)과 성공 보고는 모두 완료된 상태입니다 (부분 완료 아님)." >&2; exit 130' TERM INT HUP
     exit 0
   fi
 
@@ -865,7 +1204,7 @@ REF_TXN
         while kill -0 -- "-${_pid}" 2>/dev/null && [ "$(date +%s)" -lt "$_dl" ]; do sleep 0.25; done
         kill -0 -- "-${_pid}" 2>/dev/null && kill -KILL -- "-${_pid}" 2>/dev/null
         wait "$_pid" 2>/dev/null || true
-        echo "❌ 신호(${_RS_SIG})로 중단됨 — reset 자식 프로세스 그룹을 정리했습니다. 'git status'로 상태를 확인하세요 (부분 수행 가능)." >&2
+        echo "❌ 신호(${_RS_SIG})로 중단됨 — 자식 프로세스 그룹을 정리했습니다. 'git status'로 상태를 확인하세요 (${_RS_SIG_NOTE:-부분 수행 가능})." >&2
         exit 130
       fi
       kill -0 "$_pid" 2>/dev/null || break
@@ -904,13 +1243,43 @@ REF_TXN
   # 5라운드 P1(#6): CAS 삭제 실패(그 사이 태그 이동/재생성)를 무시하면 post 태그가
   # 남은 "부분 rollback"이 rc=0/restored로 위장됐다 — 실패는 실패로 보고한다.
   if [ -n "$POST_TAGOBJ" ]; then
-    if ! _rs_run git update-ref -d "refs/tags/${POST_TAG}" "$POST_TAGOBJ" 2>/dev/null; then
+    # 8라운드 P2: CAS 거부 사유(git stderr)를 숨기지 않는다 — 부분 완료 진단에 필요.
+    if ! _rs_run git update-ref -d "refs/tags/${POST_TAG}" "$POST_TAGOBJ"; then
       echo "❌ reset은 수행됐지만 ${POST_TAG} 태그 삭제(CAS)가 실패했습니다 — 태그가 그 사이 변경된 것으로 보입니다 (부분 완료, 성공 아님). 태그 상태를 확인 후 수동 정리하세요: git tag -d ${POST_TAG}" >&2
       exit 3
     fi
   fi
   _rs_check_sig
-  echo "restored $ID to $TAG"
+  # 8라운드 P1(#4): 마지막 검사(_rs_check_sig)와 성공 출력 사이의 신호 유실 창 —
+  # 그 창(또는 blocking stdout)에 온 TERM이 flag로만 기록된 채 출력에 잡히면
+  # writer lock이 KILL까지 잔존했고, post 태그는 이미 삭제된 부분 완료 상태였다
+  # (실측 재현). 성공 출력도 _rs_run(별도 그룹 + 신호 시 bounded reap + 130 종료)
+  # 아래에서 수행한다 — 신호가 오면 EXIT trap이 lock을 해제하고, 종료 메시지는
+  # 이 시점의 실제 상태(rollback 완료, 보고만 중단)를 보고한다.
+  _RS_SIG_NOTE="rollback(reset·clean·태그 정리)은 완료된 상태 — 성공 보고만 중단됨"
+  # 14라운드 P1(#2·#3): 성공 보고 "전"에 writer lock 해제를 검증한다 (revert
+  # 경로와 동일 계약 — 해제 실패가 rc=0 성공 뒤에 숨지 않는다).
+  if ! _rb_wl_release; then
+    echo "❌ rollback(reset·clean·태그 정리)은 완료됐지만 writer lock 해제를 검증하지 못했습니다(${_RB_WL}) — 성공으로 보고하지 않습니다. lock 상태 확인 후 정리하세요 (fail-closed)." >&2
+    exit 3
+  fi
+  if ! _rs_run printf '%s\n' "restored $ID to $TAG"; then
+    echo "❌ 성공 보고 출력에 실패했습니다 — rollback(reset·clean·태그 정리) 자체는 완료된 상태입니다 ('git status'로 확인)." >&2
+    exit 3
+  fi
+  # 9라운드 P1(#5): 성공 출력 "이후"의 신호도 유실되지 않는다 — 이 시점부터는
+  # 관리할 자식이 없으므로 handler를 flag 기록에서 "즉시 종료"로 전환한다
+  # (EXIT trap이 writer lock을 해제한다). 전환 전에 도착해 flag로만 남은 신호는
+  # 바로 아래 검사가 집행한다. handler 재진입은 첫 줄의 trap 해제로 차단한다.
+  trap 'trap - TERM INT HUP; echo "❌ 신호 수신 — rollback(reset·clean·태그 정리)과 성공 보고는 모두 완료된 상태입니다 (부분 완료 아님)." >&2; exit 130' TERM INT HUP
+  if [ -n "$_RS_SIG" ]; then
+    echo "❌ 신호(${_RS_SIG}) 수신 — rollback(reset·clean·태그 정리)과 성공 보고는 모두 완료된 상태입니다 (부분 완료 아님)." >&2
+    exit 130
+  fi
+  # handler는 exit까지 유지된다 — EXIT trap(release) 도중의 신호도 130으로
+  # 집행된다. release가 그 시점에 중단되면 남는 것은 "pid만 남은 죽은 lock"
+  # (stale 회수 대상) 또는 "빈 lock 디렉터리"(위 acquire 경로들이 rmdir로 안전
+  # 회수)뿐이다 — 어느 쪽도 영구 고착이 아니므로 신호 집행이 우선한다.
   exit 0
 fi
 

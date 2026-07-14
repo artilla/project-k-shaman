@@ -518,15 +518,54 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   #   - 검사 직후 교체라는 극단 창에서도 결과는 "foreign token 유실 + canonical
   #     점유 유지"(fail-closed 누수)이지 상호배제 공백이 아니다.
   _am_lock_release() {
-    local _own="$AM_LOCK.own.$$"
+    local _own="$AM_LOCK.own.$$" _p
     rm -rf "$AM_LOCK.acq.$$" 2>/dev/null || true
     [ -f "$_own" ] || return 0                        # 획득한 적 없음 — 무접촉
+    # 12라운드 P1(#1) → 13라운드 P1(#3): token→pid→rmdir 각 단계를 "검증"하며
+    # 해체한다. 어느 단계든 실패하면 소유 증거(.own)를 유지한 채 rc=1을 전파해
+    # 재호출이 남은 단계부터 이어간다 (반대편 부분 실패의 rc=0 위장 제거).
     if [ "$AM_LOCK/token" -ef "$_own" ]; then
-      rm -f "$AM_LOCK/token" "$AM_LOCK/pid" 2>/dev/null || true
-      rmdir "$AM_LOCK" 2>/dev/null \
-        || echo "[WARN] auto-merge lock 디렉터리 정리 실패(예상 밖 잔여물) — 확인 필요: ${AM_LOCK}" >&2
+      rm -f "$AM_LOCK/token" 2>/dev/null || true
+      if [ -e "$AM_LOCK/token" ]; then
+        echo "[WARN] auto-merge lock token 삭제 실패 — 소유 증거를 유지하고 실패를 전파합니다 (재시도 가능): ${AM_LOCK}" >&2
+        return 1
+      fi
+    elif [ -e "$AM_LOCK/token" ] || [ -L "$AM_LOCK/token" ]; then
+      rm -f "$_own" 2>/dev/null || true   # 남의 lock 무접촉, stale own만 정리
+      if [ -e "$_own" ] || [ -L "$_own" ]; then
+        echo "[WARN] auto-merge lock 소유 증거(.own) 삭제 실패 (재시도 가능): $_own" >&2
+        return 1
+      fi
+      return 0
+    fi
+    if [ -d "$AM_LOCK" ]; then
+      if [ -f "$AM_LOCK/pid" ]; then
+        _p="$(cat "$AM_LOCK/pid" 2>/dev/null || true)"
+        if [ "$_p" != "$$" ]; then
+          rm -f "$_own" 2>/dev/null || true   # 내 pid가 아니다 — 남의 잔재 무접촉
+          if [ -e "$_own" ] || [ -L "$_own" ]; then
+            echo "[WARN] auto-merge lock 소유 증거(.own) 삭제 실패 (재시도 가능): $_own" >&2
+            return 1
+          fi
+          return 0
+        fi
+        rm -f "$AM_LOCK/pid" 2>/dev/null || true
+        if [ -e "$AM_LOCK/pid" ]; then
+          echo "[WARN] auto-merge lock pid 삭제 실패 — 소유 증거를 유지하고 실패를 전파합니다 (재시도 가능): ${AM_LOCK}" >&2
+          return 1
+        fi
+      fi
+      rmdir "$AM_LOCK" 2>/dev/null || true
+      if [ -d "$AM_LOCK" ]; then
+        echo "[WARN] auto-merge lock 디렉터리 정리 실패(예상 밖 잔여물) — 소유 증거를 유지하고 실패를 전파합니다: ${AM_LOCK}" >&2
+        return 1
+      fi
     fi
     rm -f "$_own" 2>/dev/null || true
+    if [ -e "$_own" ] || [ -L "$_own" ]; then
+      echo "[WARN] auto-merge lock 소유 증거(.own) 삭제 실패 — 실패를 전파합니다 (재시도 가능): $_own" >&2
+      return 1
+    fi
     return 0
   }
   # 5라운드 P1(#2): stale 회수도 rename(mv) 기반이면 관찰~mv 창에 들어온 live
@@ -537,37 +576,241 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   #   - 그 사이 교체된 live lock은 inode가 달라 무접촉이고, rmdir이 실패해
   #     canonical에 그대로 남는다 — foreign lock이 canonical을 떠나는 순간이 없다.
   # 반환 0 = canonical 해체(빈 자리), 1 = 회수 불가(live/교체/잔여물 — 재시도·거부).
-  _am_reclaim_dead() {  # $1=lock dir
-    local _lk="$1" _obs="$1.obs.$$" _meta="$1.rec.d" _p _mp _rc=1
-    rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
-    _p="$(cat "$_lk/pid" 2>/dev/null || true)"
-    [ -n "$_p" ] || return 1                          # pid 없는 lock — 무접촉 (기존 계약)
-    kill -0 "$_p" 2>/dev/null && return 1             # live — 회수 대상 아님
-    # 7라운드 P1(#2): -ef 확인과 rm 사이에 "다른 reclaimer"가 구 lock을 제거하고
-    # 새 owner가 획득하면, 경로 기반 rm이 새 lock의 token을 지웠다 (실측: writer
-    # 고착). 회수를 meta-lock(mkdir 원자)으로 직렬화한다 — canonical 제거는
-    # meta-lock 보유자만 수행하므로, 참여자 간에는 그 창이 존재하지 않는다.
-    # meta-lock 자체의 stale은 pid-dead 시 정리한다 (내용물이 pid뿐이라 처분 가능).
-    if ! mkdir "$_meta" 2>/dev/null; then
-      _mp="$(cat "$_meta/pid" 2>/dev/null || true)"
-      if [ -n "$_mp" ] && ! kill -0 "$_mp" 2>/dev/null; then
-        rm -rf "$_meta" 2>/dev/null || true
+  # 9라운드 P1(#1): meta-lock의 내용물 파일명은 "incarnation-고유"다 —
+  # pid.<mid>/token.<mid> (mid = pid.시각.난수). 경로 기반 rm은 항상 "-ef 확인과
+  # rm 사이" 창에서 successor의 파일을 지울 수 있었다 (실측: R1 정지 → R2 해체 →
+  # R3 획득 → R1 재개 시 R3 token 삭제). 고유 이름에서는 그 창이 구조적으로 없다:
+  #   - 죽은 incarnation의 파일명은 successor의 이름공간과 절대 겹치지 않는다.
+  #   - canonical 제거는 rmdir뿐 — live incarnation은 사전 구성 rename으로 항상
+  #     파일을 담은 채 도착하므로 rmdir이 successor를 제거하는 일도 없다.
+  #   - 빈 meta(해체 도중 죽음)는 누구든 rmdir로 안전 회수, token-only 상태는
+  #     발생하지 않는다(pid를 항상 마지막에 지운다) — 영구 고착 제거.
+  _AM_META_MID=""
+  _am_meta_acquire() {  # $1=main lock dir → 0=meta 획득(소유 증거 .rec.d.own.$$), 1=실패(양보)
+    local _meta="$1.rec.d" _mpre="$1.rec.d.pre.$$" _mown="$1.rec.d.own.$$" _mobs="$1.rec.d.obs.$$"
+    local _mid _mp _pf _f _dmid _cp
+    _mid="$$.$(date +%s 2>/dev/null || echo 0).${RANDOM}${RANDOM}"
+    rm -rf "$_mpre" 2>/dev/null || true
+    rm -f "$_mown" "$_mobs.p" 2>/dev/null || true
+    mkdir "$_mpre" 2>/dev/null || return 1
+    echo "$$" > "$_mpre/pid.$_mid" 2>/dev/null || { rm -rf "$_mpre" 2>/dev/null || true; return 1; }
+    printf 'meta.%s' "$_mid" > "$_mpre/token.$_mid" 2>/dev/null || { rm -rf "$_mpre" 2>/dev/null || true; return 1; }
+    ln "$_mpre/token.$_mid" "$_mown" 2>/dev/null || { rm -rf "$_mpre" 2>/dev/null || true; return 1; }
+    if [ ! -e "$_meta" ] && mv "$_mpre" "$_meta" 2>/dev/null; then
+      if [ "$_meta/token.$_mid" -ef "$_mown" ] && [ ! -d "$_meta/${_mpre##*/}" ]; then
+        _AM_META_MID="$_mid"
+        return 0
       fi
-      return 1   # 이번 회수는 양보 — 호출자 루프가 재시도
+      rm -rf "$_meta/${_mpre##*/}" 2>/dev/null || true
+      rm -f "$_mown" 2>/dev/null || true
+      return 1
     fi
-    if ! echo "$$" > "$_meta/pid" 2>/dev/null; then
+    rm -rf "$_mpre" 2>/dev/null || true
+    rm -f "$_mown" 2>/dev/null || true
+    # ── 기존 meta 처리 (해체 후에도 이번 획득은 양보 — 호출자 루프가 재시도) ──
+    _pf=""
+    for _f in "$_meta"/pid.*; do
+      [ -e "$_f" ] && { _pf="$_f"; break; }
+    done
+    if [ -z "$_pf" ]; then
+      # 11라운드 P1(#1): pid 파일 없는 meta의 잔재 회수 — 단일 glob 스냅샷의
+      # 이름만 다룬다. token.<mid>는 mid에 creator pid가 박혀 있어(mid=pid.시각.난수)
+      # creator가 죽었을 때만 회수한다: live incarnation의 token은 creator가 살아
+      # 있어 무접촉이고(이 glob이 successor를 잡아도 안전), 부분 해제(token rm
+      # 실패 + pid rm 성공)가 남긴 죽은 token.<mid>는 회수돼 영구 고착이 없다.
+      for _f in "$_meta"/*; do
+        [ -e "$_f" ] || continue
+        case "${_f##*/}" in
+          pid.*) : ;;   # 이 스냅샷에 pid가 보이면 새 incarnation일 수 있다 — 무접촉 양보
+          token.*)
+            _cp="${_f##*/token.}"; _cp="${_cp%%.*}"
+            case "$_cp" in
+              ''|*[!0-9]*) : ;;
+              *) kill -0 "$_cp" 2>/dev/null || rm -f "$_f" 2>/dev/null ;;
+            esac
+            ;;
+          pid|token)
+            # (구버전 호환) 고정 이름 잔재 — 구버전 pid가 죽었을 때만 정리
+            _mp="$(cat "$_meta/pid" 2>/dev/null || true)"
+            if [ -z "$_mp" ] || ! kill -0 "$_mp" 2>/dev/null; then
+              rm -f "$_f" 2>/dev/null
+            fi
+            ;;
+        esac
+      done
+      # pid 없는 meta = 죽은 incarnation의 잔재뿐 (live는 pid를 담고 도착하고
+      # pid는 마지막에 지워진다) — 고유 이름 잔재 정리 후 rmdir(비어 있을 때만).
+      # rmdir은 비어 있을 때만 성공한다 — 잔재가 남았으면(live successor 포함)
+      # 그대로 두고 양보한다 (무접촉).
       rmdir "$_meta" 2>/dev/null || true
       return 1
     fi
+    _mp="$(cat "$_pf" 2>/dev/null || true)"
+    [ -n "$_mp" ] || return 1
+    kill -0 "$_mp" 2>/dev/null && return 1
+    # dead 재검증은 관찰한 pid 파일 inode에 결속 — 이후의 rm들은 incarnation-고유
+    # 이름이라 언제 재개되어도 successor를 건드릴 수 없다.
+    # 10라운드 P1(#2): 검증 "이후"의 glob 재확장 금지 — 정지~재개 사이에 dir이
+    # 교체되면 재확장된 token.* glob이 successor의 token을 지웠다 (실측). 파괴
+    # 대상 이름은 전부 관찰한 pid 파일의 mid에서 유도한다(token.<mid>) — 죽은
+    # incarnation의 고정 이름뿐이라 언제 재개돼도 successor와 겹치지 않는다.
+    _dmid="${_pf##*/pid.}"
+    if ln "$_pf" "$_mobs.p" 2>/dev/null; then
+      if [ "$(cat "$_mobs.p" 2>/dev/null || true)" = "$_mp" ] && ! kill -0 "$_mp" 2>/dev/null \
+         && [ "$_pf" -ef "$_mobs.p" ]; then
+        rm -f "$_meta/token.$_dmid" 2>/dev/null || true
+        rm -f "$_meta/pid.$_dmid" 2>/dev/null || true
+        rmdir "$_meta" 2>/dev/null || true
+      fi
+      rm -f "$_mobs.p" 2>/dev/null || true
+    fi
+    return 1
+  }
+  _am_meta_release() {  # $1=main lock dir
+    local _meta="$1.rec.d" _mown="$1.rec.d.own.$$" _mid="${_AM_META_MID:-}"
+    # 12라운드 P1(#1) → 13라운드 P1(#3): 해체는 token.<mid>→pid.<mid>→rmdir "각
+    # 단계를 검증"하며 진행한다. 어느 단계든 실패하면 소유 증거(.own·mid)를
+    # 유지한 채 rc=1을 전파해 재호출이 남은 단계부터 이어간다 — 종전에는 token
+    # 삭제 성공 후 pid 삭제 실패가 rc=0으로 위장됐고(반대편 부분 실패), token
+    # 삭제 실패 시 .own을 지워 재시도 자체가 불가능했다 (실측). mid-고유
+    # 이름이므로 어떤 재시도 단계도 남의 파일과 겹치지 않는다.
+    if [ -n "$_mid" ] && [ -f "$_mown" ]; then
+      if [ "$_meta/token.$_mid" -ef "$_mown" ]; then
+        rm -f "$_meta/token.$_mid" 2>/dev/null || true
+        if [ -e "$_meta/token.$_mid" ]; then
+          echo "[WARN] meta-lock token 삭제 실패 — 소유 증거를 유지하고 실패를 전파합니다 (재시도 가능): $_meta/token.$_mid" >&2
+          return 1
+        fi
+      elif [ -e "$_meta/token.$_mid" ] || [ -L "$_meta/token.$_mid" ]; then
+        echo "[WARN] meta-lock token.<mid>가 내 inode가 아닙니다(예상 밖 재생성) — 무접촉, 해제 실패: $_meta/token.$_mid" >&2
+        return 1
+      fi
+      if [ -e "$_meta/pid.$_mid" ]; then
+        rm -f "$_meta/pid.$_mid" 2>/dev/null || true
+        if [ -e "$_meta/pid.$_mid" ]; then
+          echo "[WARN] meta-lock pid 삭제 실패 — 소유 증거를 유지하고 실패를 전파합니다 (재시도 가능): $_meta/pid.$_mid" >&2
+          return 1
+        fi
+      fi
+      if [ -d "$_meta" ]; then
+        rmdir "$_meta" 2>/dev/null || true
+        if [ -d "$_meta" ]; then
+          echo "[WARN] meta-lock 디렉터리 정리 실패(예상 밖 잔여물) — 소유 증거를 유지하고 실패를 전파합니다: $_meta" >&2
+          return 1
+        fi
+      fi
+    fi
+    rm -f "$_mown" 2>/dev/null || true
+    if [ -e "$_mown" ] || [ -L "$_mown" ]; then
+      echo "[WARN] meta-lock 소유 증거(.own) 삭제 실패 — 실패를 전파합니다 (재시도 가능): $_mown" >&2
+      return 1
+    fi
+    _AM_META_MID=""
+    return 0
+  }
+  # 8라운드 P2: EXIT trap을 우회한 종료(강제 KILL 등)가 남긴 lock 부속물(.own/.acq/
+  # .obs)과 meta-lock(.rec.d 및 그 .pre/.own/.obs)을 다음 획득 시점에 gc한다 —
+  # 이름에 박힌 pid(meta 본체는 내부 pid)가 죽어 있을 때만 치운다
+  # (write_lock.sh의 _twl_gc_artifacts와 동일 계약).
+  _am_gc_lock_artifacts() {  # $1=lock canonical 경로
+    local _f _pid _pf
+    # 9라운드 P1(#1b): pid 파일이 "없는" meta(해체 도중 죽음)도 회수한다 —
+    # _am_meta_acquire의 기존-meta 처리 경로가 잔재 정리와 rmdir을 수행한다.
+    if [ -d "$1.rec.d" ]; then
+      _pf=""
+      for _f in "$1.rec.d"/pid.*; do
+        [ -e "$_f" ] && { _pf="$_f"; break; }
+      done
+      _pid=""
+      [ -n "$_pf" ] && _pid="$(cat "$_pf" 2>/dev/null || true)"
+      if [ -z "$_pid" ] || ! kill -0 "$_pid" 2>/dev/null; then
+        _am_meta_acquire "$1" >/dev/null 2>&1 && _am_meta_release "$1"
+      fi
+    fi
+    for _f in "$1".own.* "$1".acq.* "$1".obs.*.t "$1".obs.*.p \
+              "$1".rec.d.pre.* "$1".rec.d.own.* "$1".rec.d.obs.*; do
+      [ -e "$_f" ] || continue
+      _pid="${_f##*.}"
+      case "$_pid" in t|p) _pid="${_f%.*}"; _pid="${_pid##*.}" ;; esac
+      case "$_pid" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      kill -0 "$_pid" 2>/dev/null && continue
+      rm -rf "$_f" 2>/dev/null || true
+    done
+    return 0
+  }
+
+  # canonical inflight가 먼저 지워지고 own 사이드카 삭제만 실패한 종료를 다음 실행이
+  # 회수한다. 새 sidecar 이름은 pid+nonce라 한 경로를 재사용하지 않으며 ln(2)로만
+  # 생성된다 — creator가 죽고 canonical이 없을 때 그 고유 경로만 지워 successor를
+  # 건드리지 않는다. 구버전의 .own.<pid>도 동일한 dead-pid 조건으로 정리한다.
+  _am_gc_orphan_inflight_owns() {  # $1=inflight canonical 경로
+    local _base="$1" _f _rest _pid _nonce _payload
+    [ -n "$_base" ] || return 0
+    if [ -e "$_base" ] || [ -L "$_base" ]; then
+      return 0
+    fi
+    for _f in "$_base".own.*; do
+      [ -e "$_f" ] || [ -L "$_f" ] || continue
+      [ -L "$_f" ] && continue
+      [ -f "$_f" ] || continue
+      _rest="${_f#"$_base.own."}"
+      _pid="${_rest%%.*}"
+      _nonce="${_rest#*.}"
+      case "$_pid" in ''|*[!0-9]*) continue ;; esac
+      if [ "$_nonce" != "$_rest" ]; then
+        case "$_nonce" in ''|*[!A-Za-z0-9_-]*) continue ;; esac
+      fi
+      _payload="$(cat "$_f" 2>/dev/null || true)"
+      [ "$_payload" = "$_pid" ] || continue
+      kill -0 "$_pid" 2>/dev/null && continue
+      rm -f "$_f" 2>/dev/null || true
+      if [ -e "$_f" ] || [ -L "$_f" ]; then
+        echo "[WARN] orphan inflight own 사이드카 정리 실패 — 다음 실행에서 재시도합니다: $_f" >&2
+      fi
+    done
+    return 0
+  }
+
+  _am_reclaim_dead() {  # $1=lock dir → 0=해체 완료, 1=회수 불가(live/교체/경합/잔여물)
+    local _lk="$1" _obs="$1.obs.$$" _p _rc=1
+    rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
+    _p="$(cat "$_lk/pid" 2>/dev/null || true)"
+    if [ -z "$_p" ]; then
+      # 10라운드 P1(#3): 해제 도중 'token rm 실패 + pid rm 성공'이 남긴 token-only
+      # 잔재 — live lock은 항상 pid를 갖는다(사전 구성 rename + 해제는 token→pid
+      # 순서라 pid 없는 live 상태가 없다). 내용물이 "정확히 token 하나"일 때만,
+      # meta 직렬화 아래에서 회수한다: meta를 쥔 동안에는 canonical이 교체될 수
+      # 없으므로(교체는 선행 해체가 필요하고 해체는 meta 직렬화) 고정 이름 rm이
+      # successor를 건드릴 수 없다. 그 외 pid 없는 lock은 기존 계약대로 무접촉.
+      [ -d "$_lk" ] || return 1
+      [ -f "$_lk/token" ] || return 1
+      [ "$(ls -A "$_lk" 2>/dev/null | wc -l | tr -d ' ')" = "1" ] || return 1
+      _am_meta_acquire "$_lk" || return 1
+      if [ -d "$_lk" ] && [ ! -f "$_lk/pid" ] && [ -f "$_lk/token" ] \
+         && [ "$(ls -A "$_lk" 2>/dev/null | wc -l | tr -d ' ')" = "1" ]; then
+        rm -f "$_lk/token" 2>/dev/null || true
+        rmdir "$_lk" 2>/dev/null && _rc=0
+      fi
+      _am_meta_release "$_lk"
+      return "$_rc"
+    fi
+    kill -0 "$_p" 2>/dev/null && return 1
+    # 7라운드 P1(#2): 해체는 meta-lock 아래에서만 — 참여자 간 -ef→rm 창 제거.
+    # 8라운드 P1(#1): meta-lock 자체도 원자 rename + inode 결속 (_am_meta_acquire).
+    _am_meta_acquire "$_lk" || return 1
     if [ -f "$_lk/token" ]; then
-      ln "$_lk/token" "$_obs.t" 2>/dev/null || { rm -rf "$_meta" 2>/dev/null || true; return 1; }
+      if ! ln "$_lk/token" "$_obs.t" 2>/dev/null; then
+        _am_meta_release "$_lk"
+        return 1
+      fi
     fi
     if ! ln "$_lk/pid" "$_obs.p" 2>/dev/null; then
       rm -f "$_obs.t" 2>/dev/null || true
-      rm -rf "$_meta" 2>/dev/null || true
+      _am_meta_release "$_lk"
       return 1
     fi
-    # 결속된 inode의 내용으로 dead를 재검증 — 교체된 새 lock의 pid가 아니다
     if [ "$(cat "$_obs.p" 2>/dev/null || true)" = "$_p" ] && ! kill -0 "$_p" 2>/dev/null; then
       if [ ! -f "$_obs.t" ] || [ "$_lk/token" -ef "$_obs.t" ]; then
         [ -f "$_obs.t" ] && rm -f "$_lk/token" 2>/dev/null
@@ -578,11 +821,11 @@ if [ "$ELIGIBLE" -eq 0 ]; then
       fi
     fi
     rm -f "$_obs.t" "$_obs.p" 2>/dev/null || true
-    rm -rf "$_meta" 2>/dev/null || true
+    _am_meta_release "$_lk"
     return "$_rc"
   }
-  trap '_am_lock_release; rm -rf "$AM_LOCK.acq.$$" 2>/dev/null || true' EXIT
-  trap '_am_lock_release; rm -rf "$AM_LOCK.acq.$$" 2>/dev/null; exit 143' TERM INT HUP
+  trap '_am_lock_release || true; rm -rf "$AM_LOCK.acq.$$" 2>/dev/null || true' EXIT
+  trap '_am_lock_release || true; rm -rf "$AM_LOCK.acq.$$" 2>/dev/null; exit 143' TERM INT HUP
   # 리뷰 11차 P1: token/pid 기록 실패를 획득 성공으로 처리하지 않는다 (rc=2로 구분,
   # 부분 생성물은 회수).
   # 재재리뷰 P1(#9): 획득은 pid·token이 "이미 담긴" 사전 구성 디렉터리의 원자
@@ -618,10 +861,31 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     rm -f "$_own" 2>/dev/null || true
     return 1
   }
+  # 8라운드 P2: 죽은 실행이 남긴 lock 부속물(meta-lock 포함) gc — 획득 시도 전 한 번.
+  _am_gc_lock_artifacts "$AM_LOCK"
   _acq_rc=0; _am_acquire_lock || _acq_rc=$?
   if [ "$_acq_rc" -eq 2 ]; then
     echo "[FAIL] lock 기록 실패 (권한/공간?) — 획득으로 처리하지 않음"
     exit 1
+  fi
+  if [ "$_acq_rc" -eq 1 ]; then
+    _old_pid="$(cat "$AM_LOCK/pid" 2>/dev/null || true)"
+    # 9라운드 P1(#5) 파생: 완전히 빈 lock 디렉터리(해제 rmdir 직전 죽음)는 rmdir로
+    # 안전 회수 후 1회 재시도한다 — live lock은 항상 내용을 담고 도착하므로
+    # rmdir(비어 있을 때만 성공)이 live를 제거할 수 없다.
+    if [ -z "$_old_pid" ] && [ -d "$AM_LOCK" ]; then
+      if [ -z "$(ls -A "$AM_LOCK" 2>/dev/null)" ]; then
+        rmdir "$AM_LOCK" 2>/dev/null || true
+      else
+        # 10라운드 P1(#3): token-only 잔재는 meta 직렬화 아래에서 회수 (그 외 무접촉)
+        _am_reclaim_dead "$AM_LOCK" || true
+      fi
+      _acq_rc=0; _am_acquire_lock || _acq_rc=$?
+      if [ "$_acq_rc" -eq 2 ]; then
+        echo "[FAIL] lock 기록 실패 (권한/공간?) — 획득으로 처리하지 않음"
+        exit 1
+      fi
+    fi
   fi
   if [ "$_acq_rc" -eq 1 ]; then
     _old_pid="$(cat "$AM_LOCK/pid" 2>/dev/null || true)"
@@ -653,8 +917,107 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   # (검사 자체는 리뷰 14차 P2에 따라 EXIT trap 설치 "이후"로 이동 — 거부 경로가
   # trap 설치 전에 종료해 auto_merge.lock.d를 남기던 문제 수정.)
   AM_RECOVERY="$STATE_DIR/auto_merge.recovery"
+  # 11라운드 P1(#3): STATE_DIR marker와 독립적인 durable fallback — common git dir는
+  # clean -fd·worktree remove에서 살아남고 STATE_DIR 권한과 무관하다. 차단 검사는
+  # 두 위치 모두를 본다.
+  AM_RECOVERY_FB="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || git rev-parse --git-common-dir 2>/dev/null || true)"
+  _AM_GITCOMMON="$AM_RECOVERY_FB"
+  [ -n "$AM_RECOVERY_FB" ] && AM_RECOVERY_FB="$AM_RECOVERY_FB/auto_merge.recovery"
+  # 12라운드 P1(#3): merge 시작 "전"에 선점하는 inflight blocker — 어느 지점에서
+  # 죽거나 marker 기록이 전부 실패해도, 정상적으로 회계(verdict)되지 않은 실행의
+  # inflight가 남아 다음 실행을 차단한다. blocker를 만들 수 없으면 merge 자체를
+  # 시작하지 않는다 (fail-closed).
+  AM_INFLIGHT=""
+  [ -n "$_AM_GITCOMMON" ] && AM_INFLIGHT="$_AM_GITCOMMON/auto_merge.inflight"
+  AM_INFLIGHT_MADE=0
+  _am_gc_orphan_inflight_owns "$AM_INFLIGHT"
+  AM_SIGNAL_ACCOUNTED=0
+  # 13라운드 P1(#1): inflight 해제 조건은 AM_PHASE가 아니라 "verdict 회계 완료"다.
+  # 종전에는 실패 경로가 AM_PHASE=done을 recovery 표시보다 먼저 설정해, 그 직후
+  # 신호에서 marker도 inflight도 없이 검증 안 된 2-parent merge가 남았다 (실측).
+  # AM_VERDICT_COMMITTED는 각 종결 경로에서 (recovery 표시 →) verdict 로그가
+  # 완료된 "뒤에만" 세워진다.
+  AM_VERDICT_COMMITTED=0
+  AM_INFLIGHT_OWN=""
+  _am_inflight_clear() {
+    [ "${AM_INFLIGHT_MADE:-0}" -eq 1 ] || return 0
+    # recovery로 표시된 실행의 inflight는 남긴다 — marker가 유실돼도 차단 유지.
+    if [ "${AM_RECOVERY_MARKED:-0}" -eq 0 ] \
+       && { [ "${AM_VERDICT_COMMITTED:-0}" -eq 1 ] || [ "${AM_SIGNAL_ACCOUNTED:-0}" -eq 1 ]; }; then
+      # 13라운드 P1(#2) → 15라운드 P1(#4): 삭제는 소유권(inode)에 결속하고,
+      # own 사이드카는 canonical 삭제가 "확인된 뒤에만" 지운다 — 종전에는 canonical
+      # rm 실패에도 own을 지워, blocker가 남는데 소유 증거가 사라졌다 (수동 잔재).
+      if [ -n "$AM_INFLIGHT_OWN" ] && [ "$AM_INFLIGHT" -ef "$AM_INFLIGHT_OWN" ]; then
+        rm -f "$AM_INFLIGHT" 2>/dev/null || true
+        if [ -e "$AM_INFLIGHT" ] || [ -L "$AM_INFLIGHT" ]; then
+          echo "[WARN] inflight blocker 삭제 실패 — 소유 증거(.own)를 유지합니다 (재시도 가능): ${AM_INFLIGHT}" >&2
+          return 1
+        fi
+      fi
+      # 16라운드 P2: own 사이드카 삭제도 검증한다 — canonical만 지우고 sidecar가
+      # 남는 잔재(TERM 경로에서 실측)를 남기지 않는다.
+      rm -f "$AM_INFLIGHT_OWN" 2>/dev/null || true
+      if [ -n "$AM_INFLIGHT_OWN" ] && { [ -e "$AM_INFLIGHT_OWN" ] || [ -L "$AM_INFLIGHT_OWN" ]; }; then
+        echo "[WARN] inflight own 사이드카 삭제 실패 (잔재): ${AM_INFLIGHT_OWN}" >&2
+        return 1
+      fi
+    fi
+    return 0
+  }
+  # 13라운드 P1(#2): 성공 보고 "전"에 호출되는 검증 해제 — 소유권 결속 삭제 후
+  # 부재까지 확인한다. 실패(잔존)면 rc=1 — 성공(PASS)으로 보고하지 않는다.
+  # 15라운드 P2: own 사이드카 삭제까지 검증한다 — sidecar 잔존도 성공이 아니다.
+  _am_inflight_clear_verified() {
+    [ "${AM_INFLIGHT_MADE:-0}" -eq 1 ] || return 0
+    if [ -n "$AM_INFLIGHT_OWN" ] && [ "$AM_INFLIGHT" -ef "$AM_INFLIGHT_OWN" ]; then
+      rm -f "$AM_INFLIGHT" 2>/dev/null || true
+    fi
+    if [ -e "$AM_INFLIGHT" ] || [ -L "$AM_INFLIGHT" ]; then
+      return 1
+    fi
+    rm -f "$AM_INFLIGHT_OWN" 2>/dev/null || true
+    if [ -e "$AM_INFLIGHT_OWN" ] || [ -L "$AM_INFLIGHT_OWN" ]; then
+      echo "[WARN] inflight own 사이드카 삭제 실패 — 성공으로 보고하지 않습니다: ${AM_INFLIGHT_OWN}" >&2
+      return 1
+    fi
+    AM_INFLIGHT_MADE=0
+    return 0
+  }
+  AM_RECOVERY_MARKED=0
   _am_mark_recovery() {
-    : > "$AM_RECOVERY" 2>/dev/null || echo "[WARN] recovery marker 기록 실패: ${AM_RECOVERY}" >&2
+    # 12라운드 P1(#3): 호출 자체가 'recovery-worthy 상태'다 — marker 파일 기록의
+    # 성패와 무관하게 flag를 세워, 사전 선점한 inflight blocker가 유지되게 한다
+    # (marker 두 곳이 모두 실패해도 inflight가 다음 실행을 차단한다).
+    AM_RECOVERY_MARKED=1
+    # 9라운드 P1(#3): 기록 실패를 rc=0(성공)으로 반환하지 않는다.
+    # 10라운드 P1(#1) → 11라운드 P1(#2): 존재 검사와 생성 사이의 symlink 교체
+    # TOCTOU 제거 — 생성은 temp+ln(2)의 원자 no-clobber다. link(2)는 newpath의
+    # symlink를 따라가지 않으므로(있으면 EEXIST) 어떤 시점에 symlink가 끼어들어도
+    # 다른 경로에 쓰지 않는다. 어떤 형태든 항목이 존재하면(-e/-L) 차단 상태다.
+    # 11라운드 P1(#3): 주 marker 기록이 실패하면 common git dir fallback에 남긴다.
+    local _m _t _ok=0
+    for _m in "$AM_RECOVERY" "$AM_RECOVERY_FB"; do
+      [ -n "$_m" ] || continue
+      if [ -e "$_m" ] || [ -L "$_m" ]; then
+        _ok=1; break
+      fi
+      # 12라운드 P1(#2): source temp도 원자 생성 — 예측 가능한 이름에 rm 후 : > 는
+      # 그 사이 심어진 symlink를 따라갔다 (실측: 대상 파일 truncate + marker가 그
+      # hardlink가 됨). mktemp는 O_EXCL·비예측 이름이라 심을 자리가 없다.
+      _t="$(mktemp "$_m.new.XXXXXX" 2>/dev/null)" || continue
+      if ln "$_t" "$_m" 2>/dev/null; then
+        rm -f "$_t" 2>/dev/null || true
+        _ok=1; break
+      fi
+      rm -f "$_t" 2>/dev/null || true
+      # ln 실패에 '그 사이 생긴 항목'(동시 marker·symlink)이 포함된다 — 존재하면 차단 상태
+      if [ -e "$_m" ] || [ -L "$_m" ]; then
+        _ok=1; break
+      fi
+    done
+    [ "$_ok" -eq 1 ] && return 0
+    echo "[WARN] recovery marker 기록 실패(주·fallback 모두): ${AM_RECOVERY} / ${AM_RECOVERY_FB:-fallback 없음} — 다음 실행을 차단할 수 없습니다 (수동 확인 필요)" >&2
+    return 1
   }
 
   # 리뷰 14차 P1: 워크트리 writer들과 동일한 write lock — 복원 창 동안 시스템
@@ -672,6 +1035,8 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   _am_tw_acquire() {
     local _i=0 _p _mp _pre
     mkdir -p state 2>/dev/null || true
+    # 8라운드 P2: writer lock의 죽은 부속물(meta-lock 포함)도 획득 전에 gc.
+    _am_gc_lock_artifacts "$_TW_LOCK"
     _pre="$_TW_LOCK.acq.$$"
     # 리뷰 16차 8라운드 후속 P1: 획득마다 "세션 고유 token"을 lock 안에 담는다 —
     # release는 이 token이 일치하는 lock에만 손을 댄다 (pid 재사용·lock 교체와
@@ -714,6 +1079,19 @@ if [ "$ELIGIBLE" -eq 0 ]; then
         # 무접촉으로 남고, 회수 실패는 그냥 재시도(bounded 대기)한다.
         _am_reclaim_dead "$_TW_LOCK" && continue
       fi
+      # 9라운드 P1(#5) 파생: "완전히 빈" canonical lock 디렉터리는 해제 마무리(rmdir)
+      # 직전에 죽은 잔재다 — live lock은 사전 구성 rename으로 항상 내용을 담고 도착하고
+      # 내용이 있는 동안은 무접촉 계약이 유지된다. 빈 디렉터리 회수는 rmdir뿐이라
+      # (비어 있을 때만 성공) 어떤 race에서도 live lock을 제거할 수 없다.
+      if [ -z "$_p" ] && [ -d "$_TW_LOCK" ]; then
+        if [ -z "$(ls -A "$_TW_LOCK" 2>/dev/null)" ]; then
+          rmdir "$_TW_LOCK" 2>/dev/null || true
+        else
+          # 10라운드 P1(#3): token-only 잔재(해제 도중 token rm 실패 + pid rm 성공)는
+          # meta 직렬화 아래에서 회수한다 — 그 외 조합은 기존대로 무접촉 대기.
+          _am_reclaim_dead "$_TW_LOCK" && continue
+        fi
+      fi
       _i=$((_i+1))
       if [ "$_i" -ge 100 ]; then rm -rf "$_pre" 2>/dev/null || true; rm -f "$_TW_LOCK.own.$$" 2>/dev/null || true; return 1; fi
       sleep 0.1
@@ -732,13 +1110,60 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   # canonical 밖으로 이동시켰다 — inode 결속 + 내용물 제거로 교체 (foreign lock이
   # canonical을 떠나는 순간이 없다; 상세 계약은 _am_lock_release 주석 참조).
   _am_tw_release() {
-    local _own="$_TW_LOCK.own.$$"
-    if [ -f "$_own" ] && [ "$_TW_LOCK/token" -ef "$_own" ]; then
-      rm -f "$_TW_LOCK/token" "$_TW_LOCK/pid" 2>/dev/null || true
-      rmdir "$_TW_LOCK" 2>/dev/null \
-        || echo "[WARN] writer lock 디렉터리 정리 실패(예상 밖 잔여물) — 확인 필요: ${_TW_LOCK}" >&2
+    local _own="$_TW_LOCK.own.$$" _p
+    rm -rf "$_TW_LOCK.acq.$$" 2>/dev/null || true
+    rm -f "$_TW_LOCK.obs.$$.t" "$_TW_LOCK.obs.$$.p" 2>/dev/null || true
+    # 12라운드 P1(#1) → 14라운드 P1(#2): token→pid→rmdir→own 각 단계를 "검증"하며
+    # 해체한다. 어느 단계든 실패하면 소유 증거(.own)를 유지한 채 rc=1을 전파해
+    # 재호출이 남은 단계부터 이어간다 — 종전 복제 구현은 pid/rmdir 실패를 무시하고
+    # .own을 지운 뒤 0을 반환해, 살아 있는 내 pid의 pid-only lock이 소유 증거 없이
+    # 남았다 (실측).
+    if [ -f "$_own" ]; then
+      if [ "$_TW_LOCK/token" -ef "$_own" ]; then
+        rm -f "$_TW_LOCK/token" 2>/dev/null || true
+        if [ -e "$_TW_LOCK/token" ]; then
+          echo "[WARN] writer lock token 삭제 실패 — 소유 증거를 유지하고 실패를 전파합니다 (재시도 가능): ${_TW_LOCK}" >&2
+          return 1
+        fi
+      elif [ -e "$_TW_LOCK/token" ] || [ -L "$_TW_LOCK/token" ]; then
+        rm -f "$_own" 2>/dev/null || true   # 남의 lock 무접촉, stale own만 정리
+        if [ -e "$_own" ] || [ -L "$_own" ]; then
+          echo "[WARN] writer lock 소유 증거(.own) 삭제 실패 (재시도 가능): $_own" >&2
+          return 1
+        fi
+        _AM_TW_TOKEN=""
+        return 0
+      fi
+      if [ -d "$_TW_LOCK" ]; then
+        if [ -f "$_TW_LOCK/pid" ]; then
+          _p="$(cat "$_TW_LOCK/pid" 2>/dev/null || true)"
+          if [ "$_p" != "$$" ]; then
+            rm -f "$_own" 2>/dev/null || true   # 내 pid가 아니다 — 남의 잔재 무접촉
+            if [ -e "$_own" ] || [ -L "$_own" ]; then
+              echo "[WARN] writer lock 소유 증거(.own) 삭제 실패 (재시도 가능): $_own" >&2
+              return 1
+            fi
+            _AM_TW_TOKEN=""
+            return 0
+          fi
+          rm -f "$_TW_LOCK/pid" 2>/dev/null || true
+          if [ -e "$_TW_LOCK/pid" ]; then
+            echo "[WARN] writer lock pid 삭제 실패 — 소유 증거를 유지하고 실패를 전파합니다 (재시도 가능): ${_TW_LOCK}" >&2
+            return 1
+          fi
+        fi
+        rmdir "$_TW_LOCK" 2>/dev/null || true
+        if [ -d "$_TW_LOCK" ]; then
+          echo "[WARN] writer lock 디렉터리 정리 실패(예상 밖 잔여물) — 소유 증거를 유지하고 실패를 전파합니다: ${_TW_LOCK}" >&2
+          return 1
+        fi
+      fi
     fi
     rm -f "$_own" 2>/dev/null || true
+    if [ -e "$_own" ] || [ -L "$_own" ]; then
+      echo "[WARN] writer lock 소유 증거(.own) 삭제 실패 — 실패를 전파합니다 (재시도 가능): $_own" >&2
+      return 1
+    fi
     _AM_TW_TOKEN=""
     return 0
   }
@@ -818,6 +1243,11 @@ if [ "$ELIGIBLE" -eq 0 ]; then
         echo "  그 시점의 동시 파일이 해당 side.* 경로에 고립된 것이다 — 검토 후"
         echo "  내용에 따라 원경로/적절한 위치로 복원한다 (merge 잔상 payload 자체는"
         echo "  이미 원경로에서 교체돼 폐기 대상이었다)."
+        echo "- intent에 stranded 행이 없어도 side.* 옆의 '<side>.stranded' 마커가 같은"
+        echo "  기록이다 (intent 기록 실패 시 같은 디렉터리에 sidecar로 남긴다)."
+        echo "- capture 경로에 payload가 남은 실패 케이스에는 '열린 FD 보존'이 포함된다"
+        echo "  (원경로가 교체돼 payload가 마지막 링크였고 FD가 열려 있어 unlink하지"
+        echo "  않았다) — no-clobber 복원은 실패하므로 감사 후 수동 처분한다."
         echo "- intent는 payload가 원위치(원복 성공) 또는 레코드(격리 완료)로 확정된"
         echo "  뒤에만 삭제된다 — capture에 payload가 남아 있으면 intent도 남는다."
         echo "- 보존: 해당 rollback의 감사 로그(ROLLED_BACK) 확인 후 수동 삭제 가능 (자동 삭제 없음)."
@@ -879,14 +1309,23 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     #      원경로에 되돌리고 우리 링크($2)를 해제한 뒤 실패를 반환한다 (무손실).
     # side 이름도 소유 dir 안의 난수다. symlink는 ln의 플랫폼별 의미가 갈린다 —
     # 보존적으로 실패(REF_ONLY).
-    local _side
+    local _side _sabs
     _AM_CAPTURED=0   # 1 = payload가 $2에 담김 (실패 시 호출자가 원복 대상 판단)
     _AM_STRANDED=0   # 1 = 교체본이 side.*에 고립됨 — intent를 보존해야 한다 (7라운드 #1)
+    _AM_STRANDED_RECORDED=0   # 1 = stranded 위치가 durable하게 기록됨 (8라운드 P1 #2)
+    _AM_KEPT=0       # 1 = payload($2)를 unlink하지 않고 보존 — capture 실패 경로는 무조건 보존 (9라운드 P1 #2)
     [ -h "$1" ] && return 1
     ln "$1" "$2" 2>/dev/null || return 1
     _side="$(dirname "$2")/side.${RANDOM}${RANDOM}"
     if [ -e "$_side" ] || ! mv "$1" "$_side" 2>/dev/null; then
-      rm -f "$2" 2>/dev/null || true
+      # 8라운드 P1(#3) → 9라운드 P1(#2): 검사-후-unlink는 어떤 검사(-ef·_fd_busy)를
+      # 앞세워도 검사~rm 창의 TOCTOU가 남는다 (실측: _fd_busy 직후 연 FD의 late
+      # write 유실). capture 실패 경로에서는 payload를 "삭제하지 않는다" — 폐기
+      # 계약(unlink 금지)과 동일 원칙이며, unlink가 없으므로 창 자체가 없다.
+      # payload는 소유 capture 디렉터리에 남고 intent의 capture 필드가 위치를
+      # 가리킨다 (호출자가 intent·예약 dir 보존 — _AM_KEPT).
+      _AM_KEPT=1
+      echo "⚠️  capture 실패 — payload를 unlink하지 않고 보존합니다: ${2} (intent의 capture 필드 참조)" >&2
       return 1
     fi
     if [ "$_side" -ef "$2" ]; then
@@ -903,20 +1342,36 @@ if [ "$ELIGIBLE" -eq 0 ]; then
     else
       # 7라운드 P1(#1): 이중 교체(복원 시점에 원경로가 다시 선점) — 교체본이
       # side.*에 고립되는데 intent가 삭제되면 결정적 복구 계약이 깨진다 (실측).
-      # stranded 위치를 intent에 durable하게 기록하고, 호출자에게 intent 보존을
-      # 지시한다 (_AM_STRANDED).
+      # 8라운드 P1(#2): 기록은 fail-open이 아니다 — append와 fsync가 "모두" 성공
+      # 했을 때만 기록된 것으로 판정한다(_AM_STRANDED_RECORDED). intent에 실패하면
+      # side와 같은 소유 디렉터리(같은 volume)에 sidecar 마커(<side>.stranded)를
+      # 남기고, 그것도 실패하면 호출자가 recovery marker로 에스컬레이션한다 —
+      # '증거 없는 stranded'가 조용히 지나가는 경로가 없다.
       _AM_STRANDED=1
-      if [ -n "${_AM_Q_INTENT:-}" ] && [ -f "$_AM_Q_INTENT" ]; then
-        # 절대 경로로 기록 — 복구자가 cwd에 의존하지 않도록 (capture 필드와 동일 계약)
-        case "$_side" in
-          /*) printf 'stranded\t%s\n' "$_side" >> "$_AM_Q_INTENT" 2>/dev/null || true ;;
-          *)  printf 'stranded\t%s/%s\n' "$(pwd)" "$_side" >> "$_AM_Q_INTENT" 2>/dev/null || true ;;
-        esac
-        _am_fsync "$_AM_Q_INTENT" || true
+      _AM_STRANDED_RECORDED=0
+      # 절대 경로로 기록 — 복구자가 cwd에 의존하지 않도록 (capture 필드와 동일 계약)
+      case "$_side" in
+        /*) _sabs="$_side" ;;
+        *)  _sabs="$(pwd)/$_side" ;;
+      esac
+      if [ -n "${_AM_Q_INTENT:-}" ] && [ -f "$_AM_Q_INTENT" ] \
+         && printf 'stranded\t%s\n' "$_sabs" >> "$_AM_Q_INTENT" 2>/dev/null \
+         && _am_fsync "$_AM_Q_INTENT"; then
+        _AM_STRANDED_RECORDED=1
+      elif printf 'stranded\t%s\nsrc\t%s\nintent\t%s\n' "$_sabs" "$1" "${_AM_Q_INTENT:-?}" > "${_side}.stranded" 2>/dev/null \
+           && _am_fsync "${_side}.stranded"; then
+        _AM_STRANDED_RECORDED=1
+        echo "⚠️  intent에 stranded 행을 기록하지 못했습니다 — sidecar 마커로 대체 기록: ${_side}.stranded" >&2
       fi
-      echo "⚠️  capture 중 교체된 동시 파일을 원경로로 되돌리지 못했습니다(원경로 재선점) — 보존: ${_side} (intent의 stranded 필드 참조)" >&2
+      echo "⚠️  capture 중 교체된 동시 파일을 원경로로 되돌리지 못했습니다(원경로 재선점) — 보존: ${_side} (intent의 stranded 필드/sidecar 마커 참조)" >&2
     fi
-    rm -f "$2" 2>/dev/null || true
+    # 8라운드 P1(#3) → 9라운드 P1(#2): 여기서 $2는 원본(merge 잔상) inode의 마지막
+    # 링크일 수 있다 (원경로는 이미 교체본/제3 파일 차지). 검사-후-unlink는 어떤
+    # 검사를 앞세워도 검사~rm 창의 TOCTOU가 남으므로(실측: _fd_busy 직후 연 FD의
+    # late write 유실) 이 경로에서는 payload를 "무조건 보존"한다 — unlink가 없으니
+    # 창도 없다. intent의 capture 필드가 위치를 가리킨다 (호출자가 보존).
+    _AM_KEPT=1
+    echo "⚠️  capture 실패(교체 감지) — payload를 unlink하지 않고 보존합니다: ${2} (intent의 capture 필드 참조)" >&2
     return 1
   }
   _am_bak_unreserve() {  # $1=capture payload 경로 — 빈 예약 dir만 해제한다
@@ -1072,6 +1527,7 @@ if [ "$ELIGIBLE" -eq 0 ]; then
   _am_release_transients() {
     [ -n "${_AM_ITMP_PATH:-}" ] && { rm -f "$_AM_ITMP_PATH" 2>/dev/null || true; _AM_ITMP_PATH=""; }
     [ -n "${_AM_LTMP_PATH:-}" ] && { rm -f "$_AM_LTMP_PATH" 2>/dev/null || true; _AM_LTMP_PATH=""; }
+    [ -n "${_am_ifd:-}" ] && { rm -rf "$_am_ifd" 2>/dev/null || true; _am_ifd=""; }
     if [ -n "${_AM_ILOCK_PATH:-}" ]; then
       # 리뷰 16차 P1-8(6차): 소유 판정은 경로가 아니라 "내용 토큰" — 내 토큰과
       # 일치할 때만 삭제한다. 획득 실패 직후 신호가 와도 남의 index.lock(git
@@ -1218,10 +1674,21 @@ EOF
             if [ "${_AM_CAPTURED:-0}" -eq 1 ]; then
               # payload는 담겼으나 침입 흔적 감지 — 원복·보존 (intent는 원복 성공 시 해제)
               if _am_restore "$_bak" "$_p"; then _am_intent_abort; fi
-            elif [ "${_AM_STRANDED:-0}" -eq 1 ]; then
+            elif [ "${_AM_STRANDED:-0}" -eq 1 ] || [ "${_AM_KEPT:-0}" -eq 1 ]; then
               # 7라운드 #1: 교체본이 side.*에 고립 — intent(stranded 기록 포함)와
               # 예약 dir을 보존한다 (결정적 복구 근거)
-              :
+              # 8라운드 #3: 열린 FD로 보존된 payload(_AM_KEPT)도 동일 — intent의
+              # capture 필드가 위치를 가리키므로 intent·예약 dir을 보존한다.
+              if [ "${_AM_STRANDED:-0}" -eq 1 ] && [ "${_AM_STRANDED_RECORDED:-0}" -ne 1 ]; then
+                # 8라운드 #2: stranded 위치를 어디에도 durable하게 기록하지 못했다 —
+                # 결정적 복구 매핑이 없으므로 조용히 지나가지 않는다 (fail-closed).
+                if _am_mark_recovery; then
+                  echo "❌ stranded 위치 기록 실패(intent·sidecar 모두) — recovery marker를 남겼습니다 (다음 실행 차단): ${_bak%/*}" >&2
+                else
+                  # 9라운드 P1(#3): marker 기록 실패를 escalation 성공으로 위장하지 않는다.
+                  echo "❌ stranded 위치 기록 실패(intent·sidecar 모두) + recovery marker 기록도 실패 — 다음 실행이 차단되지 않습니다. 수동 개입 전까지 auto-merge를 신뢰하지 마세요: ${_bak%/*}" >&2
+                fi
+              fi
             else
               # 아무것도 이동되지 않음 (선점/교체 감지·복원) — 예약만 해제
               _am_intent_abort; _am_bak_unreserve "$_bak"
@@ -1266,8 +1733,18 @@ EOF
           if ! _am_capture "$_p" "$_bak"; then
             if [ "${_AM_CAPTURED:-0}" -eq 1 ]; then
               if _am_restore "$_bak" "$_p"; then _am_intent_abort; fi
-            elif [ "${_AM_STRANDED:-0}" -eq 1 ]; then
-              :   # 7라운드 #1: stranded — intent·예약 dir 보존
+            elif [ "${_AM_STRANDED:-0}" -eq 1 ] || [ "${_AM_KEPT:-0}" -eq 1 ]; then
+              # 7라운드 #1: stranded — intent·예약 dir 보존.
+              # 8라운드 #3: 열린 FD 보존 payload(_AM_KEPT)도 동일 계약.
+              if [ "${_AM_STRANDED:-0}" -eq 1 ] && [ "${_AM_STRANDED_RECORDED:-0}" -ne 1 ]; then
+                # 8라운드 #2: durable 기록 실패는 fail-closed — recovery marker.
+                if _am_mark_recovery; then
+                  echo "❌ stranded 위치 기록 실패(intent·sidecar 모두) — recovery marker를 남겼습니다 (다음 실행 차단): ${_bak%/*}" >&2
+                else
+                  # 9라운드 P1(#3): marker 기록 실패를 escalation 성공으로 위장하지 않는다.
+                  echo "❌ stranded 위치 기록 실패(intent·sidecar 모두) + recovery marker 기록도 실패 — 다음 실행이 차단되지 않습니다. 수동 개입 전까지 auto-merge를 신뢰하지 마세요: ${_bak%/*}" >&2
+                fi
+              fi
             else
               _am_intent_abort; _am_bak_unreserve "$_bak"
             fi
@@ -1309,7 +1786,9 @@ EOF
     done <<EOF
 $_now
 EOF
-    _am_tw_release
+    # 15라운드 P2: 해제 실패는 감사 verdict에 반영한다 — REF_ONLY로 격하되어
+    # 잔여 상태(레거시 lock 포함)가 성공(완전 복구)으로 보고되지 않는다.
+    _am_tw_release || _rc=1
     _AM_TW_HELD=0
     # 최종 판정: clean일 때만 완전 복구 — 잔여(보존된 동시 변경 포함)는 REF_ONLY.
     [ "$_rc" -eq 0 ] || return 1
@@ -1327,11 +1806,11 @@ EOF
         _am_log "$BASE_OID" "INTERRUPTED_ROLLED_BACK"
       else
         _am_log "$BASE_OID" "INTERRUPTED_ROLLED_BACK_REF_ONLY"
-        _am_mark_recovery
+        _am_mark_recovery || true
       fi
     else
       _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED:signal"
-      _am_mark_recovery
+      _am_mark_recovery || true
     fi
   }
 
@@ -1339,7 +1818,7 @@ EOF
   # INTERRUPTED:<phase>를 남겨 병합 잔존 여부를 감사 로그에서 알 수 있게 한다.
   # 리뷰 10차 P1: lock 해제는 token이 자신일 때만 (남의 lock 삭제 금지).
   AM_PHASE="pre-merge"
-  trap '_am_release_transients; [ "$AM_PHASE" != "done" ] && _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "INTERRUPTED:${AM_PHASE}"; _am_lock_release; rm -rf "$AM_LOCK.acq.$$" 2>/dev/null || true' EXIT
+  trap '_am_release_transients; [ "$AM_PHASE" != "done" ] && _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "INTERRUPTED:${AM_PHASE}"; _am_inflight_clear || true; _am_lock_release || true; rm -rf "$AM_LOCK.acq.$$" 2>/dev/null || true' EXIT
   # 리뷰 11차 P1: TERM/INT/HUP 시 실행 중인 post-check 자식 그룹을 먼저 종료·reap한
   # 뒤에야 EXIT trap이 lock을 해제한다 (자식이 lock 해제 후에도 실행되던 문제).
   AM_CHECK_PID=""
@@ -1358,23 +1837,24 @@ EOF
     # 믿지 않는다 — 커밋이 이미 만들어진 뒤 MERGE_HEAD만 남은 창에서는 abort가
     # '성공'(rc=0, git reset --merge)해도 HEAD를 옮기지 않아 2-parent merge가 base에
     # 남는다. 판정은 항상 "최종 HEAD 상태"로 한다.
-    if [ "${AM_PHASE:-}" = "merging" ]; then
+    # 14라운드 P1(#1): merge-failed(병합 실패 후 abort 완료 전)도 회계 대상이다 —
+    # 종전에는 merging/merged만 다뤄, 이 창의 TERM이 미복구 conflict(MERGE_HEAD·
+    # UU 잔존)를 남긴 채 ACCOUNTED=1로 inflight까지 지웠다 (실측: rc=143, 차단
+    # 없음).
+    if [ "${AM_PHASE:-}" = "merging" ] || [ "${AM_PHASE:-}" = "merge-failed" ]; then
       git merge --abort >/dev/null 2>&1 || true
       local _h
       _h="$(git rev-parse HEAD 2>/dev/null || true)"
       if [ -z "$_h" ]; then
-        _am_mark_recovery
+        _am_mark_recovery || true
       elif [ "$_h" != "$BASE_OID" ]; then
         if [ "$(git rev-parse -q --verify "${_h}^1" 2>/dev/null)" = "$BASE_OID" ] \
            && [ "$(git rev-parse -q --verify "${_h}^2" 2>/dev/null)" = "$BRANCH_OID" ]; then
           _am_signal_rollback "$_h"
         else
           _am_log "$_h" "RECOVERY_REQUIRED:signal"
-          _am_mark_recovery
+          _am_mark_recovery || true
         fi
-      fi
-      if [ -e "$(git rev-parse --git-dir 2>/dev/null)/MERGE_HEAD" ]; then
-        _am_mark_recovery
       fi
     fi
     # 리뷰 13차 P1: merge 커밋 확정 후(post-check 창) 신호 — 미검증 merge를 그대로
@@ -1382,16 +1862,54 @@ EOF
     if [ "${AM_PHASE:-}" = "merged" ] && [ -n "${MERGE_COMMIT:-}" ]; then
       _am_signal_rollback "$MERGE_COMMIT"
     fi
+    # 14라운드 P1(#1) → 15라운드 P1(#1): 종료 전 "전체 상태"를 검증한다 —
+    # MERGE_HEAD·HEAD만으로는 부분 abort(MERGE_HEAD만 삭제, unmerged index 잔존)
+    # 가 통과했다 (실측: rc=143, AA 항목 잔존, 차단 없음). merge가 시작된 실행
+    # (inflight 선점)이 recovery 표시 없이 끝나려면 HEAD·branch·clean status·
+    # unmerged 항목 부재·MERGE_HEAD 부재가 전부 성립해야 한다.
+    if [ "${AM_INFLIGHT_MADE:-0}" -eq 1 ] && [ "${AM_RECOVERY_MARKED:-0}" -eq 0 ]; then
+      local _sig_ok=1 _sig_st=""
+      [ "$(git rev-parse HEAD 2>/dev/null || echo __FAIL__)" = "$BASE_OID" ] || _sig_ok=0
+      [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo __FAIL__)" = "$BASE_BRANCH" ] || _sig_ok=0
+      if ! _sig_st="$(_wt_status_or_fail 2>/dev/null)"; then _sig_ok=0; elif [ -n "$_sig_st" ]; then _sig_ok=0; fi
+      [ -z "$(git ls-files -u 2>/dev/null || echo __FAIL__)" ] || _sig_ok=0
+      if [ -e "$(git rev-parse --git-dir 2>/dev/null)/MERGE_HEAD" ]; then _sig_ok=0; fi
+      if [ "$_sig_ok" -ne 1 ]; then
+        _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED:signal-state"
+        _am_mark_recovery || true
+      fi
+    elif [ -e "$(git rev-parse --git-dir 2>/dev/null)/MERGE_HEAD" ]; then
+      _am_mark_recovery || true
+    fi
+    # 여기 도달 = 신호 경로의 회계 완료 — 모든 미복구 편차는 위에서 recovery로
+    # 표시됐다(그 경우 inflight는 유지된다). 표시가 없으면 상태는 검증-복원됨.
+    AM_SIGNAL_ACCOUNTED=1
     exit 143
   }
   trap _am_on_signal TERM INT HUP
 
   # 리뷰 13차 P1(검사) + 14차 P2(위치): recovery marker 거부는 EXIT trap 설치 "이후"에
   # 수행 — 과거에는 trap 설치 전에 exit해 획득한 auto_merge.lock.d가 잔존했다.
-  if [ -e "$AM_RECOVERY" ]; then
+  # 10라운드 P1(#1): dangling symlink도 차단 항목이다 — -e만으로는 우회됐다 (실측).
+  # 11라운드 P1(#3): common git dir fallback marker도 차단 항목이다.
+  if [ -e "$AM_RECOVERY" ] || [ -L "$AM_RECOVERY" ] \
+     || { [ -n "${AM_RECOVERY_FB:-}" ] && { [ -e "$AM_RECOVERY_FB" ] || [ -L "$AM_RECOVERY_FB" ]; }; }; then
     AM_PHASE="done"
     _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "REFUSED:recovery-pending"
-    echo "[FAIL] 이전 auto-merge가 RECOVERY_REQUIRED 상태입니다 — 수동 복구 후 ${AM_RECOVERY} 를 제거하세요. 새 병합을 거부합니다 (fail-closed)."
+    echo "[FAIL] 이전 auto-merge가 RECOVERY_REQUIRED 상태입니다 — 수동 복구 후 marker를 제거하세요 (${AM_RECOVERY} 및 ${AM_RECOVERY_FB:-fallback 없음}). 새 병합을 거부합니다 (fail-closed)."
+    exit 1
+  fi
+  # 12라운드 P1(#3): 회계 없이 끝난(크래시·marker 기록 전부 실패 포함) 이전 실행의
+  # inflight blocker — 상태가 검증되기 전까지 새 병합을 거부한다 (fail-closed).
+  if [ -n "${AM_INFLIGHT:-}" ] && { [ -e "$AM_INFLIGHT" ] || [ -L "$AM_INFLIGHT" ]; }; then
+    _am_inflight_pid="$(cat "$AM_INFLIGHT" 2>/dev/null || true)"
+    AM_PHASE="done"
+    _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "REFUSED:inflight-pending"
+    if [ -n "$_am_inflight_pid" ] && kill -0 "$_am_inflight_pid" 2>/dev/null; then
+      echo "[FAIL] 다른 auto-merge 실행(pid ${_am_inflight_pid})의 inflight blocker가 있습니다 — 새 병합을 거부합니다 (fail-closed): ${AM_INFLIGHT}"
+    else
+      echo "[FAIL] 이전 auto-merge가 회계 없이 종료됐습니다(inflight 잔존, pid ${_am_inflight_pid:-unknown} dead) — 저장소 상태 확인 후 ${AM_INFLIGHT} 를 제거하세요. 새 병합을 거부합니다 (fail-closed)."
+    fi
     exit 1
   fi
 
@@ -1428,18 +1946,66 @@ EOF
   PRE_MERGE_HEAD="$(git rev-parse HEAD)" || exit 1
   if ! _wt_status2="$(_wt_status_or_fail)"; then
     echo "[FAIL] git status failed before merge — refusing"
-    AM_PHASE="done"; _am_log "$PRE_MERGE_HEAD" "REFUSED:status-failed"
+    _am_log "$PRE_MERGE_HEAD" "REFUSED:status-failed"; AM_VERDICT_COMMITTED=1; AM_PHASE="done"
     exit 1
   fi
   if [ "$PRE_MERGE_HEAD" != "$BASE_OID" ] \
      || [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != "$BASE_BRANCH" ] \
      || [ -n "$_wt_status2" ]; then
     echo "[FAIL] base '${BASE_BRANCH}' moved or dirtied since checks (HEAD=${PRE_MERGE_HEAD} expected=${BASE_OID}) — merge refused (TOCTOU)"
-    AM_PHASE="done"; _am_log "$PRE_MERGE_HEAD" "REFUSED:toctou"
+    _am_log "$PRE_MERGE_HEAD" "REFUSED:toctou"; AM_VERDICT_COMMITTED=1; AM_PHASE="done"
     exit 1
   fi
   # 리뷰 12차 P1: merge 자체도 신호 handler 관리 하에 실행 — merge 중 TERM 시
   # 자식이 회수되고 잔여 merge 상태는 abort된다 (감사 없는 2-parent 잔존 방지).
+  # 12라운드 P1(#3): 첫 파괴적 변경(merge) 직전에 inflight blocker를 원자적으로
+  # 선점한다 — 만들 수 없으면 merge를 시작하지 않는다 (fail-closed).
+  if [ -z "${AM_INFLIGHT:-}" ]; then
+    _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "REFUSED:inflight-unavailable"; AM_VERDICT_COMMITTED=1; AM_PHASE="done"
+    echo "[FAIL] common git dir를 확인할 수 없어 inflight blocker를 만들 수 없습니다 — merge를 시작하지 않습니다 (fail-closed)."
+    exit 1
+  fi
+  # 13라운드 P1(#2): 생성 원자성 — mktemp가 만든 "경로"를 다시 열어 쓰면 그 사이
+  # symlink 교체를 따라갔다 (실측: 다른 파일 truncate 후 merge PASS). 이제 내용은
+  # mode 700의 "전용 임시 디렉터리" 안에서 쓴다(외부 개입 불가), 게시는 ln(2)의
+  # 원자 no-clobber, 소유 증거는 같은 inode의 own 사이드카다.
+  # 13라운드 P2: MADE 플래그는 ln "직전"에 세운다 — ln 후 플래그 전에 처리된
+  # 신호가 blocker를 영구 잔존시키지 않는다 (clear가 own-결속이므로 ln 이전
+  # 창에서는 무접촉으로 끝난다).
+  _am_ifd="$(mktemp -d "${TMPDIR:-/tmp}/am_inflight.$$.XXXXXX" 2>/dev/null)" || _am_ifd=""
+  _am_ift=""
+  _am_ifid=""
+  if [ -n "$_am_ifd" ]; then
+    _am_ift="$_am_ifd/pid"
+    _am_ifid="${_am_ifd##*.}"
+    AM_INFLIGHT_OWN="$AM_INFLIGHT.own.$$.${_am_ifid}"
+    echo "$$" > "$_am_ift" 2>/dev/null || _am_ift=""
+  fi
+  AM_INFLIGHT_MADE=1
+  _am_inflight_own_made=0
+  _am_inflight_ready=0
+  if [ -n "$_am_ift" ] && ln "$_am_ift" "$AM_INFLIGHT_OWN" 2>/dev/null; then
+    _am_inflight_own_made=1
+    if ln "$_am_ift" "$AM_INFLIGHT" 2>/dev/null \
+       && [ "$AM_INFLIGHT" -ef "$AM_INFLIGHT_OWN" ]; then
+      _am_inflight_ready=1
+    fi
+  fi
+  if [ "$_am_inflight_ready" -ne 1 ]; then
+    AM_INFLIGHT_MADE=0
+    if [ "$_am_inflight_own_made" -eq 1 ]; then
+      if [ "$AM_INFLIGHT" -ef "$AM_INFLIGHT_OWN" ]; then
+        rm -f "$AM_INFLIGHT" 2>/dev/null || true
+      fi
+      rm -f "$AM_INFLIGHT_OWN" 2>/dev/null || true
+    fi
+    [ -n "$_am_ifd" ] && rm -rf "$_am_ifd" 2>/dev/null
+    _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "REFUSED:inflight-unavailable"
+    AM_VERDICT_COMMITTED=1; AM_PHASE="done"
+    echo "[FAIL] inflight blocker를 선점할 수 없습니다(${AM_INFLIGHT}) — 실패·크래시 시 다음 실행을 차단할 수단이 없으므로 merge를 시작하지 않습니다 (fail-closed)."
+    exit 1
+  fi
+  rm -rf "$_am_ifd" 2>/dev/null || true
   AM_PHASE="merging"
   if ! _run_in_group git merge --no-ff "$BRANCH_OID" -m "auto-merge: ${TICKET_ID} (ELIGIBLE)"; then
     AM_PHASE="merge-failed"
@@ -1450,15 +2016,15 @@ EOF
       # 리뷰 12차 P1: abort 후 산출물이 남았으면 ROLLED_BACK으로 위장하지 않는다.
       _ab_left="$(_wt_status_or_fail 2>/dev/null || echo '__STATUS_FAILED__')"
       if [ -z "$_ab_left" ]; then
-        AM_PHASE="done"; _am_log "$BASE_OID" "ROLLED_BACK"
+        _am_log "$BASE_OID" "ROLLED_BACK"; AM_VERDICT_COMMITTED=1; AM_PHASE="done"
         echo "[FAIL] git merge failed — aborted cleanly"
       else
-        AM_PHASE="done"; _am_log "$BASE_OID" "ROLLED_BACK_DIRTY"
+        _am_log "$BASE_OID" "ROLLED_BACK_DIRTY"; AM_VERDICT_COMMITTED=1; AM_PHASE="done"
         echo "[FAIL] git merge failed — aborted, 그러나 산출물이 남음 (수동 정리 필요):"
         printf '%s\n' "$_ab_left"
       fi
     else
-      AM_PHASE="done"; _am_mark_recovery; _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED"
+      _am_mark_recovery || true; _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED"; AM_VERDICT_COMMITTED=1; AM_PHASE="done"
       echo "[FAIL] git merge failed AND abort failed — RECOVERY_REQUIRED (수동 확인 필요)"
     fi
     exit 1
@@ -1472,7 +2038,7 @@ EOF
   _p1="$(git rev-parse "${MERGE_COMMIT}^1" 2>/dev/null || true)"
   _p2="$(git rev-parse "${MERGE_COMMIT}^2" 2>/dev/null || true)"
   if [ "$_p1" != "$BASE_OID" ] || [ "$_p2" != "$BRANCH_OID" ]; then
-    AM_PHASE="done"; _am_mark_recovery; _am_log "$MERGE_COMMIT" "RECOVERY_REQUIRED"
+    _am_mark_recovery || true; _am_log "$MERGE_COMMIT" "RECOVERY_REQUIRED"; AM_VERDICT_COMMITTED=1; AM_PHASE="done"
     echo "[FAIL] HEAD(${MERGE_COMMIT}) is not our merge of (${BASE_OID}, ${BRANCH_OID}) — ownership lost, NOT resetting. RECOVERY_REQUIRED."
     exit 1
   fi
@@ -1485,7 +2051,7 @@ EOF
     # 리뷰 10차 P1: 사용자 설정(status.showUntrackedFiles=no)과 독립적인 clean 판정.
     if ! _final_status="$(_wt_status_or_fail)"; then _final_status="__STATUS_FAILED__"; fi
     if [ "$_final_head" != "$MERGE_COMMIT" ] || [ "$_final_branch" != "$BASE_BRANCH" ] || [ -n "$_final_status" ]; then
-      AM_PHASE="done"; _am_mark_recovery; _am_log "$_final_head" "RECOVERY_REQUIRED"
+      _am_mark_recovery || true; _am_log "$_final_head" "RECOVERY_REQUIRED"; AM_VERDICT_COMMITTED=1; AM_PHASE="done"
       echo "[FAIL] post-check 후 최종 상태 불일치 (HEAD=${_final_head} expected=${MERGE_COMMIT}, branch=${_final_branch}, dirty=$([ -n "$_final_status" ] && echo yes || echo no)) — RECOVERY_REQUIRED, 자동 복구하지 않음"
       exit 1
     fi
@@ -1493,9 +2059,30 @@ EOF
     # 리뷰 11차 P1: 감사 기록이 실패했으면 성공으로 끝내지 않는다 — 병합은 남아
     # 있으므로 수동 확인을 요구한다 (감사 없는 EXECUTED 금지).
     if [ "$AM_AUDIT_FAILED" -ne 0 ]; then
-      AM_PHASE="done"
-      _am_mark_recovery
+      _am_mark_recovery || true
+      AM_VERDICT_COMMITTED=1; AM_PHASE="done"
       echo "[FAIL] merge는 완료됐으나 감사 로그 기록 실패 — RECOVERY_REQUIRED(감사 경로 복구 후 수동 기록 필요): ${MERGE_COMMIT}"
+      exit 1
+    fi
+    AM_VERDICT_COMMITTED=1
+    # 13라운드 P1(#2): 성공 보고 "전"에 inflight를 소유권 결속으로 지우고 부재를
+    # 확인한다 — 종전에는 rm 실패를 무시한 채 PASS(rc=0)를 보고했고, 잔존한
+    # blocker가 다음 실행을 차단했다 (실측: false-green PASS).
+    if ! _am_inflight_clear_verified; then
+      # verified-clear가 canonical을 지운 뒤 own 삭제만 일시 실패할 수 있다. MADE를
+      # 유지해 EXIT cleanup이 한 번 더 재시도하고, 지속 실패 잔재는 다음 실행의
+      # dead-creator GC가 고유 sidecar 경로만 회수한다.
+      AM_PHASE="done"
+      echo "[FAIL] merge와 감사 기록은 완료됐으나 inflight artifact 해제를 확인하지 못했습니다(${AM_INFLIGHT}) — 성공으로 보고하지 않습니다. EXIT cleanup이 재시도하며, own-only 잔재는 다음 실행이 회수합니다 (fail-closed)."
+      exit 1
+    fi
+    # 14라운드 P1(#3): lock 해제도 성공 보고 "전"에 검증한다 — 종전에는 [PASS]
+    # 출력 뒤 EXIT trap의 release가 실패 경고를 내며 nonzero로 끝났다 (실측:
+    # PASS와 rc 불일치). 해제 실패면 PASS로 보고하지 않는다 (저장소는 EXECUTED로
+    # 검증 완료 — lock 잔재만 수동/재시도 대상).
+    if ! _am_tw_release || ! _am_lock_release; then
+      AM_PHASE="done"
+      echo "[FAIL] merge와 감사 기록은 완료됐으나 lock 해제를 검증하지 못했습니다 — 성공으로 보고하지 않습니다. 저장소는 EXECUTED(${MERGE_COMMIT})로 검증됐으므로 lock 잔재만 정리하세요 (fail-closed)."
       exit 1
     fi
     AM_PHASE="done"
@@ -1518,12 +2105,12 @@ EOF
       else
         echo "[WARN] merge 잔상 외 변경/산출물 또는 검증 실패 — reset 생략, worktree 보존 (수동으로 git reset --hard ${BASE_OID} 검토)"
       fi
-      AM_PHASE="done"
       if [ "$_ref_only" -eq 0 ]; then
         _am_log "$MERGE_COMMIT" "ROLLED_BACK"
       else
         _am_log "$MERGE_COMMIT" "ROLLED_BACK_REF_ONLY"
       fi
+      AM_VERDICT_COMMITTED=1; AM_PHASE="done"
       echo "[FAIL] post-merge run_checks 실패 — rollback (ref CAS$([ "$_ref_only" -eq 1 ] && echo ', worktree 미동기화'))"
       _leftover="$(_wt_status_or_fail 2>/dev/null || true)"
       if [ -n "$_leftover" ]; then
@@ -1531,7 +2118,7 @@ EOF
         printf '%s\n' "$_leftover"
       fi
     else
-      AM_PHASE="done"; _am_mark_recovery; _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED"
+      _am_mark_recovery || true; _am_log "$(git rev-parse HEAD 2>/dev/null || echo unknown)" "RECOVERY_REQUIRED"; AM_VERDICT_COMMITTED=1; AM_PHASE="done"
       echo "[FAIL] post-merge run_checks 실패 + base ref CAS 실패(다른 프로세스의 커밋?) — RECOVERY_REQUIRED (자동 복구 안 함)"
     fi
     exit 1
