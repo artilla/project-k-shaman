@@ -80,7 +80,13 @@ newnum=$((maxid + 1))
 id="$(printf 'T%03d' "$newnum")"
 
 # 슬러그(title → kebab, 안전 문자, 길이 제한). 비면 'ticket'.
-slug="$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\+/-/g; s/^-\+//; s/-\+$//' | cut -c1-40 | sed 's/-\+$//')"
+# BSD sed는 BRE의 `\+`를 one-or-more로 해석하지 않아 macOS에서 공백이 그대로
+# 남았다. ERE(`-E`) + C locale로 GNU/BSD 양쪽에서 동일한 ASCII slug를 만든다.
+slug="$(printf '%s' "$title" \
+  | LC_ALL=C tr '[:upper:]' '[:lower:]' \
+  | LC_ALL=C sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' \
+  | cut -c1-40 \
+  | LC_ALL=C sed -E 's/-+$//')"
 [ -n "$slug" ] || slug="ticket"
 file="docs/tickets/${id}-${slug}.md"
 [ -e "$file" ] && { echo "❌ 이미 존재합니다: $file (id 충돌)." >&2; exit 2; }
