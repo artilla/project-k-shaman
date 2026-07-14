@@ -1,7 +1,7 @@
 ---
 id: T027
 title: Closed beta deployment architecture and staging rehearsal
-status: open
+status: done
 safe: false
 priority: P0
 persona: planner
@@ -20,7 +20,7 @@ spec_ref: docs/master-spec.md
 
 ## 2. 현재 확인된 상태
 
-- `master`와 `remote/master`는 `af6d438`에서 일치한다.
+- 작업 시작 시 `master`와 `remote/master`의 parity와 clean tree를 확인했다.
 - 실제 앱 gate는 frontend typecheck/build, Python dependency consistency, pytest, Node, Bats 회귀를 포함한다.
 - 저장소에 GitHub Actions, Dockerfile, IaC 또는 확정된 hosting provider가 없다.
 - backend는 FastAPI same-origin 정적 서빙을 지원하지만 `DATABASE_URL` 소비자와 DB 드라이버가 없다.
@@ -54,12 +54,12 @@ spec_ref: docs/master-spec.md
 
 ## 4. 수용 기준 (Acceptance Criteria)
 
-- [ ] hosting provider와 same-origin topology가 하나의 승인 가능한 ADR로 확정된다.
-- [ ] migration owner와 runtime app role이 분리되고 최소권한 GRANT/REVOKE 계획이 명시된다.
-- [ ] staging-first 순서가 `read-only preflight → staging apply → app smoke → prod approval → prod apply → runtime verification`으로 고정된다.
-- [ ] production-readiness 문서가 현재 구현과 일치하며 미완료 P0를 과장 없이 구분한다.
-- [ ] 후속 구현 티켓들이 외부 변경 단위별로 분리되고 live DB apply가 독립 승인 단계로 남는다.
-- [ ] secret 값, DB password, API key, 개인 데이터가 어떤 산출물에도 포함되지 않는다.
+- [x] hosting provider와 same-origin topology가 하나의 승인 가능한 ADR로 확정된다.
+- [x] migration owner와 runtime app role이 분리되고 최소권한 GRANT/REVOKE 계획이 명시된다.
+- [x] staging-first 순서가 `read-only preflight → staging apply → app smoke → prod approval → prod apply → runtime verification`으로 고정된다.
+- [x] production-readiness 문서가 현재 구현과 일치하며 미완료 P0를 과장 없이 구분한다.
+- [x] 후속 구현 티켓들이 외부 변경 단위별로 분리되고 live DB apply가 독립 승인 단계로 남는다.
+- [x] secret 값, DB password, API key, 개인 데이터가 어떤 산출물에도 포함되지 않는다.
 
 ## 5. 테스트 계획
 
@@ -90,3 +90,16 @@ git revert <T027 documentation commit>
 
 - 본 티켓 자체가 `safe:false`이므로 `docs/approvals/T027.md`가 없으면 실행하지 않는다.
 - T027 승인도 cloud resource 생성이나 live DB apply를 승인하지 않는다. 해당 작업은 후속 티켓별 승인 마커가 필요하다.
+
+## 9. 완료 결과 (2026-07-15)
+
+- ADR-0005에서 AWS EC2 `ap-northeast-2`, Docker Compose + Caddy + FastAPI
+  same-origin topology와 Secrets Manager/IAM 경계를 확정했다.
+- `docs/research/closed-beta-deployment-runbook.md`에 read-only preflight부터 production
+  verification까지의 명령, 중단 조건, rollback packet을 고정했다.
+- `docs/research/production-readiness.md`를 FastAPI, 인메모리 rate limit, migration
+  001~005, 실제 앱 gate와 아직 남은 P0 기준으로 현행화했다.
+- T028(container/hosting), T029(DB persistence), T030(staging rehearsal),
+  T031(production apply/verification)을 모두 safe:false 독립 티켓으로 분리했다.
+- 이 작업에서는 cloud, DNS, OAuth provider, staging/live DB에 쓰지 않았고 credential
+  값이나 개인 데이터를 산출물에 포함하지 않았다.
