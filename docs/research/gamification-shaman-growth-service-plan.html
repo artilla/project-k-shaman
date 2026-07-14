@@ -1,0 +1,1370 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="description" content="오늘신당을 사용자별 무당 성장형 서비스로 확장하기 위한 gamification 리서치 및 제품 설계안">
+  <title>오늘신당 성장형 Gamification 설계안</title>
+  <style>
+    :root {
+      --ink: #f5efe4;
+      --muted: #b9ad9f;
+      --faint: #81776d;
+      --base: #0b0910;
+      --base-2: #110d16;
+      --panel: rgba(26, 20, 31, 0.9);
+      --panel-2: #201725;
+      --line: rgba(222, 187, 111, 0.2);
+      --line-strong: rgba(222, 187, 111, 0.48);
+      --gold: #debb6f;
+      --gold-soft: #f1d99f;
+      --red: #c65b63;
+      --red-deep: #7e2938;
+      --violet: #8f7bd1;
+      --green: #81b79a;
+      --blue: #73a8c2;
+      --shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+      --radius-lg: 24px;
+      --radius-md: 16px;
+      --radius-sm: 10px;
+      --content: 1180px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 85% 5%, rgba(126, 41, 56, 0.22), transparent 28rem),
+        radial-gradient(circle at 12% 24%, rgba(143, 123, 209, 0.1), transparent 30rem),
+        linear-gradient(180deg, #0d0911 0%, var(--base) 48%, #0a080d 100%);
+      font-family: Pretendard, "Apple SD Gothic Neo", "Noto Sans KR", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 16px;
+      line-height: 1.7;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--gold-soft); text-underline-offset: 3px; }
+    a:hover { color: #fff1c8; }
+    button, input { font: inherit; }
+    code {
+      padding: 0.12rem 0.36rem;
+      border: 1px solid rgba(222, 187, 111, 0.16);
+      border-radius: 6px;
+      color: #f2dca6;
+      background: rgba(222, 187, 111, 0.08);
+      font-size: 0.88em;
+    }
+    strong { color: #fff8ed; }
+    ::selection { color: #160d11; background: var(--gold); }
+
+    .skip-link {
+      position: fixed;
+      left: 1rem;
+      top: -4rem;
+      z-index: 100;
+      padding: 0.7rem 1rem;
+      border-radius: 8px;
+      color: #160d11;
+      background: var(--gold);
+      font-weight: 800;
+      transition: top 0.2s ease;
+    }
+    .skip-link:focus { top: 1rem; }
+
+    .reading-progress {
+      position: fixed;
+      inset: 0 auto auto 0;
+      z-index: 90;
+      width: 0;
+      height: 3px;
+      background: linear-gradient(90deg, var(--red), var(--gold));
+      box-shadow: 0 0 18px rgba(222, 187, 111, 0.5);
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border-bottom: 1px solid var(--line);
+    }
+    .hero::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.24;
+      background-image:
+        linear-gradient(rgba(222, 187, 111, 0.05) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(222, 187, 111, 0.05) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: linear-gradient(to bottom, #000, transparent 90%);
+    }
+    .hero-inner {
+      position: relative;
+      width: min(var(--content), calc(100% - 40px));
+      margin: 0 auto;
+      padding: 92px 0 72px;
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.65rem;
+      margin: 0 0 1.25rem;
+      color: var(--gold-soft);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+    .eyebrow::before {
+      content: "";
+      width: 34px;
+      height: 1px;
+      background: var(--gold);
+    }
+    h1, h2, h3, h4 { text-wrap: balance; }
+    h1 {
+      max-width: 940px;
+      margin: 0;
+      font-family: "Iowan Old Style", "Noto Serif KR", Georgia, serif;
+      font-size: clamp(2.7rem, 7vw, 6.5rem);
+      font-weight: 650;
+      line-height: 0.98;
+      letter-spacing: -0.055em;
+    }
+    .hero-subtitle {
+      max-width: 760px;
+      margin: 1.75rem 0 0;
+      color: #d9cec1;
+      font-size: clamp(1.1rem, 2.2vw, 1.48rem);
+      line-height: 1.55;
+    }
+    .hero-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem 1.4rem;
+      margin-top: 2rem;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+    .hero-meta span { display: inline-flex; align-items: center; gap: 0.45rem; }
+    .hero-meta span::before {
+      content: "";
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--gold);
+    }
+    .hero-decision {
+      display: grid;
+      grid-template-columns: minmax(0, 1.7fr) minmax(250px, 0.75fr);
+      gap: 1.5rem;
+      margin-top: 3rem;
+      padding: 1.65rem;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-lg);
+      background: linear-gradient(135deg, rgba(126, 41, 56, 0.28), rgba(26, 20, 31, 0.82) 56%);
+      box-shadow: var(--shadow);
+    }
+    .hero-decision h2 {
+      margin: 0 0 0.55rem;
+      color: var(--gold-soft);
+      font-size: 0.84rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .hero-decision p { margin: 0; font-size: clamp(1.1rem, 2.2vw, 1.4rem); line-height: 1.55; }
+    .hero-decision .boundary {
+      align-self: center;
+      padding-left: 1.4rem;
+      border-left: 1px solid var(--line-strong);
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .page-shell {
+      display: grid;
+      grid-template-columns: 230px minmax(0, 1fr);
+      gap: 48px;
+      width: min(var(--content), calc(100% - 40px));
+      margin: 0 auto;
+      padding: 48px 0 96px;
+    }
+    .toc {
+      position: sticky;
+      top: 30px;
+      align-self: start;
+      max-height: calc(100vh - 60px);
+      overflow: auto;
+      padding: 1.1rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: rgba(15, 11, 18, 0.82);
+      backdrop-filter: blur(16px);
+    }
+    .toc-title {
+      margin: 0 0 0.8rem;
+      color: var(--faint);
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+    }
+    .toc ol { margin: 0; padding: 0; list-style: none; counter-reset: toc; }
+    .toc li { counter-increment: toc; }
+    .toc a {
+      display: grid;
+      grid-template-columns: 1.6rem 1fr;
+      gap: 0.3rem;
+      padding: 0.36rem 0;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.84rem;
+      line-height: 1.35;
+    }
+    .toc a::before { content: counter(toc, decimal-leading-zero); color: var(--faint); font-size: 0.7rem; padding-top: 0.12rem; }
+    .toc a:hover { color: var(--gold-soft); }
+
+    main { min-width: 0; }
+    .section {
+      scroll-margin-top: 24px;
+      padding: 64px 0;
+      border-bottom: 1px solid var(--line);
+    }
+    .section:first-child { padding-top: 0; }
+    .section:last-child { border-bottom: 0; }
+    .section-kicker {
+      margin: 0 0 0.5rem;
+      color: var(--red);
+      font-size: 0.76rem;
+      font-weight: 850;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+    .section h2 {
+      margin: 0;
+      font-family: "Iowan Old Style", "Noto Serif KR", Georgia, serif;
+      font-size: clamp(2rem, 4vw, 3.45rem);
+      font-weight: 650;
+      line-height: 1.12;
+      letter-spacing: -0.035em;
+    }
+    .section-lead {
+      max-width: 790px;
+      margin: 1rem 0 2rem;
+      color: #d1c5b8;
+      font-size: 1.06rem;
+    }
+    h3 {
+      margin: 2.5rem 0 1rem;
+      color: var(--gold-soft);
+      font-size: 1.28rem;
+      line-height: 1.35;
+    }
+    h4 { margin: 0 0 0.4rem; font-size: 1rem; }
+    p { margin: 0.65rem 0; }
+
+    .callout {
+      margin: 1.5rem 0;
+      padding: 1.25rem 1.4rem;
+      border: 1px solid var(--line-strong);
+      border-left: 4px solid var(--gold);
+      border-radius: var(--radius-sm);
+      background: rgba(222, 187, 111, 0.07);
+    }
+    .callout strong { display: block; margin-bottom: 0.25rem; color: var(--gold-soft); }
+    .callout p { margin: 0; }
+    .callout--red { border-left-color: var(--red); background: rgba(198, 91, 99, 0.08); }
+    .callout--green { border-left-color: var(--green); background: rgba(129, 183, 154, 0.08); }
+
+    .decision-grid, .card-grid, .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1rem;
+    }
+    .decision-card, .card, .metric-card {
+      padding: 1.25rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: var(--panel);
+    }
+    .decision-card .num {
+      display: inline-grid;
+      place-items: center;
+      width: 2.1rem;
+      height: 2.1rem;
+      margin-bottom: 1rem;
+      border: 1px solid var(--line-strong);
+      border-radius: 50%;
+      color: var(--gold-soft);
+      font-size: 0.76rem;
+      font-weight: 850;
+    }
+    .decision-card h3, .card h3 { margin: 0 0 0.55rem; color: var(--ink); font-size: 1.1rem; }
+    .decision-card p, .card p { color: var(--muted); font-size: 0.92rem; }
+    .metric-card .metric-label { color: var(--muted); font-size: 0.8rem; }
+    .metric-card .metric-value { margin: 0.3rem 0; color: var(--gold-soft); font-size: 1.55rem; font-weight: 800; line-height: 1.2; }
+    .metric-card .metric-note { color: var(--faint); font-size: 0.79rem; }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.18rem 0.52rem;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      color: var(--gold-soft);
+      background: rgba(222, 187, 111, 0.06);
+      font-size: 0.7rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+    }
+    .tag--evidence { color: #bce5cd; border-color: rgba(129, 183, 154, 0.45); background: rgba(129, 183, 154, 0.08); }
+    .tag--inference { color: #c9c0ee; border-color: rgba(143, 123, 209, 0.45); background: rgba(143, 123, 209, 0.08); }
+    .tag--later { color: #aed7ea; border-color: rgba(115, 168, 194, 0.42); background: rgba(115, 168, 194, 0.08); }
+    .tag--exclude { color: #f0b2b8; border-color: rgba(198, 91, 99, 0.48); background: rgba(198, 91, 99, 0.08); }
+
+    .table-wrap {
+      width: 100%;
+      margin: 1.25rem 0 2rem;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: rgba(20, 15, 24, 0.72);
+    }
+    table { width: 100%; border-collapse: collapse; min-width: 680px; }
+    th, td { padding: 0.9rem 1rem; border-bottom: 1px solid var(--line); vertical-align: top; text-align: left; }
+    tr:last-child td { border-bottom: 0; }
+    th {
+      color: var(--gold-soft);
+      background: rgba(222, 187, 111, 0.06);
+      font-size: 0.75rem;
+      font-weight: 850;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    td { color: #d9cfc4; font-size: 0.89rem; }
+    td strong { color: var(--ink); }
+    .source-link { display: inline-block; margin-top: 0.35rem; font-size: 0.78rem; }
+    .source-note { color: var(--faint); font-size: 0.78rem; }
+
+    .loop {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 0.75rem;
+      margin: 1.5rem 0 2rem;
+      counter-reset: loop;
+    }
+    .loop-step {
+      position: relative;
+      min-height: 170px;
+      padding: 1.05rem;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: linear-gradient(155deg, rgba(40, 28, 43, 0.94), rgba(20, 15, 24, 0.9));
+      counter-increment: loop;
+    }
+    .loop-step::before {
+      content: counter(loop, decimal-leading-zero);
+      display: block;
+      margin-bottom: 1.5rem;
+      color: var(--red);
+      font-size: 0.72rem;
+      font-weight: 900;
+      letter-spacing: 0.1em;
+    }
+    .loop-step h3 { margin: 0; color: var(--ink); font-size: 1.04rem; }
+    .loop-step p { color: var(--muted); font-size: 0.82rem; line-height: 1.55; }
+
+    .layer-stack {
+      display: grid;
+      gap: 0.65rem;
+      margin: 1.5rem 0;
+    }
+    .layer {
+      display: grid;
+      grid-template-columns: 92px minmax(0, 1fr) minmax(170px, 0.55fr);
+      gap: 1rem;
+      align-items: center;
+      padding: 1rem 1.15rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: rgba(25, 18, 29, 0.78);
+    }
+    .layer-name { color: var(--gold-soft); font-weight: 850; }
+    .layer p { margin: 0; color: var(--muted); font-size: 0.88rem; }
+    .layer-rule { color: var(--faint); font-size: 0.78rem; }
+
+    .stage-list { display: grid; gap: 0.75rem; margin: 1.5rem 0; }
+    .stage {
+      display: grid;
+      grid-template-columns: 94px 140px minmax(0, 1fr) 100px;
+      gap: 1rem;
+      align-items: center;
+      padding: 1.05rem 1.15rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: rgba(25, 18, 29, 0.82);
+    }
+    .stage-number { color: var(--red); font-size: 0.72rem; font-weight: 900; letter-spacing: 0.09em; }
+    .stage-name { color: var(--gold-soft); font-size: 1.08rem; font-weight: 850; }
+    .stage-unlock { color: var(--muted); font-size: 0.88rem; }
+    .stage-xp { justify-self: end; color: var(--ink); font-size: 0.82rem; font-weight: 800; }
+
+    .simulator {
+      margin: 2rem 0;
+      padding: 1.4rem;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius-lg);
+      background: linear-gradient(145deg, rgba(126, 41, 56, 0.14), rgba(27, 20, 31, 0.92));
+    }
+    .simulator-head { display: flex; justify-content: space-between; gap: 1rem; align-items: start; }
+    .simulator h3 { margin: 0; color: var(--ink); }
+    .simulator .sim-note { max-width: 560px; color: var(--faint); font-size: 0.78rem; }
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1.2rem;
+      margin-top: 1.25rem;
+    }
+    .control {
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-md);
+      background: rgba(11, 9, 16, 0.48);
+    }
+    .control label { display: flex; justify-content: space-between; gap: 1rem; color: var(--muted); font-size: 0.84rem; }
+    .control output { color: var(--gold-soft); font-weight: 850; }
+    input[type="range"] { width: 100%; margin-top: 0.8rem; accent-color: var(--gold); }
+    .sim-results { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.65rem; margin-top: 1rem; }
+    .sim-result { padding: 0.85rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: rgba(11, 9, 16, 0.48); }
+    .sim-result span { display: block; color: var(--faint); font-size: 0.72rem; }
+    .sim-result strong { display: block; margin-top: 0.2rem; color: var(--gold-soft); font-size: 1.18rem; }
+
+    .principles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; margin: 1.25rem 0; }
+    .principle { padding: 1.05rem; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--panel); }
+    .principle h4 { color: var(--ink); }
+    .principle p { color: var(--muted); font-size: 0.86rem; }
+
+    .copy-samples { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.8rem; }
+    .copy-card { padding: 1rem; border: 1px solid var(--line); border-radius: var(--radius-md); background: rgba(25, 18, 29, 0.8); }
+    .copy-card .context { color: var(--faint); font-size: 0.74rem; font-weight: 800; }
+    .copy-card blockquote { margin: 0.6rem 0 0; color: #f1e6d8; font-family: "Iowan Old Style", "Noto Serif KR", Georgia, serif; font-size: 1.02rem; }
+
+    .roadmap {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.8rem;
+      margin-top: 1.4rem;
+    }
+    .phase { padding: 1.15rem; border-top: 3px solid var(--gold); border-radius: 0 0 var(--radius-md) var(--radius-md); background: var(--panel); }
+    .phase:nth-child(2) { border-top-color: var(--red); }
+    .phase:nth-child(3) { border-top-color: var(--violet); }
+    .phase:nth-child(4) { border-top-color: var(--green); }
+    .phase-time { color: var(--faint); font-size: 0.74rem; font-weight: 850; letter-spacing: 0.06em; }
+    .phase h3 { margin: 0.45rem 0; color: var(--ink); font-size: 1rem; }
+    .phase p { color: var(--muted); font-size: 0.82rem; }
+
+    .checklist { display: grid; gap: 0.55rem; margin: 1rem 0; padding: 0; list-style: none; }
+    .checklist li {
+      position: relative;
+      padding: 0.75rem 0.9rem 0.75rem 2.3rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      color: #d8cdc0;
+      background: rgba(25, 18, 29, 0.62);
+    }
+    .checklist li::before {
+      content: "";
+      position: absolute;
+      left: 0.9rem;
+      top: 1.05rem;
+      width: 8px;
+      height: 8px;
+      border: 1px solid var(--gold);
+      border-radius: 2px;
+    }
+
+    .references { margin: 1.25rem 0 0; padding: 0; list-style: none; }
+    .references li { padding: 0.9rem 0; border-bottom: 1px solid var(--line); }
+    .references li:last-child { border-bottom: 0; }
+    .reference-type { display: inline-block; min-width: 104px; color: var(--faint); font-size: 0.72rem; font-weight: 850; letter-spacing: 0.05em; text-transform: uppercase; }
+    .reference-title { color: #ddd2c5; }
+    .reference-note { display: block; margin: 0.25rem 0 0 108px; color: var(--faint); font-size: 0.78rem; }
+
+    .footer {
+      padding: 2rem 20px 4rem;
+      border-top: 1px solid var(--line);
+      color: var(--faint);
+      text-align: center;
+      font-size: 0.78rem;
+    }
+
+    @media (max-width: 1060px) {
+      .page-shell { grid-template-columns: 1fr; }
+      .toc { position: static; max-height: none; }
+      .toc ol { columns: 2; column-gap: 2rem; }
+      .loop { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .roadmap { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 760px) {
+      .hero-inner { padding: 64px 0 48px; }
+      .hero-decision { grid-template-columns: 1fr; }
+      .hero-decision .boundary { padding: 1rem 0 0; border-left: 0; border-top: 1px solid var(--line-strong); }
+      .page-shell { width: min(100% - 28px, var(--content)); padding-top: 24px; }
+      .toc ol { columns: 1; }
+      .section { padding: 48px 0; }
+      .decision-grid, .card-grid, .metric-grid, .principles, .copy-samples, .controls { grid-template-columns: 1fr; }
+      .loop { grid-template-columns: 1fr; }
+      .loop-step { min-height: auto; }
+      .layer { grid-template-columns: 1fr; gap: 0.35rem; }
+      .stage { grid-template-columns: 72px 1fr; gap: 0.4rem 0.8rem; }
+      .stage-unlock { grid-column: 1 / -1; }
+      .stage-xp { grid-column: 2; grid-row: 1; }
+      .simulator-head { display: block; }
+      .sim-results { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .roadmap { grid-template-columns: 1fr; }
+      .reference-type { display: block; min-width: 0; margin-bottom: 0.15rem; }
+      .reference-note { margin-left: 0; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
+    }
+
+    @media print {
+      :root { --ink: #181317; --muted: #4d464a; --faint: #6e666b; --line: rgba(55, 39, 49, 0.2); --line-strong: rgba(55, 39, 49, 0.36); }
+      body { color: var(--ink); background: #fff; font-size: 10.5pt; }
+      .reading-progress, .toc { display: none; }
+      .hero { border-bottom-color: #b7a998; }
+      .hero::before { display: none; }
+      .hero-inner { width: 100%; padding: 24mm 0 14mm; }
+      .hero-decision, .decision-card, .card, .metric-card, .loop-step, .layer, .stage, .simulator, .control, .sim-result, .principle, .copy-card, .phase, .checklist li, .table-wrap { color: var(--ink); background: #fff; box-shadow: none; }
+      .hero-subtitle, .hero-meta, .hero-decision .boundary, .section-lead, td, .decision-card p, .card p, .loop-step p, .layer p, .stage-unlock, .principle p, .phase p, .metric-card .metric-label { color: var(--muted); }
+      .page-shell { display: block; width: 100%; padding: 0; }
+      .section { break-inside: auto; padding: 10mm 0; }
+      .decision-card, .card, .metric-card, .loop-step, .stage, .phase, table { break-inside: avoid; }
+      a { color: #59411d; text-decoration: none; }
+      a[href^="http"]::after { content: " (" attr(href) ")"; color: #777; font-size: 7.5pt; word-break: break-all; }
+      .footer { color: #555; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">본문으로 건너뛰기</a>
+  <div class="reading-progress" aria-hidden="true"></div>
+
+  <header class="hero" id="top">
+    <div class="hero-inner">
+      <p class="eyebrow">Product strategy · vNext research</p>
+      <h1>나의 무당을<br>키우는 오늘신당</h1>
+      <p class="hero-subtitle">한국의 사주팔자를 기운 해석의 뿌리로, MBTI를 선택형 표현 취향으로 활용해 사용자가 홍연과 90일 동안 관계를 쌓고 신력을 키우는 성장형 서비스 설계안</p>
+      <div class="hero-meta" aria-label="문서 정보">
+        <span>조사일 2026.07.12</span>
+        <span>대상 18–35세 모바일 사용자</span>
+        <span>범위 7월 20일 베타 이후 vNext</span>
+        <span>형식 제품·게임 시스템·데이터·실험 설계</span>
+      </div>
+
+      <div class="hero-decision">
+        <div>
+          <h2>한 줄 결론</h2>
+          <p><strong>“출석하면 숫자가 오르는 앱”이 아니라, 사주에서 읽은 기운과 사용자가 고른 작은 행동이 홍연의 표현·서사·공간을 변화시키는 동반자 성장 서비스</strong>로 만든다.</p>
+        </div>
+        <div class="boundary">신력은 실제 초자연 능력이나 운세 정확도가 아니라, 오늘신당 세계관 안에서만 쓰이는 영구 성장치다. 결석·미결제 때문에 줄어들지 않는다.</div>
+      </div>
+    </div>
+  </header>
+
+  <div class="page-shell">
+    <nav class="toc" aria-label="문서 목차">
+      <p class="toc-title">Contents</p>
+      <ol>
+        <li><a href="#summary">의사결정 요약</a></li>
+        <li><a href="#baseline">현재 서비스와 경계</a></li>
+        <li><a href="#research">외부 사례와 근거</a></li>
+        <li><a href="#thesis">제품 성장 가설</a></li>
+        <li><a href="#personalization">사주 × MBTI 개인화</a></li>
+        <li><a href="#loop">핵심 플레이 루프</a></li>
+        <li><a href="#progression">신력·단계·보상 경제</a></li>
+        <li><a href="#content">미션과 콘텐츠 운영</a></li>
+        <li><a href="#ia">화면과 사용자 여정</a></li>
+        <li><a href="#data">데이터·API 설계</a></li>
+        <li><a href="#business">수익화 원칙</a></li>
+        <li><a href="#metrics">KPI와 실험</a></li>
+        <li><a href="#roadmap">12주 도입 로드맵</a></li>
+        <li><a href="#risks">안전·문화·운영 리스크</a></li>
+        <li><a href="#decisions">착수 전 결정</a></li>
+        <li><a href="#sources">출처와 조사 한계</a></li>
+      </ol>
+    </nav>
+
+    <main id="main">
+      <section class="section" id="summary">
+        <p class="section-kicker">01 · Executive decision</p>
+        <h2>도입할 것, 늦출 것, 하지 않을 것</h2>
+        <p class="section-lead">제품의 핵심 자산은 이미 홍연의 음성·모션·운세 공연이다. 성장 시스템은 그 경험 뒤에 별도 게임을 붙이는 것이 아니라, 오늘의 공연이 내 홍연에게 누적되도록 만드는 연결층이어야 한다.</p>
+
+        <div class="decision-grid">
+          <article class="decision-card">
+            <span class="num">01</span>
+            <h3>vNext 핵심</h3>
+            <p>사용자별 홍연 인스턴스, 영구 신력, 오늘의 작은 실천, 다음 해금 미리보기, 주 3회 기준의 부드러운 불씨를 먼저 검증한다.</p>
+          </article>
+          <article class="decision-card">
+            <span class="num">02</span>
+            <h3>후속 확장</h3>
+            <p>성장 분기, 개인 신당 꾸미기, 4주 시즌 서사, 소규모 협력은 핵심 루프가 D7/W4에서 작동한 뒤 연다.</p>
+          </article>
+          <article class="decision-card">
+            <span class="num">03</span>
+            <h3>영구 제외</h3>
+            <p>신력 판매, 유료 배수, 전역 랭킹, 확률형 뽑기, 결석 페널티, 공포 푸시, “신력이 높으면 더 정확한 점사” 같은 표현은 쓰지 않는다.</p>
+          </article>
+        </div>
+
+        <div class="metric-grid" style="margin-top: 1rem;">
+          <article class="metric-card"><div class="metric-label">핵심 행동</div><div class="metric-value">운세 + 작은 실천</div><div class="metric-note">단순 앱 오픈은 성장으로 계산하지 않음</div></article>
+          <article class="metric-card"><div class="metric-label">대표 진척</div><div class="metric-value">5단계 · 약 90일</div><div class="metric-note">주 5일 참여 가설, 실제 데이터로 재보정</div></article>
+          <article class="metric-card"><div class="metric-label">North Star</div><div class="metric-value">W3R</div><div class="metric-note">주 3일 이상 의미 있는 의식 완료 사용자 비율</div></article>
+        </div>
+
+        <div class="callout">
+          <strong>현재 베타 보호선</strong>
+          <p>현재 <a href="../master-spec.md">Master Spec v0.3.0</a>은 streak·친밀도·푸시·주간 리포트를 베타 non-goal로 둔다. 따라서 이 문서는 2026-07-20 베타 범위를 바꾸는 구현 지시가 아니라, 베타 지표가 확보된 뒤 진행할 <strong>vNext 재범위화 제안</strong>이다.</p>
+        </div>
+      </section>
+
+      <section class="section" id="baseline">
+        <p class="section-kicker">02 · Starting point</p>
+        <h2>이미 있는 강점 위에 성장층을 얹는다</h2>
+        <p class="section-lead">오늘신당은 “정확도 경쟁”이 아니라 캐릭터가 나에게 말을 거는 1분 공연을 목표로 한다. 성장 시스템도 그 정체성을 강화해야 하며, 기존의 게스트 우선·텍스트 우선·동의 기반 개인화·결정적 운세 결과를 깨면 안 된다.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>현재 자산</th><th>확인된 상태</th><th>성장 설계에 주는 의미</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><strong>홍연 1종 베타</strong></td>
+                <td>캐릭터 선택보다 핵심 루프·원가·품질을 먼저 검증한다. <a class="source-link" href="../../today-shindang-service-plan-v3.md">서비스 기획 v3 §7</a></td>
+                <td>모두가 같은 홍연을 만나되, 계정마다 신력·해금·선택 이력이 다른 “나의 홍연”으로 만든다.</td>
+              </tr>
+              <tr>
+                <td><strong>게스트 우선</strong></td>
+                <td>첫 텍스트 운세는 비회원도 가능하고, 듣기·부적은 로그인이 필요하다. <a class="source-link" href="../ux/login-sequence-and-scenarios.md">로그인 시나리오</a></td>
+                <td>첫 성장 장면까지 체험시킨 뒤 “홍연과 인연 맺고 저장”으로 계정 전환한다.</td>
+              </tr>
+              <tr>
+                <td><strong>현재 생년월일 개인화</strong></td>
+                <td>생년월일과 시간대는 HMAC용 profile hash를 만들고, hash byte로 점수 경향·날의 테마를 결정한다. 년주·월주·일주·시주나 오행은 계산하지 않는다. <a class="source-link" href="../../fortune-engine/seed_builder.py">seed_builder.py</a></td>
+                <td>현 상태를 “사주 기반”이라고 표시하면 안 된다. 검증된 명식 계산기를 별도 도입한 뒤 마케팅·결과 카피를 전환한다.</td>
+              </tr>
+              <tr>
+                <td><strong>텍스트 우선·오디오 선택</strong></td>
+                <td>자동재생을 금지하고 탭으로 오디오를 연다. <a class="source-link" href="../ux/screen-ia.md">화면 IA §3</a></td>
+                <td>신력 지급을 청취율에 묶지 않는다. 청각·기기 환경과 무관하게 텍스트로 의식을 완료할 수 있어야 한다.</td>
+              </tr>
+              <tr>
+                <td><strong>현재 streak</strong></td>
+                <td>앱 로드 시 localStorage 방문일을 계산하고 결과 카드에 연속 방문을 표시한다. <a class="source-link" href="../../frontend/src/lib/profile.ts">profile.ts</a></td>
+                <td>의미 있는 행동과 무관한 방문 카운터다. vNext에서는 “이번 주 불씨”와 영구 신력으로 역할을 분리한다.</td>
+              </tr>
+              <tr>
+                <td><strong>DB 초안</strong></td>
+                <td>users·sessions·streaks·fortunes·events·purchases 스키마가 있으나 현재 인증 세션은 메모리 기반이다. <a class="source-link" href="../../db/migrations/001_init.sql">001_init.sql</a></td>
+                <td>성장 영속화 전에 계정·세션·삭제 계약을 실제 DB 경로에 연결해야 한다.</td>
+              </tr>
+              <tr>
+                <td><strong>안전 원칙</strong></td>
+                <td>오락·자기성찰 고지, 불안 조장 금지, 의료·법률·투자 단정 금지. <a class="source-link" href="../../today-shindang-service-plan-v3.md">서비스 기획 v3 §21</a></td>
+                <td>레벨업 카피와 미션도 같은 정책을 상속한다. 공포·죄책감은 리텐션 도구가 될 수 없다.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout callout--red">
+          <strong>가장 큰 현재 공백</strong>
+          <p>사용자는 오늘 결과를 보고 떠날 수 있지만, “무엇이 쌓였고 내일 무엇이 달라지는지”는 보이지 않는다. 신력은 이 단절을 메우는 장기 기억 장치이며, 새로운 운세 엔진이 아니다.</p>
+        </div>
+      </section>
+
+      <section class="section" id="research">
+        <p class="section-kicker">03 · Research scan</p>
+        <h2>경쟁보다 동반자·습관 제품에서 더 많이 배운다</h2>
+        <p class="section-lead">국내 운세 앱은 정보 폭, 캘린더, 채팅, 상담, 캐릭터 친밀감을 강화해 왔다. 오늘신당의 “사용자별 무당 성장”에는 운세 경쟁사보다 Duolingo의 낮은 진입 장벽, Finch의 동반자 성장, Habitica의 행동-진척 연결, Pokémon의 영구 관계 단계가 더 직접적인 참고점이다.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>사례</th><th>관찰된 메커니즘</th><th>오늘신당에 적용</th><th>가져오지 않을 것</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><strong>Duolingo</strong><br><span class="tag tag--evidence">공식 A/B</span></td>
+                <td>연속 기록 조건을 “하루 한 레슨”으로 낮춘 실험에서 D14 잔존율 +3.3%, DAU +1%, streak 이용자 +10.5%의 상대 증가를 보고했다.</td>
+                <td>초기 일일 기준을 작게 두고, 강도 높은 목표와 연속성을 분리한다.</td>
+                <td>11:59 압박, 과도한 알림, 전역 XP 리그.</td>
+              </tr>
+              <tr>
+                <td><strong>Finch</strong><br><span class="tag tag--evidence">공식 기능</span></td>
+                <td>작은 목표 완료가 에너지·꾸미기 재화와 캐릭터 성장으로 이어진다. 목표는 일시정지·미루기·수정이 가능하다.</td>
+                <td>오늘의 작은 행동이 홍연의 반응·이야기·공간을 바꾸게 한다.</td>
+                <td>미접속 때문에 캐릭터가 아프거나 실망하는 연출.</td>
+              </tr>
+              <tr>
+                <td><strong>Habitica</strong><br><span class="tag tag--evidence">공식 기능</span></td>
+                <td>습관·반복·단발 과제를 XP·골드·HP 및 파티 퀘스트에 직접 연결한다.</td>
+                <td>실천과 성장의 인과를 즉시 보이고, 후속으로 협력 목표를 둔다.</td>
+                <td>미완료가 자신이나 파티에 피해를 주는 구조.</td>
+              </tr>
+              <tr>
+                <td><strong>Pokémon GO Buddy</strong><br><span class="tag tag--evidence">공식 기능</span></td>
+                <td>여러 상호작용으로 일일 하트를 얻고 장기 Buddy Level과 기능·기념품을 해금한다. 장기 관계 단계는 감소하지 않는다.</td>
+                <td>오늘의 기운은 변해도 영구 신력과 인연 장은 보존한다.</td>
+                <td>허기·지속 타이머처럼 돌봄 불안을 만드는 장치.</td>
+              </tr>
+              <tr>
+                <td><strong>Pokémon Sleep</strong><br><span class="tag tag--evidence">공식 기능</span></td>
+                <td>기존 생활 행동을 기록하고 다음 날 발견·도감·캐릭터 에너지로 환원한다.</td>
+                <td>앱 밖에서 한 작은 행동이 귀환 이야기나 기념물로 돌아오는 지연 보상을 후속 실험한다.</td>
+                <td>수면·건강을 신성함이나 도덕적 가치로 환산.</td>
+              </tr>
+              <tr>
+                <td><strong>Tamagotchi / Forest</strong><br><span class="tag tag--evidence">공식 기능</span></td>
+                <td>반복 돌봄이 성장 형태를 만들고, 완료한 시간이 영구적인 외형·컬렉션으로 남는다.</td>
+                <td>신력 숫자만이 아니라 개인 신당의 등불·배경·기념물로 누적을 시각화한다.</td>
+                <td>방치에 따른 죽음·질병·시듦, 공동 실패.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="card-grid">
+          <article class="card">
+            <span class="tag tag--evidence">연구 근거</span>
+            <h3>자율성</h3>
+            <p>자기결정성이론 관점에서 선택과 자기 주도감이 지속 동기에 중요하다. 하루 미션은 하나를 강제하지 말고 3개 중 선택하게 한다.</p>
+          </article>
+          <article class="card">
+            <span class="tag tag--evidence">연구 근거</span>
+            <h3>유능감</h3>
+            <p>숫자 상승보다 “무엇을 해서 무엇이 열렸는지”를 명확히 보여준다. 항상 다음 해금을 미리 보여주되, 비교 대상은 다른 사용자가 아니라 과거의 나다.</p>
+          </article>
+          <article class="card">
+            <span class="tag tag--evidence">연구 근거</span>
+            <h3>관계성</h3>
+            <p>홍연의 대사·표정·기억·선물이 관계를 만든다. 공개 순위 대신 캐릭터와의 1:1 관계, 선택형 소규모 협력을 우선한다.</p>
+          </article>
+        </div>
+
+        <div class="callout callout--green">
+          <strong>근거를 해석하는 법</strong>
+          <p>Duolingo의 일부 수치는 자체 A/B 실험 결과지만, 다른 제품의 공식 문서는 대부분 “그 기능이 존재한다”는 근거다. Finch나 Pokémon의 메커니즘이 오늘신당 리텐션을 올린다는 뜻은 아니다. 따라서 아래 수치·단계는 <span class="tag tag--inference">제품 가설</span>이며 출시 후 실험으로 검증해야 한다.</p>
+        </div>
+      </section>
+
+      <section class="section" id="thesis">
+        <p class="section-kicker">04 · Product thesis</p>
+        <h2>사용자가 성장시키고, 홍연이 달라진다</h2>
+        <p class="section-lead">핵심 감정은 소유가 아니라 “함께 쌓였다”는 관계감이다. 사용자는 오늘의 운세를 보고 작은 행동을 선택하며, 홍연은 그 축적에 따라 더 다양한 표현·서사·공간을 보여준다.</p>
+
+        <div class="layer-stack" aria-label="제품 가치 구조">
+          <div class="layer"><div class="layer-name">Daily</div><p><strong>오늘의 의식</strong> — 운세를 확인하고 30초–5분의 작은 행동 하나를 고른다.</p><div class="layer-rule">1–3분 앱 세션 + 앱 밖 행동</div></div>
+          <div class="layer"><div class="layer-name">Weekly</div><p><strong>이번 주 불씨</strong> — 7일 연속이 아니라 주 3회 완료를 기준으로 주간 기록과 선택 보상을 연다.</p><div class="layer-rule">결석보다 회복을 설계</div></div>
+          <div class="layer"><div class="layer-name">90 days</div><p><strong>신력 성장</strong> — 영구 진척이 대사·모션·배경·이야기 장을 해금한다.</p><div class="layer-rule">절대 감소·판매 없음</div></div>
+          <div class="layer"><div class="layer-name">Season</div><p><strong>공동 서사</strong> — 개인의 누적 기여가 시즌 장면을 열되, 실패나 순위 없이 모두가 결말을 본다.</p><div class="layer-rule">v1.2 이후 선택형</div></div>
+        </div>
+
+        <div class="callout">
+          <strong>신력이 올라도 “점사의 적중률”은 오르지 않는다</strong>
+          <p>성장으로 해금되는 것은 표현의 풍부함, 세계관 이야기, 꾸미기 선택, 회고 도구다. 같은 날짜·입력·주제·캐릭터라면 같은 운세 결과를 내는 기존 결정성은 유지한다. 이 분리가 신뢰·비용·안전성을 함께 지킨다.</p>
+        </div>
+
+        <h3>한 문장 제품 약속</h3>
+        <div class="copy-card">
+          <div class="context">Positioning statement</div>
+          <blockquote>“매일 작은 선택으로 나의 무당과 신당이 함께 자라는 1분 운세 리추얼.”</blockquote>
+        </div>
+      </section>
+
+      <section class="section" id="personalization">
+        <p class="section-kicker">05 · Korean personalization</p>
+        <h2>사주는 해석의 뿌리, MBTI는 표현 취향</h2>
+        <p class="section-lead">두 체계를 한데 섞어 “사주가 이 MBTI를 만든다”거나 “특정 유형은 특정 운명”이라고 말하지 않는다. 사주팔자는 한국 사용자에게 익숙한 전통 해석 프레임, MBTI는 신세대가 스스로 제공하는 가벼운 대화 취향, 실제 성장 분기는 사용자가 반복해서 고른 행동으로 분리한다.</p>
+
+        <div class="callout callout--red">
+          <strong>현재 구현은 아직 사주팔자가 아니다</strong>
+          <p><a href="../../fortune-engine/seed_builder.py">현재 seed builder</a>는 생년월일과 시간대를 hash한 뒤 hash byte를 점수 경향과 12개 day theme에 매핑한다. 년주·월주·일주·시주, 천간·지지, 음양오행을 산출하지 않는다. 따라서 명식 계산기가 검증되기 전에는 “생년월일 기반 개인화”라고만 표현해야 한다.</p>
+        </div>
+
+        <h3>개인화의 3층 구조</h3>
+        <div class="layer-stack">
+          <div class="layer"><div class="layer-name">사주팔자</div><p><strong>무엇을 해석할지</strong> — 명식의 오행 분포·일간·계절 맥락을 오늘 날짜·선택 주제와 결합해 운세 소재를 만든다.</p><div class="layer-rule">전통 해석 · 고정 기반</div></div>
+          <div class="layer"><div class="layer-name">MBTI</div><p><strong>어떻게 말할지</strong> — 설명 순서, 미션 후보의 우선순위, 회고 질문의 톤을 정하는 사용자의 자가 입력 취향이다.</p><div class="layer-rule">선택 · 수정 · 건너뛰기</div></div>
+          <div class="layer"><div class="layer-name">실제 행동</div><p><strong>어떻게 성장할지</strong> — 사용자가 완료한 미션이 용기·통찰·공감·조화의 성장 결을 만든다.</p><div class="layer-rule">운명이 아닌 선택의 누적</div></div>
+        </div>
+
+        <div class="callout">
+          <strong>권장 생성식</strong>
+          <p><code>운세 소재 = 사주 파생 신호 + 오늘 날짜 + 선택 주제</code><br><code>표현 방식 = 사용자가 고른 대화 취향 + 캐릭터 말투</code><br><code>성장 분기 = 완료한 미션의 누적</code></p>
+        </div>
+
+        <h3>사주 엔진: LLM이 계산하지 않는다</h3>
+        <p>사주팔자는 태어난 연·월·일·시의 네 기둥과 각 기둥의 천간·지지 두 글자, 즉 여덟 글자를 해석하는 전통 체계다. 계산과 해석을 분리해, 명식은 버전이 고정된 결정적 코드가 만들고 LLM은 검증된 파생 신호만 받아 안전한 이야기 문장으로 바꾼다.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>단계</th><th>입력 / 출력</th><th>제품 규칙</th></tr></thead>
+            <tbody>
+              <tr>
+                <td><strong>입력</strong></td>
+                <td>양력/음력, 윤달 여부, 출생 연·월·일, 출생 시각(선택), 출생 timezone. 국내 출생은 KST 기본</td>
+                <td>시간을 모르면 “3주 해석”으로 명시하고 시주를 만들어내지 않는다. 대운을 쓰지 않는 첫 버전에는 성별을 수집하지 않는다.</td>
+              </tr>
+              <tr>
+                <td><strong>명식 계산</strong></td>
+                <td>년주·월주·일주·시주, 일간, 음양·오행 분포, 계절 맥락, <code>calculation_version</code></td>
+                <td>순수 결정 함수로 구현하고 동일 입력은 항상 동일 결과. LLM·랜덤·사용자 MBTI가 명식을 바꾸지 않는다.</td>
+              </tr>
+              <tr>
+                <td><strong>파생 신호</strong></td>
+                <td>강조할 상징 1–2개, 균형 관찰, 오늘 주제와 연결할 안전한 소재</td>
+                <td>“부족하면 불행” 같은 결핍 단정 대신 “오늘 살펴볼 관점”으로 번역한다.</td>
+              </tr>
+              <tr>
+                <td><strong>문장 생성</strong></td>
+                <td>홍연의 summary·advice·mission 후보</td>
+                <td>원본 생년월일이나 전체 명식을 LLM에 보내지 않고, 허용된 파생 신호만 전달한다.</td>
+              </tr>
+              <tr>
+                <td><strong>설명</strong></td>
+                <td>“왜 이런 결과인가요?”에서 사용된 요소·오늘 주제·한계를 공개</td>
+                <td>사주 해석은 문화적·오락적 프레임이며 과학적 예측이나 현실 의사결정 도구가 아님을 결과 가까이에 표시한다.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>계산 정확도를 먼저 닫아야 하는 이유</h3>
+        <div class="principles">
+          <article class="principle"><h4>달력 종류와 윤달</h4><p>한국 사용자는 음력 생일을 입력할 수 있다. 양·음력 토글과 윤달 선택을 분명히 하고 변환 결과를 확인시킨다.</p></article>
+          <article class="principle"><h4>절기 경계</h4><p>월주와 년주 경계에는 학파별 관례가 있다. 입춘·절입 시각 등 채택 규칙을 ADR과 계산 버전에 고정한다.</p></article>
+          <article class="principle"><h4>날짜·시간 경계</h4><p>자시의 일주 전환, 해외 출생 timezone, 과거 서머타임 등 경계 사례를 명리 전문가와 합의하고 golden case로 만든다.</p></article>
+          <article class="principle"><h4>공식 역법은 검산 자료</h4><p>한국천문연구원 음양력 API는 양·음력, 세차·월건·일진·율리우스적일을, 특일 API는 24절기를 제공한다. 이는 달력 계산 기준이지 사주 해석의 효능 근거는 아니다.</p></article>
+        </div>
+        <p class="source-note">권장 검증: 경계 시각을 포함한 최소 100개 golden case, 독립 만세력 2종과 전문가 대조, 계산 version별 snapshot test, 시간 미상·윤달·해외 출생 회귀 테스트.</p>
+
+        <h3>MBTI는 결과가 아니라 인터페이스 설정이다</h3>
+        <p>MBTI의 공식 윤리 지침도 유형을 능력·지능·성공 가능성으로 보거나 절대적으로 일반화하지 말고, 경향·선호로 다루라고 한다. 오늘신당은 자체 4문항 퀴즈를 “공식 MBTI 검사”라고 부르지 않고, 사용자가 이미 알고 있는 네 글자를 선택적으로 입력하게 한다.</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>선호 축</th><th>적용 가능</th><th>적용 금지</th></tr></thead>
+            <tbody>
+              <tr><td><strong>E / I</strong></td><td>사람과 연결하는 미션 / 혼자 할 수 있는 미션의 기본 정렬</td><td>사회성, 외로움, 관계 성공을 단정</td></tr>
+              <tr><td><strong>S / N</strong></td><td>구체적 행동 먼저 / 상징과 큰 그림 먼저 설명</td><td>현실적·창의적 능력의 우열 판단</td></tr>
+              <tr><td><strong>T / F</strong></td><td>이유와 구조 먼저 / 감정 인정과 맥락 먼저 제시</td><td>공감 능력, 냉정함, 의사결정 품질 단정</td></tr>
+              <tr><td><strong>J / P</strong></td><td>체크 가능한 한 단계 / 열어 둔 탐색형 선택지 우선</td><td>성실성, 계획 능력, 성공 가능성 단정</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="principles">
+          <article class="principle"><h4>자가 입력만</h4><p>대화·클릭·사주로 MBTI를 몰래 추론하지 않는다. 사용자가 고르고 언제든 “모름”으로 되돌릴 수 있다.</p></article>
+          <article class="principle"><h4>직접 취향이 우선</h4><p>MBTI가 추천한 톤을 미리 듣고 “더 따뜻하게 / 더 간결하게 / 더 구조적으로 / 더 자유롭게” 직접 덮어쓸 수 있다.</p></article>
+          <article class="principle"><h4>16개 TTS 변형 금지</h4><p>초기에는 MBTI를 미션 정렬·화면 요약 순서에만 쓰고 핵심 TTS 본문은 공유해 캐시 효율과 캐릭터 일관성을 지킨다.</p></article>
+          <article class="principle"><h4>진단·궁합 금지</h4><p>채용·정신건강·능력·연애 성공을 예측하지 않는다. MBTI 궁합은 운명 점수 대신 대화 취향 비교 정도로만 검토한다.</p></article>
+        </div>
+
+        <h3>온보딩에는 한 번에 넣지 않는다</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>시점</th><th>요청 정보</th><th>사용자에게 주는 즉시 가치</th></tr></thead>
+            <tbody>
+              <tr><td><strong>첫 운세 전</strong></td><td>기존 생년월일, 출생시간 선택. 사주 도입 시 양/음력·윤달 추가</td><td>첫 결과에서 “나의 사주 기운 카드”를 짧게 보여줌</td></tr>
+              <tr><td><strong>첫 결과 후</strong></td><td>MBTI를 알고 있다면 16개 중 선택, 모름/건너뛰기 제공</td><td>같은 조언을 두 가지 톤으로 미리 보고 원하는 말투 선택</td></tr>
+              <tr><td><strong>3번째 의식</strong></td><td>용기·통찰·공감·조화 중 키우고 싶은 성장 결</td><td>미션·해금 분기 미리보기. 사주나 MBTI가 자동 지정하지 않음</td></tr>
+              <tr><td><strong>설정</strong></td><td>달력·시간·MBTI·대화 취향 수정 및 개인화 끄기</td><td>재계산 영향과 삭제 범위를 명확히 안내</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="copy-samples">
+          <article class="copy-card"><div class="context">사주 근거 표시</div><blockquote>“명식에서 목의 상징이 두드러져, 오늘은 시작과 확장에 초점을 맞췄어요.”</blockquote></article>
+          <article class="copy-card"><div class="context">구조형 표현</div><blockquote>“지금 할 수 있는 가장 작은 일 하나를 고르고, 5분만 시작해 봐요.”</blockquote></article>
+          <article class="copy-card"><div class="context">공감형 표현</div><blockquote>“처음부터 완벽하지 않아도 괜찮아요. 마음이 가는 작은 시작 하나면 충분해요.”</blockquote></article>
+          <article class="copy-card"><div class="context">MBTI 고지</div><blockquote>“MBTI는 말투를 맞추기 위한 선택형 취향 정보예요. 운세 결과나 신력을 결정하지 않아요.”</blockquote></article>
+        </div>
+      </section>
+
+      <section class="section" id="loop">
+        <p class="section-kicker">06 · Core loop</p>
+        <h2>로그인 보상이 아니라 의미 있는 의식</h2>
+        <p class="section-lead">앱을 여는 순간이 아니라 운세를 이해하고 작은 행동을 완료한 순간에 성장 피드백을 준다. 하루 한 번의 진척은 명확하고, 반복 탭·재생·광고·결제로 파밍할 수 없게 한다.</p>
+
+        <div class="loop" aria-label="하루 핵심 루프">
+          <article class="loop-step"><h3>맞이</h3><p>홍연이 오늘의 상태와 이번 주 불씨를 보여준다. 앱 오픈만으로는 신력을 주지 않는다.</p></article>
+          <article class="loop-step"><h3>해석</h3><p>사주 파생 신호와 오늘 주제를 홍연의 언어로 먼저 보여준다. 당일 최초 결과 확인 시 신력 10을 서버가 1회 기록한다.</p></article>
+          <article class="loop-step"><h3>선택</h3><p>사주 소재에 연결된 3개 실천을 제안하고 MBTI·직접 취향은 순서만 조정한다. 최종 선택은 사용자가 한다.</p></article>
+          <article class="loop-step"><h3>실천</h3><p>사용자가 앱 밖에서 행동하고 완료를 표시한다. 증명·사진·위치 권한은 요구하지 않는다.</p></article>
+          <article class="loop-step"><h3>성장</h3><p>신력 15, 홍연의 짧은 반응, 다음 해금까지 남은 진척을 즉시 보여준다.</p></article>
+        </div>
+
+        <h3>첫날은 3분 안에 성장 가치를 증명한다</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>시점</th><th>사용자 경험</th><th>제품 목적</th></tr></thead>
+            <tbody>
+              <tr><td>0:00</td><td>게스트로 시작, 기존 프로필 또는 최소 입력</td><td>기존 온보딩 전환을 보호</td></tr>
+              <tr><td>0:30</td><td>홍연의 운세 텍스트 확인, 선택 시 음성 재생</td><td>핵심 가치가 성장 UI보다 먼저</td></tr>
+              <tr><td>1:30</td><td>오늘의 실천 3개 중 하나 선택</td><td>운세를 행동 가능한 자기성찰로 연결</td></tr>
+              <tr><td>2:00</td><td>간단한 행동 완료 또는 “나중에 하기” 고정</td><td>완료 강요 없이 이탈 후 복귀점 생성</td></tr>
+              <tr><td>2:10</td><td>첫울림 장면과 +신력, 다음 해금 미리보기</td><td>성장 시스템의 즉시 효용 증명</td></tr>
+              <tr><td>2:20</td><td>“홍연과 인연 맺고 저장” 로그인 제안</td><td>가치 확인 뒤 계정 전환</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout callout--green">
+          <strong>복귀 설계</strong>
+          <p>실천은 그날 자정 전 강제 완료가 아니라 다음 날 오전까지 회고 완료가 가능하다. 놓친 날에는 “신력은 그대로예요. 오늘 다시 불씨를 밝혀볼까요?”라고 말한다. 결석을 실패로 만들지 않는다.</p>
+        </div>
+      </section>
+
+      <section class="section" id="progression">
+        <p class="section-kicker">07 · Progression & economy</p>
+        <h2>출시에는 신력 하나만 보인다</h2>
+        <p class="section-lead">장기적으로는 일일 기운·영구 신력·관계 장·꾸미기 재화를 분리할 수 있지만, MVP 화면에 여러 숫자를 동시에 올리면 무엇이 중요한지 흐려진다. 첫 검증에서는 신력 한 줄과 다음 해금만 노출한다.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>개념</th><th>역할</th><th>감소 / 소비</th><th>출시 시점</th></tr></thead>
+            <tbody>
+              <tr><td><strong>신력</strong></td><td>사용자별 홍연의 영구 성장치. 표현·서사·공간을 해금</td><td>감소 없음 · 구매 불가</td><td><span class="tag">MVP 노출</span></td></tr>
+              <tr><td><strong>이번 주 불씨</strong></td><td>주 3회 의미 있는 의식 완료를 보여주는 부드러운 리듬</td><td>매주 새로 시작 · 실패 표기 없음</td><td><span class="tag">MVP 노출</span></td></tr>
+              <tr><td><strong>인연 장</strong></td><td>신력 단계에 따라 열리는 질적 관계·이야기 챕터</td><td>별도 숫자나 재화 아님</td><td><span class="tag tag--later">v1.1</span></td></tr>
+              <tr><td><strong>기운 조각</strong></td><td>개인 신당의 비경쟁 꾸미기용 단일 소프트 재화</td><td>꾸미기에만 소비 · 신력 교환 금지</td><td><span class="tag tag--later">v1.1</span></td></tr>
+              <tr><td><strong>오늘의 기운</strong></td><td>후속 귀환 이야기의 일일 상태. 부족해도 이용 제한 없음</td><td>일일 리셋 · 페널티 없음</td><td><span class="tag tag--later">v1.2 검토</span></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>5단계 · 90일 성장 가설</h3>
+        <div class="stage-list">
+          <div class="stage"><div class="stage-number">STAGE 01</div><div class="stage-name">첫불</div><div class="stage-unlock">기본 홍연, 첫울림 대사, 신력 게이지 시작</div><div class="stage-xp">0 신력</div></div>
+          <div class="stage"><div class="stage-number">STAGE 02</div><div class="stage-name">감응</div><div class="stage-unlock">인사말 2종, 기운 오라 색 선택, 첫 주 기록</div><div class="stage-xp">150 신력</div></div>
+          <div class="stage"><div class="stage-number">STAGE 03</div><div class="stage-name">울림</div><div class="stage-unlock">인연 이야기 1장, 개인 신당 배경 슬롯, 반응 모션</div><div class="stage-xp">450 신력</div></div>
+          <div class="stage"><div class="stage-number">STAGE 04</div><div class="stage-name">맺음</div><div class="stage-unlock">주간 축원 장면, 대사 선택 결과의 지속 반영</div><div class="stage-xp">950 신력</div></div>
+          <div class="stage"><div class="stage-number">STAGE 05</div><div class="stage-name">수호</div><div class="stage-unlock">90일 인연 결말, 시즌 의상 슬롯, 기념물</div><div class="stage-xp">2,000 신력</div></div>
+        </div>
+        <p class="source-note">단계명은 실제 무속 직함·신격을 쓰지 않은 오리지널 판타지 용어다. 임계값은 주 5일 참여 가설이며 출시 전 콘텐츠 생산량과 함께 조정한다.</p>
+
+        <h3>지급 규칙</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>행동</th><th>신력</th><th>상한</th><th>이유</th></tr></thead>
+            <tbody>
+              <tr><td>당일 최초 운세 결과 확인</td><td><strong>+10</strong></td><td>하루 1회</td><td>핵심 콘텐츠 소비를 인정하되 앱 오픈과 분리</td></tr>
+              <tr><td>선택한 작은 실천 완료</td><td><strong>+15</strong></td><td>하루 1회</td><td>운세를 행동으로 연결하는 가장 가치 있는 행동</td></tr>
+              <tr><td>주 3회 의식 완료 후 주간 기록 열기</td><td><strong>+40</strong></td><td>주 1회</td><td>매일보다는 지속 가능한 주간 리듬 보상</td></tr>
+              <tr><td>3일 이상 쉬고 복귀</td><td><strong>+10</strong></td><td>7일 1회</td><td>죄책감 대신 회복 행동을 강화</td></tr>
+              <tr><td>듣기·공유·푸시 동의·결제·반복 탭</td><td><strong>0</strong></td><td>—</td><td>접근성, 스팸, 다크패턴, pay-to-win 방지</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="simulator" aria-labelledby="sim-title">
+          <div class="simulator-head">
+            <div><h3 id="sim-title">성장 속도 가설 시뮬레이터</h3><p>활동 빈도와 미션 완료율에 따라 각 단계까지의 예상 일수를 계산한다.</p></div>
+            <div class="sim-note">주간 신력 = 활동일 × 10 + 활동일 × 15 × 미션 완료율 + 주 3일 이상이면 40. 복귀 보너스는 제외. 실제 출시 데이터가 생기면 이 가설을 교체한다.</div>
+          </div>
+          <div class="controls">
+            <div class="control">
+              <label for="active-days"><span>주간 활동일</span><output id="active-days-output">5일</output></label>
+              <input id="active-days" type="range" min="2" max="7" step="1" value="5">
+            </div>
+            <div class="control">
+              <label for="mission-rate"><span>선택 미션 완료율</span><output id="mission-rate-output">80%</output></label>
+              <input id="mission-rate" type="range" min="40" max="100" step="5" value="80">
+            </div>
+          </div>
+          <div class="sim-results" aria-live="polite">
+            <div class="sim-result"><span>감응 · 150</span><strong id="days-stage-2">8일</strong></div>
+            <div class="sim-result"><span>울림 · 450</span><strong id="days-stage-3">23일</strong></div>
+            <div class="sim-result"><span>맺음 · 950</span><strong id="days-stage-4">47일</strong></div>
+            <div class="sim-result"><span>수호 · 2,000</span><strong id="days-stage-5">99일</strong></div>
+          </div>
+        </div>
+
+        <h3>경제 불변식</h3>
+        <div class="principles">
+          <article class="principle"><h4>영구 진척은 줄지 않는다</h4><p>오늘의 상태는 바뀌어도 신력·해금·기념물은 유지한다. 장기 투자감을 보호한다.</p></article>
+          <article class="principle"><h4>서버가 유일한 지급자다</h4><p>클라이언트는 완료 의도만 보내고, 서버가 당일 상한과 멱등 키를 확인해 ledger를 쓴다.</p></article>
+          <article class="principle"><h4>현금은 표현을 산다</h4><p>의상·음성팩·외전·공간 테마는 판매할 수 있지만 신력, 점사 정확도, 복구권은 판매하지 않는다.</p></article>
+          <article class="principle"><h4>모든 보상은 예측 가능하다</h4><p>무엇을 하면 무엇을 받는지 사전에 보인다. 랜덤 상자와 숨겨진 확률은 도입하지 않는다.</p></article>
+        </div>
+      </section>
+
+      <section class="section" id="content">
+        <p class="section-kicker">08 · Content system</p>
+        <h2>운세 문장을 작은 행동으로 번역한다</h2>
+        <p class="section-lead">미션은 사용자를 오래 붙잡는 숙제가 아니라 사주에서 읽은 상징과 운세의 추상적인 조언을 오늘 실행 가능한 30초–5분 행동으로 바꾸는 장치다. MBTI는 후보 순서를 조정할 뿐이며, 완료 증명을 요구하지 않고 실패·위험·비용 부담이 없어야 한다.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>주제</th><th>미션 예시</th><th>피해야 할 문장</th></tr></thead>
+            <tbody>
+              <tr><td><strong>총운</strong></td><td>오늘 눈에 들어온 색 하나를 기록하기 / 30초 숨 고르기 / 책상 한 칸 정리하기</td><td>“하지 않으면 오늘 운이 막혀요”</td></tr>
+              <tr><td><strong>연애</strong></td><td>고마운 사람에게 짧은 안부 보내기 / 내가 원하는 관계 한 줄 적기 / 거절하고 싶은 일 하나 떠올리기</td><td>“오늘 연락하지 않으면 인연을 놓쳐요”</td></tr>
+              <tr><td><strong>금전</strong></td><td>오늘의 작은 지출 하나 기록하기 / 결제 전 10초 멈추기 / 무료로 즐길 일 하나 고르기</td><td>투자·대출·복권 행동 유도</td></tr>
+              <tr><td><strong>일·학업</strong></td><td>가장 작은 일 5분 시작하기 / 내일의 첫 할 일 적기 / 완료한 일 하나 표시하기</td><td>합격·취업·성과를 단정하는 조언</td></tr>
+              <tr><td><strong>관계</strong></td><td>말하고 싶은 내용을 한 문장으로 정리하기 / 상대의 좋은 의도 하나 떠올리기 / 오늘의 경계 하나 정하기</td><td>관계 단절·복종·불안 조장</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>미션 생성 규칙</h3>
+        <div class="principles">
+          <article class="principle"><h4>3개 선택지</h4><p>행동형, 성찰형, 휴식형을 한 세트로 제공해 같은 날의 컨디션에 맞게 고른다.</p></article>
+          <article class="principle"><h4>5분 이하</h4><p>첫 실행은 30초–5분 안에 끝나야 한다. 장기 과제는 다음 행동 하나로 쪼갠다.</p></article>
+          <article class="principle"><h4>비용·권한 없음</h4><p>구매, 위치, 연락처, 사진 업로드, 건강 데이터 제공을 완료 조건으로 쓰지 않는다.</p></article>
+          <article class="principle"><h4>휴식도 유효</h4><p>“오늘은 쉬기”를 실패가 아닌 선택지로 둔다. 다만 반복 파밍 보상은 주지 않는다.</p></article>
+        </div>
+
+        <h3>콘텐츠 생산 단위</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>단위</th><th>최소 수량</th><th>운영 규칙</th></tr></thead>
+            <tbody>
+              <tr><td>주제별 미션 템플릿</td><td>5주제 × 20개 = 100개</td><td>최근 14일 중복 금지, 행동/성찰/휴식 비율 유지</td></tr>
+              <tr><td>완료 반응 대사</td><td>단계별 12개 = 60개</td><td>성과 과장 없이 행동 자체를 구체적으로 인정</td></tr>
+              <tr><td>단계 해금 장면</td><td>5개</td><td>Live2D 최소 상태와 사전합성 음성으로 비용 통제</td></tr>
+              <tr><td>주간 기록 카드</td><td>4종 템플릿</td><td>완료 횟수보다 사용자가 고른 주제·행동의 패턴을 요약</td></tr>
+              <tr><td>안전 QA</td><td>100% 규칙 검사 + 표본 수동 검수</td><td>공포, 단정, 금전·의료·법률, 관계 강요, 실제 의례 오용 차단</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="copy-samples">
+          <article class="copy-card"><div class="context">결석 후 복귀</div><blockquote>“불씨가 쉬어가도, 함께 쌓은 신력은 사라지지 않아요.”</blockquote></article>
+          <article class="copy-card"><div class="context">단계 상승</div><blockquote>“네가 고른 작은 행동들이 모여, 이곳의 빛을 바꿨어.”</blockquote></article>
+          <article class="copy-card"><div class="context">면책·세계관</div><blockquote>“홍연의 말은 오늘을 돌아보는 판타지 콘텐츠예요. 중요한 결정은 현실의 정보와 함께 판단해 주세요.”</blockquote></article>
+          <article class="copy-card"><div class="context">미션 미완료</div><blockquote>“오늘은 쉬어도 괜찮아요. 준비가 되면 가장 작은 것부터 다시 골라요.”</blockquote></article>
+        </div>
+      </section>
+
+      <section class="section" id="ia">
+        <p class="section-kicker">09 · Experience architecture</p>
+        <h2>기존 흐름을 늘리지 않고, 결과 뒤에 성장시킨다</h2>
+        <p class="section-lead">첫 운세까지의 S0→S4 흐름은 유지한다. 신력 UI는 홈의 작은 상태, 결과 직후의 미션, 필요할 때 여는 “나의 신당”에만 추가해 초기 퍼널을 보호한다.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>화면</th><th>추가 요소</th><th>핵심 상태</th><th>주의</th></tr></thead>
+            <tbody>
+              <tr><td><strong>S0 시작 / 홈</strong></td><td>홍연 이름 옆 단계, 얇은 신력 게이지, 이번 주 불씨, “오늘의 운세” 단일 CTA</td><td>첫 방문 / 오늘 미완료 / 오늘 완료 / 복귀</td><td>성장 대시보드가 핵심 CTA보다 강해지지 않음</td></tr>
+              <tr><td><strong>S2 입력</strong></td><td>사주 엔진 도입 시 양력/음력, 윤달, 출생시간 모름, timezone 처리. MBTI는 이 화면에 넣지 않음</td><td>양력 / 음력 / 윤달 / 시간 미상 / 해외 출생</td><td>첫 운세 전 필드 증가로 인한 이탈 측정, 입력 결과 확인 제공</td></tr>
+              <tr><td><strong>S4 캐릭터 stage</strong></td><td>운세 텍스트 완료 뒤 “오늘의 작은 실천 고르기” 진입</td><td>텍스트 로딩 / 음성 선택 / 결과 완료</td><td>오디오 재생 전 신력 잠금 금지</td></tr>
+              <tr><td><strong>S5 결과 카드</strong></td><td>+10 신력 피드백, 선택 미션 고정, “나중에 하기”</td><td>미션 미선택 / 선택 / 완료</td><td>공유보다 미션을 강요하지 않음</td></tr>
+              <tr><td><strong>G1 나의 신당</strong></td><td>홍연 단계, 다음 해금, 해금 목록, 배경 슬롯, 인연 이야기</td><td>잠금 / 해금 / 신규 표시</td><td>잠금이 결제 유도처럼 보이지 않게 획득 조건 명시</td></tr>
+              <tr><td><strong>G2 주간 기록</strong></td><td>완료한 날, 선택 주제, 홍연의 짧은 회고, 다음 주 선택</td><td>3회 미만 / 열림 / 확인 완료</td><td>빈 주를 실패 리포트로 만들지 않음</td></tr>
+              <tr><td><strong>설정 / 개인화</strong></td><td>사주 입력·계산 version, MBTI 자가 입력, 직접 대화 취향, 개인화 끄기·삭제</td><td>기본 / 수정 / 부분 해석 / 비개인화</td><td>수정 영향과 재계산 범위를 저장 전에 설명</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>게스트에서 “나의 홍연”으로</h3>
+        <div class="layer-stack">
+          <div class="layer"><div class="layer-name">체험</div><p>게스트는 기존처럼 첫 운세를 보고 첫울림 성장 장면까지 경험한다.</p><div class="layer-rule">로그인 벽을 앞당기지 않음</div></div>
+          <div class="layer"><div class="layer-name">전환</div><p>성장 가치가 보인 뒤 “홍연과 인연 맺고 신력 저장”을 제안한다.</p><div class="layer-rule">가치 후 계정 요청</div></div>
+          <div class="layer"><div class="layer-name">정산</div><p>서명된 단기 guest reward token을 로그인 후 한 번만 계정 ledger에 반영한다.</p><div class="layer-rule">중복 지급·클라이언트 위조 방지</div></div>
+          <div class="layer"><div class="layer-name">동의</div><p>성장 저장과 생년월일 개인화 동의를 분리한다. 성장 계정을 만들었다고 출생정보가 자동 저장되지 않는다.</p><div class="layer-rule">목적별 동의 유지</div></div>
+        </div>
+
+        <h3>접근성 불변식</h3>
+        <ul class="checklist">
+          <li>텍스트 운세만으로 당일 의식과 신력 획득을 완료할 수 있다.</li>
+          <li>단계 상승 모션에는 <code>prefers-reduced-motion</code> 대응과 “건너뛰기”를 제공한다.</li>
+          <li>단계·상태는 색만으로 구분하지 않고 이름·수치·텍스트를 함께 제공한다.</li>
+          <li>푸시는 청취·미션 완료 후 별도 opt-in으로 요청하고, 기본 빈도는 하루 1회 이하다.</li>
+        </ul>
+      </section>
+
+      <section class="section" id="data">
+        <p class="section-kicker">10 · Data & API</p>
+        <h2>성장치는 잔액이 아니라 감사 가능한 원장이다</h2>
+        <p class="section-lead">현재의 localStorage streak를 그대로 확장하면 기기 변경·재설치·조작·중복 지급을 통제할 수 없다. 성장 시스템은 계정·동의·삭제 계약이 실제 DB에 연결된 뒤, 서버 권위의 append-only ledger로 구현한다.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>테이블</th><th>주요 필드</th><th>불변식</th></tr></thead>
+            <tbody>
+              <tr><td><code>saju_profiles</code></td><td>user_id, calendar_type, four_pillars_enc, derived_signals, calculation_version, time_known</td><td>원본 출생정보와 분리, version 고정, derived profile도 개인정보로 삭제 대상</td></tr>
+              <tr><td><code>preference_profiles</code></td><td>user_id, mbti_self_reported, delivery_style, mission_style, updated_at</td><td>모두 nullable·수정·삭제 가능, 공개 프로필 기본 비노출, 자동 추론 금지</td></tr>
+              <tr><td><code>user_shamans</code></td><td>user_id, character_id, power_xp, stage, created_at, last_meaningful_date</td><td>베타 이후에도 user × character 유일, power_xp ≥ 0</td></tr>
+              <tr><td><code>growth_ledger</code></td><td>idempotency_key, user_shaman_id, source_type, source_id, delta, occurred_at</td><td>delta ≥ 0, idempotency_key unique, 수정 대신 보정 entry</td></tr>
+              <tr><td><code>mission_instances</code></td><td>user_id, local_date, template_id, status, selected_at, completed_at</td><td>하루 선택·완료 상한, 상태 전이 서버 검증</td></tr>
+              <tr><td><code>shaman_unlocks</code></td><td>user_shaman_id, unlock_key, unlocked_at, seen_at</td><td>해금 취소 없음, unlock_key 카탈로그 참조</td></tr>
+              <tr><td><code>weekly_rituals</code></td><td>user_id, week_start, meaningful_days, reward_claimed_at</td><td>사용자 timezone 고정, 주간 보상 1회</td></tr>
+              <tr><td><code>cosmetic_inventory</code></td><td>user_id, item_key, acquired_via, acquired_at</td><td>v1.1 이후, 구매와 성장 지급 경로 구분</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>권장 API 표면</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>API</th><th>역할</th><th>권한·검증</th></tr></thead>
+            <tbody>
+              <tr><td><code>POST /api/me/saju/calculate</code></td><td>양·음력 출생 입력을 명식과 안전한 파생 신호로 계산</td><td>동의, calendar/timezone 유효성, 계산 version, raw birth 로그 금지</td></tr>
+              <tr><td><code>PATCH /api/me/preferences</code></td><td>MBTI 자가 입력과 직접 대화·미션 취향 저장/삭제</td><td>allowlist, null로 삭제, 행동 기반 자동 추론 금지</td></tr>
+              <tr><td><code>GET /api/me/shaman</code></td><td>현재 신력·단계·다음 해금·이번 주 불씨</td><td>로그인, soft-deleted user 차단</td></tr>
+              <tr><td><code>GET /api/ritual/today</code></td><td>오늘의 운세와 연결된 미션 후보 3개</td><td>당일·주제·캐릭터 결정성, 민감정보 응답 제외</td></tr>
+              <tr><td><code>POST /api/ritual/today/select</code></td><td>미션 1개 선택</td><td>서버가 후보 포함 여부·날짜 확인</td></tr>
+              <tr><td><code>POST /api/ritual/today/complete</code></td><td>완료 처리 및 신력 원장 기록</td><td>멱등 키, 하루 상한, 중복 지급 방지</td></tr>
+              <tr><td><code>GET /api/me/shaman/unlocks</code></td><td>해금 목록·신규 상태</td><td>소유권 확인, 잠금 조건 공개</td></tr>
+              <tr><td><code>POST /api/auth/claim-guest-growth</code></td><td>첫 게스트 체험 보상 1회 정산</td><td>서명 token, TTL, nonce 사용 완료</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>이벤트 스키마 추가</h3>
+        <p><code>growth_preview_seen</code> · <code>mission_options_seen</code> · <code>mission_selected</code> · <code>mission_completed</code> · <code>power_awarded</code> · <code>stage_up</code> · <code>unlock_seen</code> · <code>weekly_ritual_opened</code> · <code>gap_return</code> · <code>growth_login_claimed</code></p>
+        <div class="callout">
+          <strong>개인정보 최소화</strong>
+          <p>기본 분석에는 미션 template_id·상태·시간만 기록하고 자유 입력 회고는 수집하지 않는다. 생년월일 원문, 파생 명식, MBTI는 목적과 보관기간을 분리하며 계정 삭제 시 함께 제거한다. 회고 기능을 추가하면 로컬 우선으로 두고, 서버 저장은 별도 동의·암호화·보관기간·삭제 경로가 준비된 경우에만 연다.</p>
+        </div>
+        <div class="callout callout--green">
+          <strong>캐시·비용 경계</strong>
+          <p>운세 캐시 키는 <code>saju_profile_hash</code>처럼 비가역 파생값만 사용하고 원본 명식·생년월일을 넣지 않는다. 첫 버전의 MBTI는 화면 요약과 미션 정렬에만 적용해 16배의 텍스트·TTS 변형을 만들지 않는다. 개인화 품질이 입증된 뒤에도 16유형 전체가 아니라 4개 delivery style로 묶어 비용을 통제한다.</p>
+        </div>
+      </section>
+
+      <section class="section" id="business">
+        <p class="section-kicker">11 · Business model</p>
+        <h2>신력은 벌고, 표현은 산다</h2>
+        <p class="section-lead">과금이 성장 속도나 운세의 품질을 바꾸면 자기성찰 서비스가 불안 판매로 변한다. 모든 사용자가 5단계 성장과 핵심 인연 서사를 완주할 수 있게 하고, 유료 상품은 표현·수집·외전의 폭을 넓힌다.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>상품</th><th>무료 / 유료 경계</th><th>권장 시점</th><th>금지선</th></tr></thead>
+            <tbody>
+              <tr><td><strong>기본 성장</strong></td><td>신력 5단계, 핵심 대사·모션·90일 결말 무료</td><td>MVP</td><td>신력 배수, 단계 스킵 판매 금지</td></tr>
+              <tr><td><strong>캐릭터 패스</strong></td><td>추가 음성·외전·의상·공간 테마</td><td>신명 단계 도달자 수요 확인 후</td><td>유료 캐릭터만 더 정확하다는 표현 금지</td></tr>
+              <tr><td><strong>시즌 서사</strong></td><td>공통 결말 무료, 확장 장면·수집품 유료</td><td>v1.2</td><td>남은 시간 과장, 결말 인질화 금지</td></tr>
+              <tr><td><strong>꾸미기 팩</strong></td><td>의상·무대·부적 카드 프레임의 확정 상품</td><td>v1.1</td><td>확률형 뽑기·중간 재화로 가격 은폐 금지</td></tr>
+              <tr><td><strong>심화 운세</strong></td><td>기존 v3의 건당 리포트. 성장 경제와 분리</td><td>기존 수익화 실험</td><td>신력 단계·불씨와 결제 압박 연결 금지</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout callout--red">
+          <strong>확률형 아이템은 애초에 설계하지 않는다</strong>
+          <p>국내에서는 2024년 3월부터 게임 내 확률형 아이템 정보공개 제도가 시행됐다. 서비스의 법적 분류와 무관하게, 오늘신당은 유료 랜덤 보상 대신 내용·가격·획득물이 보이는 확정 상품만 사용하면 규제·신뢰·CS 위험을 동시에 줄일 수 있다.</p>
+        </div>
+      </section>
+
+      <section class="section" id="metrics">
+        <p class="section-kicker">12 · Measurement</p>
+        <h2>오래 머문 시간이 아니라, 의미 있는 날을 측정한다</h2>
+        <p class="section-lead">성장 기능의 성공은 앱 오픈 수나 신력 발행량이 아니다. 운세를 보고 작은 행동을 완료한 날이 반복되는지, 쉬었다가도 죄책감 없이 돌아오는지, 그 과정에서 기존 TTS·공유·비용 지표를 해치지 않는지를 본다.</p>
+
+        <div class="metric-grid">
+          <article class="metric-card"><div class="metric-label">North Star</div><div class="metric-value">W3R</div><div class="metric-note">7일 중 3일 이상 운세 확인 + 미션 완료한 계정 비율</div></article>
+          <article class="metric-card"><div class="metric-label">Activation</div><div class="metric-value">첫 성장 경험률</div><div class="metric-note">첫 운세 → 미션 선택 → 신력 피드백까지 24시간 내 완료</div></article>
+          <article class="metric-card"><div class="metric-label">Recovery</div><div class="metric-value">Gap return</div><div class="metric-note">3일 이상 공백 후 7일 안에 의미 있는 의식 재완료</div></article>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>범주</th><th>핵심 지표</th><th>해석</th></tr></thead>
+            <tbody>
+              <tr><td><strong>퍼널</strong></td><td>성장 미리보기 노출 → 미션 선택 → 완료 → 신력 피드백 → 로그인 저장</td><td>어느 단계에서 성장 가치가 전달되지 않는지 확인</td></tr>
+              <tr><td><strong>리텐션</strong></td><td>D1/D7/D30, W1→W4, 단계 2 도달률, gap return</td><td>기존 베타 지표와 같은 cohort 정의를 유지</td></tr>
+              <tr><td><strong>깊이</strong></td><td>주제별 미션 선택률, 완료 지연, 다음 해금 조회율, 주간 기록 열람</td><td>선택과 해금이 실제 동기를 만드는지 확인</td></tr>
+              <tr><td><strong>개인화</strong></td><td>사주 카드 이해율, “나와 맞는다” 평가, MBTI skip·수정·직접 취향 override, 유형별 미션 완료</td><td>개인화가 설명 가능하고 유용한지, 고정관념을 만들지 않는지 확인</td></tr>
+              <tr><td><strong>기존 경험</strong></td><td>운세 생성 완료, 첫 텍스트, 청취 완료, 공유, 캐시 hit, 비용/사용자</td><td>성장 UI가 핵심 공연과 단위 경제를 해치지 않는지 확인</td></tr>
+              <tr><td><strong>가드레일</strong></td><td>푸시 opt-out, 반복 오픈, 야간 사용, “압박감을 느꼈다” 설문, 삭제 요청</td><td>리텐션 증가가 강박·불신·프라이버시 비용인지 감시</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3>우선 실험 4개</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>가설</th><th>대조군 / 실험군</th><th>주 지표</th><th>가드레일</th></tr></thead>
+            <tbody>
+              <tr><td>주간 불씨가 연속일보다 회복에 유리하다</td><td>기존 연속 방문 vs 주 3회 불씨 + 신력 보존</td><td>W3R, gap return, D30</td><td>압박감, 푸시 해제</td></tr>
+              <tr><td>선택이 완료율을 높인다</td><td>추천 미션 1개 vs 행동/성찰/휴식 3개</td><td>선택→완료율</td><td>선택 시간, 이탈</td></tr>
+              <tr><td>다음 해금이 숫자보다 강하다</td><td>신력 수치 중심 vs 다음 대사·배경 미리보기 중심</td><td>D7, 다음 해금 조회</td><td>과도한 반복 오픈</td></tr>
+              <tr><td>가치 후 로그인 제안이 전환을 높인다</td><td>운세 전 로그인 vs 첫 성장 장면 후 저장 제안</td><td>로그인 완료, 첫 운세 완료</td><td>OAuth 이탈, CS</td></tr>
+              <tr><td>검증된 사주 신호가 hash seed보다 개인화감을 높인다</td><td>현재 birth-seeded theme vs 명식 파생 신호 + 근거 설명</td><td>개인화감, D7, 미션 선택</td><td>첫 결과 시간, 계산 불일치 신고, 불안 카피 신고</td></tr>
+              <tr><td>MBTI 기본값보다 직접 취향 override가 더 유용하다</td><td>자가 MBTI 추천만 vs 추천 + 즉시 톤 선택</td><td>톤 유지율, 미션 완료, 만족도</td><td>stereotype 신고, skip·삭제율, 캐시 비용</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="source-note">효과 임계값과 표본 수는 트래픽·현재 baseline·검정력 계산 후 사전 등록한다. “+10%면 성공” 같은 숫자를 근거 없이 먼저 고정하지 않는다.</p>
+      </section>
+
+      <section class="section" id="roadmap">
+        <p class="section-kicker">13 · Delivery plan</p>
+        <h2>베타 보호 → 얇은 성장층 → 서사 확장</h2>
+        <p class="section-lead">첫 12주는 게임 전체를 만드는 기간이 아니다. 계정 영속화와 원장을 먼저 닫고, 하나의 미션과 하나의 단계 상승이 끝까지 작동하는 vertical slice를 검증한 뒤 콘텐츠와 수익화를 넓힌다.</p>
+
+        <div class="roadmap">
+          <article class="phase"><div class="phase-time">NOW · 07/20까지</div><h3>현재 베타 보호</h3><p>Master Spec의 1분 공연·완료율·TTS·공유·비용 지표를 먼저 확보한다. 성장 구현은 시작하지 않는다.</p></article>
+          <article class="phase"><div class="phase-time">WEEK 1–2</div><h3>기반·사주 계약</h3><p>vNext spec, 계정/DB·ledger, 사주 계산 ADR, 역법·경계 golden case, 미션 안전 규칙, 이벤트와 동의 목적을 확정한다.</p></article>
+          <article class="phase"><div class="phase-time">WEEK 3–6</div><h3>신력 vertical slice</h3><p>홈→운세→미션→단계 2를 구현하고, 검증된 사주 파생 신호와 “왜 이런 결과인가요?”를 연결한다. MBTI는 아직 넣지 않는다.</p></article>
+          <article class="phase"><div class="phase-time">WEEK 7–12</div><h3>순차 실험·MBTI</h3><p>성장과 사주 효과를 먼저 분리 검증한다. 통과 후 MBTI 자가 입력·직접 톤 override를 작은 cohort에 열고 인연 이야기로 확장한다.</p></article>
+        </div>
+
+        <h3>단계별 출구 조건</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>게이트</th><th>필수 증거</th><th>미달 시</th></tr></thead>
+            <tbody>
+              <tr><td><strong>베타 → 성장 착수</strong></td><td>기존 D1·완료율·TTS·공유 baseline, 계정 영속화 계획 승인</td><td>성장 UI가 아니라 현재 핵심 루프를 먼저 개선</td></tr>
+              <tr><td><strong>Vertical slice → 콘텐츠 확대</strong></td><td>중복 지급 0, 삭제 계약 통과, 첫 성장 경험 퍼널 측정 가능</td><td>콘텐츠 생산 전에 데이터·복귀 흐름 보수</td></tr>
+              <tr><td><strong>사주 표시 게이트</strong></td><td>양·음력·윤달·절기·시각 경계 golden test, 전문가 대조, 계산 version·부분 해석 UI</td><td>“사주” 명칭을 쓰지 않고 기존 생년월일 seed로 유지</td></tr>
+              <tr><td><strong>MVP → v1.1</strong></td><td>W3R/D7 개선과 가드레일 비악화, 단계 2 해금 만족도 정성 근거</td><td>숫자·보상 추가 대신 미션·피드백 재설계</td></tr>
+              <tr><td><strong>MBTI 실험 게이트</strong></td><td>자가 입력·skip·수정·삭제, 직접 취향 override, 캐시 비용, 고정관념 QA</td><td>MBTI label 없이 직접 대화 취향만 제공</td></tr>
+              <tr><td><strong>v1.1 → 수익화</strong></td><td>꾸미기 수요, 무료 성장 완주 가능성, 가격·환불·해지 UX 검토</td><td>신력 배수 대신 확정형 표현 상품만 소규모 테스트</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section" id="risks">
+        <p class="section-kicker">14 · Safety & cultural integrity</p>
+        <h2>무속은 장식이 아니라 살아 있는 문화다</h2>
+        <p class="section-lead">무당은 실제 의례를 집전하는 종교인이며, 굿은 지역·생업·공동체 맥락을 가진다. 오늘신당은 오리지널 판타지 캐릭터임을 분명히 하고, 실제 직함·신격·의례를 게임 등급이나 유료 희귀도로 소비하지 않아야 한다.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>리스크</th><th>나쁜 설계</th><th>제품 원칙</th></tr></thead>
+            <tbody>
+              <tr><td><strong>문화적 희화화</strong></td><td>실제 신격·신내림·만신·심방·굿을 레벨·스킬·뽑기 등급으로 사용</td><td>오리지널 단계명 사용, 실제 요소는 맥락 카드와 전문가·전승 공동체 검토 후 제한적으로 다룸</td></tr>
+              <tr><td><strong>사주 계산 오류</strong></td><td>양·음력, 윤달, 절기, timezone, 시간 미상을 무시하고 “정통 사주”라고 표시</td><td>계산 version·채택 관례 공개, golden test·전문가 대조, 불완전 입력은 부분 해석으로 명시</td></tr>
+              <tr><td><strong>MBTI 고정관념</strong></td><td>유형으로 능력·궁합·행동을 단정하거나 사용자의 대화에서 몰래 추론</td><td>자가 입력·수정·skip, 경향 언어, 직접 취향 override, 운세·신력 계산과 분리</td></tr>
+              <tr><td><strong>영적 의존</strong></td><td>“신력이 부족해서 나쁜 일이 생긴다”, 중요한 결정을 캐릭터에게 맡기게 함</td><td>신력은 허구 수치 고지, 불안·단정 금지, 현실 정보와 전문가 판단 안내</td></tr>
+              <tr><td><strong>강박적 리텐션</strong></td><td>자정 카운트다운, 결석 시 신력 하락, 캐릭터 슬픔, 유료 복구</td><td>주간 목표, 영구 진척, 무료 회복, 야간 푸시 금지, 압박감 설문</td></tr>
+              <tr><td><strong>다크패턴</strong></td><td>가상재화로 가격 은폐, 해지 방해, 자동 연장 숨김, 잠금 화면의 강압적 결제</td><td>KRW 가격 병기, 확정 상품, 동일 난이도 해지, 잠금 조건 사전 공개</td></tr>
+              <tr><td><strong>개인정보 과수집</strong></td><td>미션 증명용 사진·위치·연락처, 회고 원문 자동 저장</td><td>완료 boolean 기본, 회고 로컬 우선, 목적별 동의, 계정 삭제 시 성장 데이터 cascade</td></tr>
+              <tr><td><strong>접근성 배제</strong></td><td>오디오 80% 청취나 모션 시청을 성장 조건으로 설정</td><td>텍스트 동등 경로, reduced motion, 색 외 상태 표기</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="callout callout--red">
+          <strong>연령·취약 사용자</strong>
+          <p>현재 핵심 타깃은 18세 이상이지만 공개 웹 서비스에서는 미성년 접근 가능성을 배제할 수 없다. 결제 전 연령·법정대리인·환불 정책을 검토하고, 아동·청소년에게 프로파일링·맞춤형 압박 푸시·과도한 개인정보 수집을 적용하지 않는 보호 모드를 준비한다.</p>
+        </div>
+      </section>
+
+      <section class="section" id="decisions">
+        <p class="section-kicker">15 · Decision log</p>
+        <h2>착수 전에 닫아야 할 10가지</h2>
+        <p class="section-lead">아래는 개발 티켓으로 바로 넘기기 전에 PM·디자인·콘텐츠·법무·엔지니어링이 명시적으로 결정해야 하는 항목이다.</p>
+        <ol class="checklist">
+          <li><strong>제품 범위:</strong> 7월 20일 베타 종료 후 vNext로 재범위화할지, 어떤 baseline을 착수 게이트로 쓸지.</li>
+          <li><strong>사주 계산 기준:</strong> 양·음력, 윤달, 입춘·절입, 자시 날짜 전환, 해외 출생 timezone과 시간 미상 처리 관례.</li>
+          <li><strong>MBTI 사용권·표현:</strong> 자가 입력만 받을지, 공식 명칭·상표·설문 사용 범위와 “직접 취향” 대체 경로.</li>
+          <li><strong>용어:</strong> “신력”과 첫불→감응→울림→맺음→수호가 오리지널 판타지로 충분히 구분되는지 문화 자문.</li>
+          <li><strong>성장 속도:</strong> 주 5일 기준 90일 완주 가설과 단계별 실제 콘텐츠 생산량.</li>
+          <li><strong>계정 전환:</strong> 첫 성장 장면 후 로그인 및 guest reward 1회 정산 계약.</li>
+          <li><strong>영속화:</strong> 현재 메모리 세션·로컬 streak에서 DB 계정·ledger로 넘어가는 마이그레이션과 삭제 정책.</li>
+          <li><strong>미션 운영:</strong> 초기 100개 작성 책임자, 안전 QA, 중복·피로 관리 도구.</li>
+          <li><strong>실험:</strong> 기존 streak 대조군, W3R 정의, 표본 수, 가드레일, 실험 중단 기준.</li>
+          <li><strong>수익화:</strong> 무료 핵심 성장 완주 보장과 확정형 표현 상품만 판매한다는 원칙.</li>
+        </ol>
+
+        <div class="callout callout--green">
+          <strong>추천 첫 산출물</strong>
+          <p>이 문서를 바로 개발 티켓으로 쪼개기보다, 먼저 <strong>vNext ADR 1개</strong>로 “성장 수치의 의미·불변식·베타 경계”를 확정하고, 그다음 홈→운세→미션→첫 단계 상승까지의 모바일 UX 명세와 데이터 계약을 별도 티켓으로 만든다.</p>
+        </div>
+      </section>
+
+      <section class="section" id="sources">
+        <p class="section-kicker">16 · Sources & limits</p>
+        <h2>근거, 추론, 아직 모르는 것</h2>
+        <p class="section-lead">2026-07-12 기준 공개 1차 자료, 동료검토 연구, 정부 자료, 현재 저장소를 확인했다. 사용자 인터뷰·오늘신당 행동 데이터·가격 실험은 아직 없으므로 성장 단계·보상량·리텐션 효과는 검증 전 가설이다.</p>
+
+        <h3>외부 1차 자료·연구</h3>
+        <ul class="references">
+          <li><span class="reference-type">Official test</span><span class="reference-title"><a href="https://blog.duolingo.com/improving-the-streak/">Duolingo — Improving the streak</a></span><span class="reference-note">낮은 일일 조건과 D14·DAU·streak 상대 변화 수치.</span></li>
+          <li><span class="reference-type">Official product</span><span class="reference-title"><a href="https://help.finchcare.com/hc/en-us/articles/37779940291213-Creating-and-Completing-Goals">Finch — Creating and Completing Goals</a></span><span class="reference-note">목표 완료, 에너지·꾸미기 재화, 캐릭터 성장 연결.</span></li>
+          <li><span class="reference-type">Official product</span><span class="reference-title"><a href="https://habitica.com/static/faq">Habitica — FAQ</a></span><span class="reference-note">Habits·Dailies·To Do, XP·골드·HP, 파티·퀘스트 및 pause damage.</span></li>
+          <li><span class="reference-type">Official product</span><span class="reference-title"><a href="https://niantic.helpshift.com/hc/en/6-pokemon-go/faq/2155-buddy-adventure/">Pokémon GO — Buddy Adventure</a></span><span class="reference-note">일일 하트와 영구 Buddy Level, 해금·기념품.</span></li>
+          <li><span class="reference-type">Official product</span><span class="reference-title"><a href="https://www.pokemonsleep.net/en/sleep/">Pokémon Sleep — Sleep Tracking</a></span><span class="reference-note">일상 행동을 다음 날 수집·성장 루프로 전환.</span></li>
+          <li><span class="reference-type">Official product</span><span class="reference-title"><a href="https://tamagotchi-official.com/gb/series/paradise/howto/">Tamagotchi Paradise — How to Play</a> · <a href="https://forestapp.cc/">Forest</a></span><span class="reference-note">반복 돌봄의 성장 분기와 완료 시간의 영구 시각화.</span></li>
+          <li><span class="reference-type">Peer reviewed</span><span class="reference-title"><a href="https://pubmed.ncbi.nlm.nih.gov/11392867/">Ryan &amp; Deci (2000) — Self-Determination Theory</a></span><span class="reference-note">자율성·유능감·관계성의 동기 프레임.</span></li>
+          <li><span class="reference-type">Meta-analysis</span><span class="reference-title"><a href="https://link.springer.com/article/10.1007/s11423-023-10337-7">Li, Hew &amp; Du — Gamification and intrinsic motivation</a></span><span class="reference-note">게임화 효과의 크기와 심리 욕구별 차이. 교육 맥락이므로 직접 전이에는 한계가 있음.</span></li>
+          <li><span class="reference-type">Calendar data</span><span class="reference-title"><a href="https://www.data.go.kr/dataset/15012679/openapi.do">한국천문연구원 — 음양력 정보 OpenAPI</a> · <a href="https://www.data.go.kr/data/15012690/openapi.do">24절기 정보 OpenAPI</a></span><span class="reference-note">양·음력 변환, 세차·월건·일진·율리우스적일과 24절기 검산 자료. 사주 해석의 효능 근거는 아님.</span></li>
+          <li><span class="reference-type">MBTI ethics</span><span class="reference-title"><a href="https://www.myersbriggs.org/using-type-as-a-professional/mbti-code-of-ethics/home.htm">Myers &amp; Briggs Foundation — MBTI Code of Ethics</a></span><span class="reference-note">유형을 경향·선호로 표현하고 능력·지능·성공 가능성이나 절대적 행동으로 일반화하지 말라는 공식 원칙.</span></li>
+          <li><span class="reference-type">MBTI review</span><span class="reference-title"><a href="https://doi.org/10.1002/jcad.70006">Erford et al. (2025) — 25-year psychometric synthesis of MBTI Form M</a></span><span class="reference-note">척도 내적 일관성은 양호했지만 4주 재검사에서 같은 네 글자 유형은 65%였고 독립 재검사 연구가 부족하다고 보고. 고정 정체성보다 수정 가능한 취향으로 써야 하는 근거.</span></li>
+          <li><span class="reference-type">Korea signal</span><span class="reference-title"><a href="https://hrcopinion.co.kr/wp-content/uploads/2022/01/162-4-%EA%B2%B0%EA%B3%BC%ED%91%9C_%ED%95%9C%EA%B5%AD%EB%A6%AC%EC%84%9C%EC%B9%98-%EC%A3%BC%EA%B0%84%EB%A6%AC%ED%8F%AC%ED%8A%B8_%EC%97%AC%EB%A1%A0%EC%86%8D%EC%9D%98%EC%97%AC%EB%A1%A0-%EC%A0%9C162-4%ED%98%B82022%EB%85%84-1%EC%9B%94-5%EC%9D%BC_MBTI%EC%9D%B8%EC%8B%9D.pdf">한국리서치 2021 MBTI 인식 조사</a></span><span class="reference-note">검사 경험이 있는 18–29세 응답자의 83%가 자신의 유형을 알고 있다고 답한 과거 신호. 2026년 현재성은 별도 사용자 조사로 갱신 필요.</span></li>
+          <li><span class="reference-type">Consumer safety</span><span class="reference-title"><a href="https://www.ftc.gov/news-events/news/press-releases/2022/09/ftc-report-shows-rise-sophisticated-dark-patterns-designed-trick-trap-consumers">US FTC — Bringing Dark Patterns to Light</a> · <a href="https://www.ftc.go.kr/www/selectBbsNttView.do?bordCd=3&amp;key=12&amp;nttSn=43795">한국 공정거래위원회 — 온라인 다크패턴 규율</a></span><span class="reference-note">숨은 구독·중간재화·가격 은폐·해지 방해 등 회피 원칙.</span></li>
+          <li><span class="reference-type">Korea policy</span><span class="reference-title"><a href="https://www.mcst.go.kr/site/s_notice/press/pressView.jsp?pMenuCD=0302000000&amp;pSeq=20757">문화체육관광부 — 확률형 아이템 정보공개 제도</a> · <a href="https://www.pipc.go.kr/np/cop/bbs/selectBoardArticle.do?bbsId=BS217&amp;mCode=G010030000&amp;nttId=10896">개인정보위 — 아동·청소년 개인정보 보호 안내서</a></span><span class="reference-note">유료 랜덤 보상과 취약 이용자 데이터 보호의 국내 기준.</span></li>
+          <li><span class="reference-type">Cultural source</span><span class="reference-title"><a href="https://encykorea.aks.ac.kr/Article/E0018976">한국민족문화대백과 — 무당</a> · <a href="https://ich.unesco.org/en/RL/jeju-chilmeoridang-yeongdeunggut-00187">UNESCO — 제주칠머리당영등굿</a></span><span class="reference-note">무당의 종교인 역할과 실제 의례의 공동체·지역 맥락.</span></li>
+        </ul>
+
+        <h3>현재 프로젝트 근거</h3>
+        <ul class="references">
+          <li><span class="reference-type">Product</span><span class="reference-title"><a href="../../today-shindang-service-plan-v3.md">오늘신당 서비스 기획 문서 v3</a></span><span class="reference-note">서비스 정의, 타깃, 홍연 1종, 현재 리텐션 비전, 비용·안전·수익화 경계.</span></li>
+          <li><span class="reference-type">Current scope</span><span class="reference-title"><a href="../master-spec.md">Master Spec v0.3.0</a></span><span class="reference-note">2026-07-20 베타 목표와 streak·친밀도 non-goal.</span></li>
+          <li><span class="reference-type">UX</span><span class="reference-title"><a href="../ux/screen-ia.md">모바일 PWA 화면 IA</a> · <a href="../ux/login-sequence-and-scenarios.md">로그인 시퀀스</a></span><span class="reference-note">S0–S6, 텍스트 우선, 오디오 제스처, 게스트·로그인 경계.</span></li>
+          <li><span class="reference-type">Implementation</span><span class="reference-title"><a href="../../frontend/src/lib/profile.ts">현재 localStorage profile·streak</a> · <a href="../../frontend/src/components/ResultCard.tsx">결과 카드 streak UI</a> · <a href="../../fortune-engine/seed_builder.py">현재 birth-seeded 신호</a></span><span class="reference-note">현 성장 요소가 계정 영속화 없는 방문 streak이고, 생년월일은 실제 명식이 아닌 hash seed로만 쓰임을 확인.</span></li>
+          <li><span class="reference-type">Data</span><span class="reference-title"><a href="../../db/migrations/001_init.sql">초기 DB 스키마</a> · <a href="../../db/migrations/002_schema_contract_fixes.sql">스키마 계약 보정</a></span><span class="reference-note">users·sessions·streaks·events·purchases와 동의·삭제 경계.</span></li>
+          <li><span class="reference-type">Market snapshot</span><span class="reference-title"><a href="../../%EA%B2%BD%EC%9F%81%EB%B6%84%EC%84%9D-%EB%B3%B4%EA%B3%A0%EC%84%9C-2026-06-13.md">오늘신당 경쟁 분석 보고서</a></span><span class="reference-note">점신·포스텔러·헬로우봇의 현재 포지션과 오늘신당의 무대형 공백.</span></li>
+        </ul>
+
+        <div class="callout">
+          <strong>추가 조사가 필요한 부분</strong>
+          <p>18–35세 타깃 6–8명과 “키운다”라는 표현·신력 용어·결석 카피·사주 근거 카드·MBTI 말투 선택을 인터뷰하고, 실제 무속·민속·명리 전문가 또는 전승 공동체 검토를 거쳐야 한다. 또 현재 베타의 D1·D7·세션 빈도·로그인 전환 baseline 없이는 90일 속도와 실험 표본을 확정할 수 없다.</p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer class="footer">
+    오늘신당 · Growth Gamification Research · 2026.07.12 · 이 문서는 vNext 제품 제안이며 현재 베타 구현 범위를 자동 변경하지 않습니다.
+  </footer>
+
+  <script>
+    (() => {
+      const progress = document.querySelector('.reading-progress');
+      const updateProgress = () => {
+        const max = document.documentElement.scrollHeight - window.innerHeight;
+        const ratio = max > 0 ? window.scrollY / max : 0;
+        progress.style.width = `${Math.min(100, Math.max(0, ratio * 100))}%`;
+      };
+      window.addEventListener('scroll', updateProgress, { passive: true });
+      updateProgress();
+
+      const activeDays = document.getElementById('active-days');
+      const missionRate = document.getElementById('mission-rate');
+      const activeDaysOutput = document.getElementById('active-days-output');
+      const missionRateOutput = document.getElementById('mission-rate-output');
+      const thresholds = [150, 450, 950, 2000];
+      const resultIds = ['days-stage-2', 'days-stage-3', 'days-stage-4', 'days-stage-5'];
+
+      const updateSimulator = () => {
+        const days = Number(activeDays.value);
+        const rate = Number(missionRate.value) / 100;
+        const weeklyXp = days * 10 + days * 15 * rate + (days >= 3 ? 40 : 0);
+        activeDaysOutput.textContent = `${days}일`;
+        missionRateOutput.textContent = `${Math.round(rate * 100)}%`;
+        thresholds.forEach((threshold, index) => {
+          const estimatedDays = Math.ceil((threshold / weeklyXp) * 7);
+          document.getElementById(resultIds[index]).textContent = `약 ${estimatedDays}일`;
+        });
+      };
+
+      activeDays.addEventListener('input', updateSimulator);
+      missionRate.addEventListener('input', updateSimulator);
+      updateSimulator();
+    })();
+  </script>
+</body>
+</html>
