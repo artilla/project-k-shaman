@@ -25,7 +25,8 @@ COPY backend/ backend/
 COPY fortune-engine/ fortune-engine/
 COPY --from=frontend-build /build/frontend/dist/ frontend/dist/
 
-RUN mkdir -p state/events state/tts_cache \
+RUN chmod -R a+rX frontend/dist fortune-engine/web/static \
+    && mkdir -p state/events state/tts_cache \
     && chown -R shindang:shindang /app/state
 
 USER 10001:10001

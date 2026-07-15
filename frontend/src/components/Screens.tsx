@@ -1,7 +1,7 @@
 // S0 온보딩 · S1 무당 확인 · S2 입력 · S3 주제 선택 (v2 디자인, 프레젠테이셔널)
 import { forwardRef, useState } from "react";
 import { TOPICS } from "../lib/constants";
-import { NICKNAME_MAX_LENGTH, validateProfileInput, type ProfileErrors } from "../lib/profile";
+import { NICKNAME_MAX_LENGTH, validateProfileInput } from "../lib/profile";
 import type { Profile } from "../lib/types";
 
 export const S0Onboarding = forwardRef<HTMLDivElement, {
@@ -92,14 +92,14 @@ export function S2ProfileForm(props: {
   const [birthHour, setBirthHour] = useState(
     initial?.birthHour === null || initial?.birthHour === undefined ? "" : String(initial.birthHour),
   );
-  const [errors, setErrors] = useState<ProfileErrors>({});
+  const [touched, setTouched] = useState({ nickname: false, birthDate: false });
   const [privacyOpen, setPrivacyOpen] = useState(false);
 
   const currentErrors = validateProfileInput(nickname, birthDate);
   const canNext = Object.keys(currentErrors).length === 0;
 
   const submit = () => {
-    setErrors(currentErrors);
+    setTouched({ nickname: true, birthDate: true });
     if (!canNext) return;
     const parts = birthDate.split("-").map(Number);
     props.onSubmit({
@@ -120,13 +120,14 @@ export function S2ProfileForm(props: {
       <input id="profile-nickname" className="field-input" type="text" autoComplete="off"
         placeholder="닉네임을 입력해주세요" value={nickname}
         onChange={(e) => setNickname(e.target.value.slice(0, NICKNAME_MAX_LENGTH))}
-        onBlur={() => setErrors(currentErrors)} />
-      {errors.nickname && <p className="field-error">{errors.nickname}</p>}
+        onBlur={() => setTouched((value) => ({ ...value, nickname: true }))} />
+      {touched.nickname && currentErrors.nickname && <p className="field-error">{currentErrors.nickname}</p>}
 
       <label className="field-label" htmlFor="profile-birth-date">생년월일</label>
       <input id="profile-birth-date" className="field-input" type="date" value={birthDate}
-        onChange={(e) => setBirthDate(e.target.value)} onBlur={() => setErrors(currentErrors)} />
-      {errors.birthDate && <p className="field-error">{errors.birthDate}</p>}
+        onChange={(e) => setBirthDate(e.target.value)}
+        onBlur={() => setTouched((value) => ({ ...value, birthDate: true }))} />
+      {touched.birthDate && currentErrors.birthDate && <p className="field-error">{currentErrors.birthDate}</p>}
 
       <label className="field-label" htmlFor="profile-birth-hour">출생시간 (선택)</label>
       <select id="profile-birth-hour" className="field-input" value={birthHour}

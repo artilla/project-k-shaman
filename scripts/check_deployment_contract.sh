@@ -23,6 +23,26 @@ done
 test "$(grep -Ec '^FROM [^ ]+@sha256:[0-9a-f]{64}' Dockerfile)" -ge 2
 grep -Eq '^USER (10001(:10001)?|app)$' Dockerfile
 grep -Eq '^HEALTHCHECK ' Dockerfile
+if ! awk '
+  /^[[:space:]]*#/ { next }
+  /^[[:space:]]*FROM[[:space:]]/ {
+    asset_mode_set = 0
+    runtime_user_seen = 0
+    next
+  }
+  /^[[:space:]]*RUN[[:space:]]+chmod[[:space:]]+-R[[:space:]]+a\+rX[[:space:]]+frontend\/dist[[:space:]]+fortune-engine\/web\/static([[:space:]]|\\$)/ {
+    if (runtime_user_seen) exit 1
+    asset_mode_set = 1
+  }
+  /^[[:space:]]*USER[[:space:]]+(10001(:10001)?|app)[[:space:]]*$/ {
+    runtime_user_seen = 1
+    if (!asset_mode_set) exit 1
+  }
+  END { if (!asset_mode_set || !runtime_user_seen) exit 1 }
+' Dockerfile; then
+  echo "runtime assets must be made world-readable by an active RUN before the non-root USER" >&2
+  exit 1
+fi
 bash -n deploy/remote_deploy.sh deploy/remote_rollback.sh
 
 if ! command -v docker >/dev/null 2>&1; then
