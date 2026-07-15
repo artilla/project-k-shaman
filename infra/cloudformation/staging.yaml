@@ -143,7 +143,9 @@ Resources:
                   - ecr:GetDownloadUrlForLayer
                 Resource: !GetAtt AppRepository.Arn
               - Effect: Allow
-                Action: s3:GetObject
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
                 Resource: !Sub "${DeploymentBucket.Arn}/deployments/*"
               - Effect: Allow
                 Action: s3:GetBucketLocation

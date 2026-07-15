@@ -53,10 +53,29 @@ fi
 docker compose config --quiet
 APP_IMAGE='example.invalid/shindang@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
 SESSION_SECRET='test-only-session-secret-at-least-32-bytes' \
+DEPLOY_ENV='staging' \
 SITE_ADDRESS='https://staging.example.invalid' \
 AWS_REGION='ap-northeast-2' \
 LOG_GROUP='/shindang/test/app' \
   docker compose -f deploy/compose.aws.yaml config --quiet
+
+for deploy_env in staging production; do
+  APP_IMAGE='example.invalid/shindang@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+  SESSION_SECRET='test-only-session-secret-at-least-32-bytes' \
+  DEPLOY_ENV="$deploy_env" \
+  SITE_ADDRESS="https://$deploy_env.example.invalid" \
+  AWS_REGION='ap-northeast-2' \
+  LOG_GROUP="/shindang/$deploy_env/app" \
+    docker compose -f deploy/compose.aws.yaml config --format json |
+    DEPLOY_ENV="$deploy_env" python3 -c '
+import json, os, sys
+config = json.load(sys.stdin)
+actual = config["services"]["app"]["environment"]["SHINDANG_ENV"]
+expected = os.environ["DEPLOY_ENV"]
+if actual != expected:
+    raise SystemExit(f"SHINDANG_ENV mismatch: expected {expected!r}, got {actual!r}")
+'
+done
 
 docker compose config --format json | python3 -c '
 import json, sys
@@ -81,5 +100,45 @@ grep -q 'workflow_dispatch' .github/workflows/deploy-staging.yml
 grep -q 'environment: staging' .github/workflows/deploy-staging.yml
 grep -q 'workflow_dispatch' .github/workflows/promote-production.yml
 grep -q 'environment: production' .github/workflows/promote-production.yml
+
+if awk '
+  /^[[:space:]]*- uses:/ {
+    ref = $0
+    sub(/^.*@/, "", ref)
+    sub(/[[:space:]#].*$/, "", ref)
+    if (ref !~ /^[0-9a-f]{40}$/) {
+      print "action is not pinned to a full commit SHA: " $0 > "/dev/stderr"
+      failed = 1
+    }
+  }
+  END { exit failed }
+' .github/workflows/*.yml; then
+  :
+else
+  exit 1
+fi
+
+if grep -REn --include='*.yml' --include='*.yaml' --include='*.sh' \
+  'aws[[:space:]]+s3[[:space:]]+cp' .github/workflows deploy; then
+  echo "deployment bundles must be fetched with an exact S3 VersionId" >&2
+  exit 1
+fi
+
+grep -q -- '--version-id' .github/workflows/deploy-staging.yml
+grep -q -- '--version-id' .github/workflows/promote-production.yml
+grep -q -- '--version-id' deploy/remote_deploy.sh
+grep -q 's3:GetObjectVersion' infra/cloudformation/staging.yaml
+grep -q 'DOCKER_CONFIG=' deploy/remote_deploy.sh
+grep -q 'ECR_REPOSITORY_URI@sha256:<64hex>' deploy/remote_deploy.sh
+compose_env_contract="SHINDANG_ENV: \${DEPLOY_ENV:?"
+github_env_contract="DEPLOY_ENV: \${{ vars.SHINDANG_ENV }}"
+grep -Fq "$compose_env_contract" deploy/compose.aws.yaml
+grep -Fq "$github_env_contract" .github/workflows/deploy-staging.yml
+grep -Fq "$github_env_contract" .github/workflows/promote-production.yml
+
+if grep -nF '|| true' deploy/remote_deploy.sh deploy/remote_rollback.sh; then
+  echo "deployment and rollback failures must not be masked" >&2
+  exit 1
+fi
 
 echo "container/deployment contract: ok"

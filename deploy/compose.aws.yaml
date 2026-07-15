@@ -6,7 +6,7 @@ services:
     platform: linux/arm64
     environment:
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
-      SHINDANG_ENV: staging
+      SHINDANG_ENV: ${DEPLOY_ENV:?DEPLOY_ENV is required}
       TRUST_PROXY: "1"
       TTS_BACKEND: ${TTS_BACKEND:-mock}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}

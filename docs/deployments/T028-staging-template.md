@@ -11,6 +11,10 @@ credential, OAuth secret, or personal test account.
 - image digest (`sha256:...`, repository URI omitted): `pending`
 - previous healthy digest (`sha256:...`): `none | pending`
 - deployment bundle key: `pending`
+- deployment bundle VersionId: `pending`
+- deployment bundle SHA-256: `pending`
+- workflow `previous_digest` output: `none | pending`
+- injected `SHINDANG_ENV`: `staging`
 - public staging origin: `pending`
 
 ## Infrastructure
@@ -29,6 +33,7 @@ credential, OAuth secret, or personal test account.
 - `GET /healthz`: `pending`
 - `GET /readyz`: `pending`
 - `GET /api/auth/providers`: `pending`
+- remote forward smoke (`healthz`, `readyz`, `api/auth/providers`): `pending`
 - Google callback result (test identity omitted): `not-configured | pending | pass`
 - Kakao callback result (test identity omitted): `not-configured | pending | pass`
 
@@ -38,6 +43,7 @@ credential, OAuth secret, or personal test account.
 - restored digest: `pending`
 - rollback start/end (UTC): `pending`
 - post-rollback health/readiness/API smoke: `pending`
+- automatic rollback status recorded by workflow: `not-required | healthy | failed`
 
 ## Scope assertion
 

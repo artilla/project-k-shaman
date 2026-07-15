@@ -8,7 +8,15 @@ on:
         required: true
         type: string
       bundle_key:
-        description: Existing versioned deployment bundle key
+        description: Exact S3 deployment bundle key proven in staging
+        required: true
+        type: string
+      bundle_version_id:
+        description: Exact S3 VersionId proven in staging
+        required: true
+        type: string
+      bundle_sha256:
+        description: Exact lowercase SHA-256 of the bundle proven in staging
         required: true
         type: string
       site_address:
@@ -28,50 +36,84 @@ jobs:
   promote:
     runs-on: ubuntu-latest
     environment: production
+    outputs:
+      image_digest: ${{ steps.deploy.outputs.image_digest }}
+      previous_digest: ${{ steps.deploy.outputs.previous_digest }}
+      previous_release: ${{ steps.deploy.outputs.previous_release }}
     env:
       AWS_REGION: ap-northeast-2
+      DEPLOY_ENV: ${{ vars.SHINDANG_ENV }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
       - name: Validate immutable promotion inputs
         env:
           APP_IMAGE: ${{ inputs.app_image }}
           APP_SECRET_ID: ${{ vars.APP_SECRET_ID }}
           AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           BUNDLE_KEY: ${{ inputs.bundle_key }}
+          BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+          BUNDLE_VERSION_ID: ${{ inputs.bundle_version_id }}
           DEPLOYMENT_BUCKET: ${{ vars.DEPLOYMENT_BUCKET }}
+          ECR_REPOSITORY_URI: ${{ vars.ECR_REPOSITORY_URI }}
           PRODUCTION_INSTANCE_ID: ${{ vars.PRODUCTION_INSTANCE_ID }}
           PRODUCTION_LOG_GROUP: ${{ vars.PRODUCTION_LOG_GROUP }}
           SITE_ADDRESS: ${{ inputs.site_address }}
         run: |
-          [[ "$APP_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
+          test "$DEPLOY_ENV" = production
+          registry="${ECR_REPOSITORY_URI%%/*}"
+          repository="${ECR_REPOSITORY_URI#"$registry/"}"
+          registry_pattern="^[0-9]{12}[.]dkr[.]ecr[.]${AWS_REGION}[.]amazonaws[.]com$"
+          [[ "$ECR_REPOSITORY_URI" == "$registry/"* ]]
+          [[ "$registry" =~ $registry_pattern ]]
+          [[ "$repository" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ ]]
+          image_prefix="$ECR_REPOSITORY_URI@sha256:"
+          image_digest="${APP_IMAGE#"$image_prefix"}"
+          [[ "$APP_IMAGE" == "$image_prefix$image_digest" ]]
+          [[ "$image_digest" =~ ^[0-9a-f]{64}$ ]]
           [[ "$BUNDLE_KEY" =~ ^deployments/[A-Za-z0-9._/-]+[.]tgz$ ]]
+          [[ "$BUNDLE_KEY" != *".."* ]]
+          [[ "$BUNDLE_VERSION_ID" =~ ^[-A-Za-z0-9._~+/=]+$ ]]
+          test "${#BUNDLE_VERSION_ID}" -le 1024
+          test "$BUNDLE_VERSION_ID" != null
+          [[ "$BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$SITE_ADDRESS" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]]
           test -n "$APP_SECRET_ID"
           test -n "$AWS_DEPLOY_ROLE_ARN"
           test -n "$DEPLOYMENT_BUCKET"
           test -n "$PRODUCTION_INSTANCE_ID"
           test -n "$PRODUCTION_LOG_GROUP"
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
       - name: Promote through SSM without rebuilding or migrating
+        id: deploy
         env:
           APP_IMAGE: ${{ inputs.app_image }}
           APP_SECRET_ID: ${{ vars.APP_SECRET_ID }}
           BUNDLE_KEY: ${{ inputs.bundle_key }}
+          BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+          BUNDLE_VERSION_ID: ${{ inputs.bundle_version_id }}
           DEPLOYMENT_BUCKET: ${{ vars.DEPLOYMENT_BUCKET }}
+          ECR_REPOSITORY_URI: ${{ vars.ECR_REPOSITORY_URI }}
           INSTANCE_ID: ${{ vars.PRODUCTION_INSTANCE_ID }}
           LOG_GROUP: ${{ vars.PRODUCTION_LOG_GROUP }}
           SITE_ADDRESS: ${{ inputs.site_address }}
         run: |
           python - <<'PY'
-          import json, os, shlex
+          import json
+          import os
+          import shlex
+
           values = {
               "DEPLOY_BUCKET": os.environ["DEPLOYMENT_BUCKET"],
               "BUNDLE_KEY": os.environ["BUNDLE_KEY"],
-              "DEPLOYMENT_ID": os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"],
+              "BUNDLE_VERSION_ID": os.environ["BUNDLE_VERSION_ID"],
+              "BUNDLE_SHA256": os.environ["BUNDLE_SHA256"],
+              "DEPLOYMENT_ID": "production-" + "-".join((os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"])),
               "APP_IMAGE": os.environ["APP_IMAGE"],
+              "ECR_REPOSITORY_URI": os.environ["ECR_REPOSITORY_URI"],
+              "DEPLOY_ENV": os.environ["DEPLOY_ENV"],
               "SITE_ADDRESS": os.environ["SITE_ADDRESS"],
               "APP_SECRET_ID": os.environ["APP_SECRET_ID"],
               "AWS_REGION": os.environ["AWS_REGION"],
@@ -79,14 +121,21 @@ jobs:
           }
           source = "/tmp/shindang-promotion.tgz"
           script = "/tmp/shindang-remote-deploy.sh"
-          command = "env " + " ".join(f"{key}={shlex.quote(value)}" for key, value in values.items())
+          quote = shlex.quote
+          command = "env " + " ".join(f"{key}={quote(value)}" for key, value in values.items())
+          cleanup = f"rm -f {quote(source)} {quote(script)}"
           commands = [
               "set -euo pipefail",
-              f"aws s3 cp {shlex.quote('s3://' + values['DEPLOY_BUCKET'] + '/' + values['BUNDLE_KEY'])} {source} --only-show-errors",
-              f"tar -xOzf {source} remote_deploy.sh > {script}",
-              f"chmod 0700 {script}",
-              f"{command} bash {script}",
-              f"rm -f {source} {script}",
+              "umask 077",
+              f"trap {quote(cleanup)} EXIT",
+              "aws s3api get-object "
+              f"--bucket {quote(values['DEPLOY_BUCKET'])} "
+              f"--key {quote(values['BUNDLE_KEY'])} "
+              f"--version-id {quote(values['BUNDLE_VERSION_ID'])} {quote(source)} >/dev/null",
+              f"printf '%s  %s\\n' {quote(values['BUNDLE_SHA256'])} {quote(source)} | sha256sum --check --status",
+              f"tar -xOzf {quote(source)} remote_deploy.sh > {quote(script)}",
+              f"chmod 0700 {quote(script)}",
+              f"{command} bash {quote(script)}",
           ]
           with open("ssm-parameters.json", "w", encoding="utf-8") as handle:
               json.dump({"commands": commands}, handle)
@@ -97,11 +146,73 @@ jobs:
             --comment "shindang production immutable promotion" \
             --parameters file://ssm-parameters.json \
             --query Command.CommandId --output text)"
+          set +e
           aws ssm wait command-executed --command-id "$command_id" --instance-id "$INSTANCE_ID"
-          test "$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" --query Status --output text)" = Success
+          wait_rc=$?
+          set -e
+          invocation="$(aws ssm get-command-invocation \
+            --command-id "$command_id" --instance-id "$INSTANCE_ID" --output json)"
+          status="$(jq -r '.Status' <<<"$invocation")"
+          standard_output="$(jq -r '.StandardOutputContent // ""' <<<"$invocation")"
+          result_json="$(printf '%s\n' "$standard_output" | sed -n 's/^SHINDANG_DEPLOY_RESULT=//p' | tail -n 1)"
+          if [ -n "$result_json" ]; then
+            jq -e 'select(
+              (.status | type == "string") and
+              (.rollback_status | type == "string") and
+              (.previous_release | type == "string") and
+              (.previous_digest | type == "string") and
+              (.image_digest | type == "string") and
+              (.bundle_version_id | type == "string") and
+              (.bundle_sha256 | type == "string") and
+              (.deploy_env | type == "string")
+            )' <<<"$result_json" > deployment-result.json
+            echo "image_digest=$(jq -r '.image_digest' deployment-result.json)" >> "$GITHUB_OUTPUT"
+            echo "previous_digest=$(jq -r '.previous_digest' deployment-result.json)" >> "$GITHUB_OUTPUT"
+            echo "previous_release=$(jq -r '.previous_release' deployment-result.json)" >> "$GITHUB_OUTPUT"
+          fi
+          echo "command_id=$command_id" >> "$GITHUB_OUTPUT"
+          [ "$wait_rc" -eq 0 ] && [ "$status" = Success ]
+          test -s deployment-result.json
+          test "$(jq -r '.status' deployment-result.json)" = healthy
+          test "$(jq -r '.deploy_env' deployment-result.json)" = production
+          test "$(jq -r '.image_digest' deployment-result.json)" = "${APP_IMAGE##*@}"
+          test "$(jq -r '.bundle_version_id' deployment-result.json)" = "$BUNDLE_VERSION_ID"
+          test "$(jq -r '.bundle_sha256' deployment-result.json)" = "$BUNDLE_SHA256"
       - name: Production HTTPS smoke
         env:
           SITE_ADDRESS: ${{ inputs.site_address }}
         run: |
           curl --fail --silent --show-error --retry 6 --retry-delay 5 "$SITE_ADDRESS/healthz" | jq -e '.status == "ok"'
-          curl --fail --silent --show-error "$SITE_ADDRESS/readyz" | jq -e '.status == "ready"'
+          curl --fail --silent --show-error --retry 6 --retry-delay 5 "$SITE_ADDRESS/readyz" | jq -e '.status == "ready"'
+          curl --fail --silent --show-error --retry 6 --retry-delay 5 "$SITE_ADDRESS/api/auth/providers" | jq -e 'type == "object"'
+      - name: Record non-secret deployment evidence
+        if: always()
+        env:
+          BUNDLE_KEY: ${{ inputs.bundle_key }}
+          BUNDLE_SHA256: ${{ inputs.bundle_sha256 }}
+          BUNDLE_VERSION_ID: ${{ inputs.bundle_version_id }}
+          IMAGE_DIGEST: ${{ steps.deploy.outputs.image_digest }}
+          SITE_ADDRESS: ${{ inputs.site_address }}
+          SSM_COMMAND_ID: ${{ steps.deploy.outputs.command_id }}
+        run: |
+          mkdir -p deployment-evidence
+          test -s deployment-result.json || printf '{}\n' > deployment-result.json
+          jq -n \
+            --slurpfile remote deployment-result.json \
+            --arg revision "$GITHUB_SHA" \
+            --arg image_digest "$IMAGE_DIGEST" \
+            --arg bundle_key "$BUNDLE_KEY" \
+            --arg bundle_version_id "$BUNDLE_VERSION_ID" \
+            --arg bundle_sha256 "$BUNDLE_SHA256" \
+            --arg site_address "$SITE_ADDRESS" \
+            --arg ssm_command_id "$SSM_COMMAND_ID" \
+            --arg deployed_at "$(date -u +%FT%TZ)" \
+            '{revision:$revision,image_digest:$image_digest,bundle_key:$bundle_key,bundle_version_id:$bundle_version_id,bundle_sha256:$bundle_sha256,site_address:$site_address,ssm_command_id:$ssm_command_id,deployed_at:$deployed_at,remote_result:$remote[0]}' \
+            > deployment-evidence/production.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: production-deployment-${{ github.run_id }}-${{ github.run_attempt }}
+          path: deployment-evidence/production.json
+          if-no-files-found: error
+          retention-days: 90
