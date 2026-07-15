@@ -2367,27 +2367,94 @@ SHIM
   _deploy_upto 001_init 002_schema_contract_fixes 003_soft_delete_invariant 004_soft_delete_contract
   [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
 
-  "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" \
-    >"$PGT/db68-locker.log" 2>&1 <<SQL &
-BEGIN;
-LOCK TABLE events IN ACCESS EXCLUSIVE MODE;
-SELECT 'locked';
-SELECT pg_sleep(5);
-ALTER TABLE events OWNER TO db68_b;
-COMMIT;
-SQL
+  # FIFO로 locker transaction을 명시적으로 멈춘다. 고정 sleep만 쓰면 느린 CI에서
+  # owner 변경이 runner guard보다 먼저 끝나도 같은 rc/ledger로 우연히 통과한다.
+  local fifo="$PGT/db68.fifo"
+  mkfifo "$fifo"
+  env PGAPPNAME=db68_locker "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" \
+    <"$fifo" >"$PGT/db68-locker.log" 2>&1 &
   local locker=$! i=0
+  exec 9>"$fifo"
+  printf 'BEGIN;\nLOCK TABLE events IN ACCESS EXCLUSIVE MODE;\nSELECT '\''locked'\'';\n' >&9
   while [ "$i" -lt 100 ]; do
-    grep -q locked "$PGT/db68-locker.log" 2>/dev/null && break
+    [ "$(_psql "select count(*) from pg_locks l join pg_stat_activity a on a.pid=l.pid where a.application_name='db68_locker' and l.locktype='relation' and l.relation='events'::regclass and l.mode='AccessExclusiveLock' and l.granted")" = "1" ] && break
     sleep 0.1; i=$((i+1))
   done
-  grep -q locked "$PGT/db68-locker.log"
+  [ "$i" -lt 100 ]
 
-  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  ( local rc=0; env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER" >"$PGT/db68-runner.log" 2>&1 || rc=$?; echo "$rc" >"$PGT/db68-runner.rc" ) &
+  local runner=$!
+  i=0
+  while [ "$i" -lt 150 ]; do
+    [ "$(_psql "select count(*) from pg_locks l join pg_stat_activity a on a.pid=l.pid where a.application_name like 'db_migrate.%' and l.locktype='relation' and l.relation='events'::regclass and not l.granted")" != "0" ] && break
+    sleep 0.1; i=$((i+1))
+  done
+  [ "$i" -lt 150 ]
+  printf 'ALTER TABLE events OWNER TO db68_b;\nCOMMIT;\n\\q\n' >&9
+  exec 9>&-
   wait "$locker"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"deploy owner guard(table)"* ]]
+  wait "$runner"
+  [ "$(cat "$PGT/db68-runner.rc")" -eq 1 ]
+  grep -q "deploy owner guard(table)" "$PGT/db68-runner.log"
   [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
   _psql "alter table events owner to postgres" || true
   _psql "drop role db68_b" || true
+}
+
+@test "DB69: a missing 005 contract object blocks the next migration inside the transaction - ledger and schema stay unchanged" {
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 0 ]
+  [ "$(_psql "select count(*) from schema_migrations")" = "5" ]
+
+  # owner-only queries returned zero rows for a missing helper and treated that as
+  # success. A later migration could commit before the final ACL check noticed it.
+  _psql "drop function events_guard() cascade"
+  cat > "$TROOT/db/migrations/006_missing_contract_probe.sql" <<'SQL'
+CREATE TABLE db69_should_not_commit (id integer);
+SQL
+  _commit_migs
+
+  run env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"deploy owner guard(missing helper)"* ]]
+  [ "$(_psql "select count(*) from schema_migrations")" = "5" ]
+  [ "$(_psql "select to_regclass('public.db69_should_not_commit') is null")" = "t" ]
+}
+
+@test "DB70: function-owner change after preflight is serialized by the transaction-held function lock" {
+  _psql "drop role if exists db70_b" || true
+  _psql "create role db70_b nologin"
+  _deploy_upto 001_init 002_schema_contract_fixes 003_soft_delete_invariant 004_soft_delete_contract
+  [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
+
+  local fifo="$PGT/db70.fifo"
+  mkfifo "$fifo"
+  env PGAPPNAME=db70_locker "$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d "$TEST_DB" \
+    <"$fifo" >"$PGT/db70-locker.log" 2>&1 &
+  local locker=$! i=0
+  exec 9>"$fifo"
+  printf 'BEGIN;\nALTER FUNCTION users_scrub_on_delete() OWNER TO db70_b;\nSELECT '\''changed'\'';\n' >&9
+  while [ "$i" -lt 100 ]; do
+    [ "$(_psql "select count(*) from pg_locks l join pg_stat_activity a on a.pid=l.pid where a.application_name='db70_locker' and l.locktype='object' and l.classid='pg_proc'::regclass and l.objid='users_scrub_on_delete()'::regprocedure::oid and l.granted")" != "0" ] && break
+    sleep 0.1; i=$((i+1))
+  done
+  [ "$i" -lt 100 ]
+
+  ( local rc=0; env MIGRATION_APP_ROLES=@self ENV_FILE="$ENVF" "$RUNNER" >"$PGT/db70-runner.log" 2>&1 || rc=$?; echo "$rc" >"$PGT/db70-runner.rc" ) &
+  local runner=$!
+  i=0
+  while [ "$i" -lt 150 ]; do
+    [ "$(_psql "select count(*) from pg_locks l join pg_stat_activity a on a.pid=l.pid where a.application_name like 'db_migrate.%' and l.locktype='object' and l.classid='pg_proc'::regclass and l.objid='users_scrub_on_delete()'::regprocedure::oid and not l.granted")" != "0" ] && break
+    sleep 0.1; i=$((i+1))
+  done
+  [ "$i" -lt 150 ]
+  printf 'COMMIT;\n\\q\n' >&9
+  exec 9>&-
+  wait "$locker"
+  wait "$runner"
+  [ "$(cat "$PGT/db70-runner.rc")" -eq 1 ]
+  grep -q "deploy owner guard(helper)" "$PGT/db70-runner.log"
+  [ "$(_psql "select count(*) from schema_migrations")" = "4" ]
+  _psql "alter function users_scrub_on_delete() owner to postgres" || true
+  _psql "drop role db70_b" || true
 }

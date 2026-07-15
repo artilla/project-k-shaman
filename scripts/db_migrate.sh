@@ -735,22 +735,42 @@ _mig_emit_owner_locks() {
   printf '%s\n' "  FOR _r IN SELECT n.nspname, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '${PGSCHEMA}' AND c.relname IN ('schema_migrations','users','sessions','streaks','user_fortunes','events','purchases') AND c.relkind IN ('r','p') ORDER BY c.relname LOOP"
   printf '%s\n' "    EXECUTE format('LOCK TABLE %I.%I IN ACCESS SHARE MODE', _r.nspname, _r.relname);"
   printf '%s\n' "  END LOOP;"
-  printf '%s\n' "  FOR _r IN SELECT p.oid, n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) AS args, obj_description(p.oid, 'pg_proc') AS description FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = '${PGSCHEMA}' AND p.proname IN ('users_scrub_on_delete','reject_rows_for_deleted_user','sessions_guard','events_guard','events_scrub_marker_immutable','purchases_user_id_immutable','app_soft_delete_user') ORDER BY p.proname LOOP"
+  printf '%s\n' "  FOR _r IN SELECT p.oid, n.nspname, p.proname, pg_get_function_identity_arguments(p.oid) AS args, obj_description(p.oid, 'pg_proc') AS description FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE p.oid = ANY(ARRAY[to_regprocedure(format('%I.users_scrub_on_delete()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.reject_rows_for_deleted_user()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.sessions_guard()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.events_guard()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.events_scrub_marker_immutable()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.purchases_user_id_immutable()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.app_soft_delete_user(bigint)', '${PGSCHEMA}'))::oid]) ORDER BY p.proname LOOP"
   printf '%s\n' "    EXECUTE format('COMMENT ON FUNCTION %I.%I(%s) IS %L', _r.nspname, _r.proname, _r.args, _r.description);"
   printf '%s\n' "  END LOOP;"
   printf '%s\n' "END \$ownerlocks\$;"
 }
 
 _mig_emit_owner_guard() {
-  printf '%s\n' "DO \$ownerguard\$ DECLARE _exp text := '${_mig_expected_owner}'; _bad text;"
+  local _require_contract="${1:-0}" _require_contract_sql
+  case "$_require_contract" in
+    0) _require_contract_sql="false" ;;
+    1) _require_contract_sql="true" ;;
+    *) echo "❌ 내부 오류: owner contract flag가 0/1이 아닙니다: $_require_contract" >&2; return 1 ;;
+  esac
+  printf '%s\n' "DO \$ownerguard\$ DECLARE _exp text := '${_mig_expected_owner}'; _bad text; _actual integer; _require_contract boolean := ${_require_contract_sql};"
   printf '%s\n' "BEGIN"
+  # bootstrap 이후 ledger 자체가 사라진 창도 '조회 결과 없음=정상'으로 넘기지 않는다.
+  printf '%s\n' "  SELECT count(*) INTO _actual FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '${PGSCHEMA}' AND c.relname = 'schema_migrations' AND c.relkind IN ('r','p');"
+  printf '%s\n' "  IF _actual <> 1 THEN RAISE EXCEPTION 'deploy owner guard(missing ledger): expected 1, found % (fail-closed)', _actual; END IF;"
+  # 005 계약이 활성화된 뒤에는 소유자가 다른 객체뿐 아니라 DROP/다른-signature
+  # 대체도 transaction 안에서 거부한다. 종전 owner query는 행이 0개면 통과해,
+  # helper가 누락된 채 다음 migration+ledger가 commit된 뒤 사후 ACL 검사에서야
+  # 실패했다 (DB69).
+  printf '%s\n' "  IF _require_contract THEN"
+  printf '%s\n' "    SELECT count(*) INTO _actual FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = '${PGSCHEMA}' AND c.relname IN ('users','sessions','streaks','user_fortunes','events','purchases') AND c.relkind IN ('r','p');"
+  printf '%s\n' "    IF _actual <> 6 THEN RAISE EXCEPTION 'deploy owner guard(missing table): expected 6, found % (fail-closed)', _actual; END IF;"
+  printf '%s\n' "    SELECT count(*) INTO _actual FROM unnest(ARRAY[to_regprocedure(format('%I.users_scrub_on_delete()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.reject_rows_for_deleted_user()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.sessions_guard()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.events_guard()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.events_scrub_marker_immutable()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.purchases_user_id_immutable()', '${PGSCHEMA}'))::oid]) AS f(oid) WHERE oid IS NOT NULL;"
+  printf '%s\n' "    IF _actual <> 6 THEN RAISE EXCEPTION 'deploy owner guard(missing helper): expected 6, found % (fail-closed)', _actual; END IF;"
+  printf '%s\n' "    IF to_regprocedure(format('%I.app_soft_delete_user(bigint)', '${PGSCHEMA}')) IS NULL THEN RAISE EXCEPTION 'deploy owner guard(missing entrypoint): app_soft_delete_user(bigint) (fail-closed)'; END IF;"
+  printf '%s\n' "  END IF;"
   printf '%s\n' "  SELECT c.relname || '=' || r.rolname INTO _bad FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.oid = c.relowner WHERE n.nspname = '${PGSCHEMA}' AND c.relname = 'schema_migrations' AND r.rolname <> _exp LIMIT 1;"
   printf '%s\n' "  IF FOUND THEN RAISE EXCEPTION 'deploy owner guard(ledger): %, expected % (fail-closed)', _bad, _exp; END IF;"
   printf '%s\n' "  SELECT c.relname || '=' || r.rolname INTO _bad FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON r.oid = c.relowner WHERE n.nspname = '${PGSCHEMA}' AND c.relname IN ('users','sessions','streaks','user_fortunes','events','purchases') AND r.rolname <> _exp LIMIT 1;"
   printf '%s\n' "  IF FOUND THEN RAISE EXCEPTION 'deploy owner guard(table): %, expected % (fail-closed)', _bad, _exp; END IF;"
-  printf '%s\n' "  SELECT p.proname || '()=' || r.rolname INTO _bad FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_roles r ON r.oid = p.proowner WHERE n.nspname = '${PGSCHEMA}' AND p.proname IN ('users_scrub_on_delete','reject_rows_for_deleted_user','sessions_guard','events_guard','events_scrub_marker_immutable','purchases_user_id_immutable') AND r.rolname <> _exp LIMIT 1;"
+  printf '%s\n' "  SELECT p.proname || '()=' || r.rolname INTO _bad FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE p.oid = ANY(ARRAY[to_regprocedure(format('%I.users_scrub_on_delete()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.reject_rows_for_deleted_user()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.sessions_guard()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.events_guard()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.events_scrub_marker_immutable()', '${PGSCHEMA}'))::oid,to_regprocedure(format('%I.purchases_user_id_immutable()', '${PGSCHEMA}'))::oid]) AND r.rolname <> _exp LIMIT 1;"
   printf '%s\n' "  IF FOUND THEN RAISE EXCEPTION 'deploy owner guard(helper): %, expected % (fail-closed)', _bad, _exp; END IF;"
-  printf '%s\n' "  SELECT p.proname || '()=' || r.rolname INTO _bad FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace JOIN pg_roles r ON r.oid = p.proowner WHERE n.nspname = '${PGSCHEMA}' AND p.proname = 'app_soft_delete_user' AND r.rolname <> 'shaman_softdelete' LIMIT 1;"
+  printf '%s\n' "  SELECT p.proname || '()=' || r.rolname INTO _bad FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE p.oid = to_regprocedure(format('%I.app_soft_delete_user(bigint)', '${PGSCHEMA}'))::oid AND r.rolname <> 'shaman_softdelete' LIMIT 1;"
   printf '%s\n' "  IF FOUND THEN RAISE EXCEPTION 'deploy owner guard(entrypoint): %, expected shaman_softdelete (fail-closed)', _bad; END IF;"
   printf '%s\n' "END \$ownerguard\$;"
 }
@@ -763,6 +783,14 @@ for _name in $_MIG_NAMES; do
     continue
   fi
   echo "── apply $v"
+  _mig_vnum="${v%%_*}"
+  _mig_contract_before=0
+  _mig_contract_after=0
+  # 이름은 preflight에서 NNN_ 형식으로 검증됐다. 005 자체는 실행 전 객체가
+  # 아직 없을 수 있지만 실행 후에는 완전 계약을 만족해야 한다. 이후 migration은
+  # 실행 전·후 모두 005 객체 집합이 정확히 존재해야 한다.
+  if [ "$((10#${_mig_vnum}))" -gt 5 ]; then _mig_contract_before=1; fi
+  if [ "$((10#${_mig_vnum}))" -ge 5 ]; then _mig_contract_after=1; fi
   # 리뷰 16차 P1 재재수정: 원자성 경계를 수제 파서(AWK scanner)가 아니라 "서버"가
   # 강제한다. 파일 내용을 고유 dollar-quote 리터럴로 감싸 DO 블록의 EXECUTE(SPI)로
   # 실행하면, 원자 컨텍스트에서 서버 자신이 다음을 거부한다 (전부 실측 검증):
@@ -857,7 +885,7 @@ for _name in $_MIG_NAMES; do
     # lock을 먼저 확보한 뒤 guard를 실행하고, migration SQL 자체가 identity를
     # 깨뜨리는 경우도 같은 transaction에서 rollback되도록 EXECUTE 뒤 재검증한다.
     _mig_emit_owner_locks
-    _mig_emit_owner_guard
+    _mig_emit_owner_guard "$_mig_contract_before"
     printf 'DO $%s$ DECLARE _mig_sql text := $%s$' "$_t1" "$_t2"
   } > "$_pre" || { rm -f "$_snap" "$_pre" "$_post" "$_wrap"; echo "❌ 래퍼 작성 실패." >&2; exit 3; }
   {
@@ -867,7 +895,7 @@ for _name in $_MIG_NAMES; do
     printf '  END IF;\n'
     printf '  EXECUTE _mig_sql;\n'
     printf 'END $%s$;\n' "$_t1"
-    _mig_emit_owner_guard
+    _mig_emit_owner_guard "$_mig_contract_after"
     printf "INSERT INTO \"%s\".schema_migrations (version) VALUES ('%s') ON CONFLICT (version) DO NOTHING;\n" "$PGSCHEMA" "$v"
   } > "$_post" || { rm -f "$_snap" "$_pre" "$_post" "$_wrap"; echo "❌ 래퍼 작성 실패." >&2; exit 3; }
   cat "$_pre" "$_snap" "$_post" > "$_wrap" \

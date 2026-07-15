@@ -185,14 +185,18 @@ schema에서 `relation "events" does not exist`로 실패한다).
 5. **배포 소유자 anchor (15~16라운드 P1)**: 보호 테이블·helper·ledger의 소유자는
    ACL·RLS와 무관하게 전권이므로 배포 identity의 일부다. 계약: **배포 소유자는
    migration 실행 role**이며, runner는 소유자 이전을 수행하지 않는다(새로 만들어지는
-   객체는 실행 role 소유가 된다). 따라서 소유자 anchor는 우선순위대로 결정된다 —
-   (a) `MIGRATION_OWNER` 명시 pin, (b) 없으면 **기존 ledger 소유자**(이미 부분
-   배포된 DB), (c) 둘 다 없으면 실행 role(fresh). **pending migration이 있는데
+   객체는 실행 role 소유가 된다). 이미 ledger가 있으면 그 소유자가 불변 anchor이며,
+   `MIGRATION_OWNER` pin은 반드시 그 값과 같아야 한다(다른 pin으로 소유자를
+   재지정하지 않는다). fresh DB는 명시 pin, 없으면 실행 role을 anchor로 삼는다.
+   **pending migration이 있는데
    실행 role이 이 anchor와 다르면 적용 "전"에 거부한다**(preflight) — 그대로 두면
    Owner A의 부분 배포에 runner B가 005를 적용해 새 객체가 B 소유가 되는 비원자
    drift가 생긴다(실측). `MIGRATION_OWNER`의 문법·존재도 bootstrap 이전에
-   확정한다. pin의 정당한 용도는 "이미 그 소유자로 배포된 DB(pending 없음)의
-   검증 승인"이다.
+   확정한다. pin의 용도는 소유자 변경이 아니라 기존/fresh 배포 identity의 명시적
+   승인이다. pending 적용 transaction은 보호 relation과 기존 보호 function의 object
+   lock을 commit까지 보유하고, migration SQL 앞·뒤에서 owner identity를 재검증한다.
+   따라서 preflight 이후 외부 `ALTER ... OWNER` 경합과 migration 자체의 owner drift는
+   ledger 기록과 함께 원자적으로 rollback된다.
 6. **runtime app role → 배포 소유자 membership 금지 (15~16라운드 P1)**:
    `MIGRATION_APP_ROLES`의 명시 role이 배포 소유자(미래 테이블 owner) role에 대해
    `SET`(전환)·`INHERIT`(상속)·`ADMIN`(재부여) 중 **어느 경로라도** 가지면 —
