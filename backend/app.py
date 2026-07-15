@@ -32,15 +32,55 @@ _logger = logging.getLogger("fortune_engine.backend")
 
 SESSION_COOKIE = core.SESSION_COOKIE_NAME
 STATE_COOKIE = core.OAUTH_STATE_COOKIE_NAME
+_DEPLOYED_ENVIRONMENTS = {"staging", "production"}
+_VALID_ENVIRONMENTS = {"development", "test", *_DEPLOYED_ENVIRONMENTS}
+
+
+def _deployment_config() -> tuple[str, str, bool]:
+    """Return (environment, session_secret, secure_cookie) with fail-closed deploy guards."""
+    environment = os.getenv("SHINDANG_ENV", "development").strip().lower()
+    if environment not in _VALID_ENVIRONMENTS:
+        raise RuntimeError(
+            "SHINDANG_ENV must be one of development|test|staging|production"
+        )
+
+    session_secret = os.getenv("SESSION_SECRET", "")
+    if environment in _DEPLOYED_ENVIRONMENTS:
+        if not session_secret:
+            raise RuntimeError(
+                f"SESSION_SECRET is required when SHINDANG_ENV={environment}"
+            )
+        if os.getenv("SHINDANG_DEV_LOGIN") == "1":
+            raise RuntimeError(
+                f"SHINDANG_DEV_LOGIN=1 is forbidden when SHINDANG_ENV={environment}"
+            )
+    if not session_secret:
+        session_secret = secrets.token_hex(32)
+    return environment, session_secret, environment in _DEPLOYED_ENVIRONMENTS
 
 
 def create_app(*, backend: str = "mock") -> FastAPI:
+    environment, session_secret, secure_cookie = _deployment_config()
     app = FastAPI(title="오늘신당 backend", docs_url=None, redoc_url=None)
     app.state.tts_backend_mode = backend
     app.state.sessions = {}
-    app.state.session_secret = secrets.token_hex(32)
+    app.state.environment = environment
+    app.state.session_secret = session_secret
+    app.state.secure_cookie = secure_cookie
     app.state.fortune_cache_by_id = {}
     app.state.rate_limiter = ratelimit.MemoryRateLimiter()
+
+    def set_auth_cookie(response: Response, name: str, value: str, **kwargs) -> None:
+        """Set/clear auth cookies with one environment-derived security policy."""
+        response.set_cookie(
+            name,
+            value,
+            path="/",
+            httponly=True,
+            secure=app.state.secure_cookie,
+            samesite="lax",
+            **kwargs,
+        )
 
     # ── 세션/게이트 헬퍼 ──
     def current_session_id(request: Request):
@@ -96,8 +136,24 @@ def create_app(*, backend: str = "mock") -> FastAPI:
 
     def auth_error_redirect() -> RedirectResponse:
         resp = RedirectResponse("/?auth_error=1", status_code=302)
-        resp.set_cookie(STATE_COOKIE, "", path="/", httponly=True, samesite="lax", max_age=0)
+        set_auth_cookie(resp, STATE_COOKIE, "", max_age=0)
         return resp
+
+    # ── runtime probes ──
+    @app.get("/healthz")
+    def healthz():
+        return {"status": "ok"}
+
+    @app.get("/readyz")
+    def readyz():
+        # T029가 DB adapter를 연결하기 전에는 DB 미구성을 명시한다. DATABASE_URL만
+        # 먼저 주입된 상태를 ready로 위장하지 않는다.
+        if os.getenv("DATABASE_URL"):
+            return JSONResponse(
+                {"status": "not_ready", "checks": {"database": "adapter-unavailable"}},
+                status_code=503,
+            )
+        return {"status": "ready", "checks": {"database": "not-configured"}}
 
     # ── 운세 요청 파싱·검증 (리뷰 P2: 잘못된 입력이 500/schema-invalid 200이 되지 않게) ──
     # canonical topic은 fortune-schema.v1.1의 enum과 동일 — 'rel' 별칭은 쓰지 않는다 (리뷰 P1-2)
@@ -300,7 +356,7 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         if url is None:
             return JSONResponse({"error": "provider not configured"}, status_code=400)
         resp = RedirectResponse(url, status_code=302)
-        resp.set_cookie(STATE_COOKIE, state, path="/", httponly=True, samesite="lax", max_age=600)
+        set_auth_cookie(resp, STATE_COOKIE, state, max_age=600)
         return resp
 
     @app.get("/api/auth/callback/{provider}")
@@ -326,7 +382,7 @@ def create_app(*, backend: str = "mock") -> FastAPI:
         app.state.sessions[session_id] = {"provider": provider, "nickname": profile.get("nickname")}
         cookie_value = core.make_session_cookie_value(session_id, app.state.session_secret)
         resp = RedirectResponse("/", status_code=302)
-        resp.set_cookie(SESSION_COOKIE, cookie_value, path="/", httponly=True, samesite="lax")
+        set_auth_cookie(resp, SESSION_COOKIE, cookie_value)
         return resp
 
     @app.get("/api/auth/me")
@@ -344,7 +400,7 @@ def create_app(*, backend: str = "mock") -> FastAPI:
             if session_id is not None:
                 app.state.sessions.pop(session_id, None)
         resp = JSONResponse({"ok": True})
-        resp.set_cookie(SESSION_COOKIE, "", path="/", httponly=True, samesite="lax", max_age=0)
+        set_auth_cookie(resp, SESSION_COOKIE, "", max_age=0)
         return resp
 
     # 개발 전용: SHINDANG_DEV_LOGIN=1 일 때만 노출 — 게이트 뒤 플로우(QA)를 실 OAuth 키 없이
@@ -356,7 +412,7 @@ def create_app(*, backend: str = "mock") -> FastAPI:
             app.state.sessions[session_id] = {"provider": "dev", "nickname": "하늘이"}
             cookie_value = core.make_session_cookie_value(session_id, app.state.session_secret)
             resp = RedirectResponse("/", status_code=302)
-            resp.set_cookie(SESSION_COOKIE, cookie_value, path="/", httponly=True, samesite="lax")
+            set_auth_cookie(resp, SESSION_COOKIE, cookie_value)
             return resp
 
     # ── 이벤트 수집 ──

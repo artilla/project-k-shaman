@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# T028 static contract: immutable/non-root image, private app port, and no implicit migration.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+require_file() {
+  test -f "$1" || { echo "missing deployment artifact: $1" >&2; exit 1; }
+}
+
+for file in \
+  Dockerfile .dockerignore compose.yaml \
+  deploy/Caddyfile deploy/compose.aws.yaml \
+  deploy/remote_deploy.sh deploy/remote_rollback.sh \
+  infra/cloudformation/staging.yaml \
+  .github/workflows/app-ci.yml \
+  .github/workflows/deploy-staging.yml \
+  .github/workflows/promote-production.yml; do
+  require_file "$file"
+done
+
+test "$(grep -Ec '^FROM [^ ]+@sha256:[0-9a-f]{64}' Dockerfile)" -ge 2
+grep -Eq '^USER (10001(:10001)?|app)$' Dockerfile
+grep -Eq '^HEALTHCHECK ' Dockerfile
+bash -n deploy/remote_deploy.sh deploy/remote_rollback.sh
+
+if ! command -v docker >/dev/null 2>&1; then
+  echo "docker is required to validate the Compose publish boundary" >&2
+  exit 1
+fi
+
+docker compose config --quiet
+APP_IMAGE='example.invalid/shindang@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
+SESSION_SECRET='test-only-session-secret-at-least-32-bytes' \
+SITE_ADDRESS='https://staging.example.invalid' \
+AWS_REGION='ap-northeast-2' \
+LOG_GROUP='/shindang/test/app' \
+  docker compose -f deploy/compose.aws.yaml config --quiet
+
+docker compose config --format json | python3 -c '
+import json, sys
+config = json.load(sys.stdin)
+app = config["services"]["app"]
+if app.get("ports"):
+    raise SystemExit("app service must not publish a host port")
+caddy = config["services"]["caddy"]
+published = {(str(item["published"]), str(item["target"])) for item in caddy.get("ports", [])}
+if not published or any(source not in {"80", "443"} or target not in {"80", "443"} for source, target in published):
+    raise SystemExit(f"unexpected Caddy publish boundary: {sorted(published)}")
+'
+
+if grep -REn --include='*.yml' --include='*.yaml' --include='*.sh' \
+  '(db_migrate[.]sh|alembic[[:space:]]+upgrade|prisma[[:space:]]+migrate|psql[^#]*(003|004|005))' \
+  .github/workflows deploy Dockerfile compose.yaml; then
+  echo "deployment path must not run migrations" >&2
+  exit 1
+fi
+
+grep -q 'workflow_dispatch' .github/workflows/deploy-staging.yml
+grep -q 'environment: staging' .github/workflows/deploy-staging.yml
+grep -q 'workflow_dispatch' .github/workflows/promote-production.yml
+grep -q 'environment: production' .github/workflows/promote-production.yml
+
+echo "container/deployment contract: ok"

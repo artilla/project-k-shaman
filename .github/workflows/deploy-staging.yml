@@ -1,0 +1,168 @@
+name: Deploy staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      site_address:
+        description: Confirmed HTTPS staging origin, without a trailing slash
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: shindang-staging
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      AWS_REGION: ap-northeast-2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Validate deployment inputs
+        env:
+          APP_SECRET_ID: ${{ vars.APP_SECRET_ID }}
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          DEPLOYMENT_BUCKET: ${{ vars.DEPLOYMENT_BUCKET }}
+          ECR_REPOSITORY_URI: ${{ vars.ECR_REPOSITORY_URI }}
+          SITE_ADDRESS: ${{ inputs.site_address }}
+          STAGING_INSTANCE_ID: ${{ vars.STAGING_INSTANCE_ID }}
+          STAGING_LOG_GROUP: ${{ vars.STAGING_LOG_GROUP }}
+        run: |
+          [[ "$SITE_ADDRESS" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]]
+          test -n "$AWS_DEPLOY_ROLE_ARN"
+          test -n "$ECR_REPOSITORY_URI"
+          test -n "$DEPLOYMENT_BUCKET"
+          test -n "$STAGING_INSTANCE_ID"
+          test -n "$APP_SECRET_ID"
+          test -n "$STAGING_LOG_GROUP"
+      - name: Install validation dependencies
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.lock
+          python -m pip install --disable-pip-version-check pytest ruff
+          npm --prefix frontend ci
+          sudo apt-get update
+          sudo apt-get install --yes bats
+      - name: Run the full repository gate
+        run: ./scripts/run_checks.sh --full
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push immutable ARM64 image
+        id: image
+        env:
+          ECR_REPOSITORY_URI: ${{ vars.ECR_REPOSITORY_URI }}
+        run: |
+          docker buildx build \
+            --platform linux/arm64 \
+            --push \
+            --tag "$ECR_REPOSITORY_URI:$GITHUB_SHA" \
+            --metadata-file image-metadata.json \
+            .
+          digest="$(jq -r '."containerimage.digest"' image-metadata.json)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "image=$ECR_REPOSITORY_URI@$digest" >> "$GITHUB_OUTPUT"
+      - name: Upload versioned deployment bundle
+        id: bundle
+        env:
+          DEPLOYMENT_BUCKET: ${{ vars.DEPLOYMENT_BUCKET }}
+        run: |
+          bundle_key="deployments/$GITHUB_SHA.tgz"
+          tar -czf deployment.tgz -C deploy \
+            compose.aws.yaml Caddyfile remote_deploy.sh remote_rollback.sh
+          aws s3 cp deployment.tgz "s3://$DEPLOYMENT_BUCKET/$bundle_key" --only-show-errors
+          echo "key=$bundle_key" >> "$GITHUB_OUTPUT"
+      - name: Deploy through SSM
+        id: deploy
+        env:
+          APP_IMAGE: ${{ steps.image.outputs.image }}
+          APP_SECRET_ID: ${{ vars.APP_SECRET_ID }}
+          BUNDLE_KEY: ${{ steps.bundle.outputs.key }}
+          DEPLOYMENT_BUCKET: ${{ vars.DEPLOYMENT_BUCKET }}
+          INSTANCE_ID: ${{ vars.STAGING_INSTANCE_ID }}
+          LOG_GROUP: ${{ vars.STAGING_LOG_GROUP }}
+          SITE_ADDRESS: ${{ inputs.site_address }}
+        run: |
+          python - <<'PY'
+          import json, os, shlex
+          values = {
+              "DEPLOY_BUCKET": os.environ["DEPLOYMENT_BUCKET"],
+              "BUNDLE_KEY": os.environ["BUNDLE_KEY"],
+              "DEPLOYMENT_ID": os.environ["GITHUB_SHA"],
+              "APP_IMAGE": os.environ["APP_IMAGE"],
+              "SITE_ADDRESS": os.environ["SITE_ADDRESS"],
+              "APP_SECRET_ID": os.environ["APP_SECRET_ID"],
+              "AWS_REGION": os.environ["AWS_REGION"],
+              "LOG_GROUP": os.environ["LOG_GROUP"],
+          }
+          source = "/tmp/shindang-deployment.tgz"
+          script = "/tmp/shindang-remote-deploy.sh"
+          command = "env " + " ".join(f"{key}={shlex.quote(value)}" for key, value in values.items())
+          commands = [
+              "set -euo pipefail",
+              f"aws s3 cp {shlex.quote('s3://' + values['DEPLOY_BUCKET'] + '/' + values['BUNDLE_KEY'])} {source} --only-show-errors",
+              f"tar -xOzf {source} remote_deploy.sh > {script}",
+              f"chmod 0700 {script}",
+              f"{command} bash {script}",
+              f"rm -f {source} {script}",
+          ]
+          with open("ssm-parameters.json", "w", encoding="utf-8") as handle:
+              json.dump({"commands": commands}, handle)
+          PY
+          command_id="$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "shindang staging $GITHUB_SHA" \
+            --parameters file://ssm-parameters.json \
+            --query Command.CommandId --output text)"
+          aws ssm wait command-executed --command-id "$command_id" --instance-id "$INSTANCE_ID"
+          status="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" --query Status --output text)"
+          test "$status" = Success
+          echo "command_id=$command_id" >> "$GITHUB_OUTPUT"
+      - name: HTTPS smoke
+        env:
+          SITE_ADDRESS: ${{ inputs.site_address }}
+        run: |
+          curl --fail --silent --show-error --retry 6 --retry-delay 5 "$SITE_ADDRESS/healthz" | jq -e '.status == "ok"'
+          curl --fail --silent --show-error "$SITE_ADDRESS/readyz" | jq -e '.status == "ready"'
+          curl --fail --silent --show-error "$SITE_ADDRESS/api/auth/providers" | jq -e 'type == "object"'
+      - name: Record non-secret deployment evidence
+        env:
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          SITE_ADDRESS: ${{ inputs.site_address }}
+          SSM_COMMAND_ID: ${{ steps.deploy.outputs.command_id }}
+        run: |
+          mkdir -p deployment-evidence
+          jq -n \
+            --arg revision "$GITHUB_SHA" \
+            --arg image_digest "$IMAGE_DIGEST" \
+            --arg site_address "$SITE_ADDRESS" \
+            --arg ssm_command_id "$SSM_COMMAND_ID" \
+            --arg deployed_at "$(date -u +%FT%TZ)" \
+            '{revision:$revision,image_digest:$image_digest,site_address:$site_address,ssm_command_id:$ssm_command_id,deployed_at:$deployed_at}' \
+            > deployment-evidence/staging.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: staging-deployment-${{ github.sha }}
+          path: deployment-evidence/staging.json
+          if-no-files-found: error
+          retention-days: 30

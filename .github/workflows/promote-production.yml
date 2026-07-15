@@ -1,0 +1,107 @@
+name: Promote production digest
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_image:
+        description: Exact ECR image URI with @sha256 digest already proven in staging
+        required: true
+        type: string
+      bundle_key:
+        description: Existing versioned deployment bundle key
+        required: true
+        type: string
+      site_address:
+        description: Confirmed HTTPS production origin, without a trailing slash
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: shindang-production
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      AWS_REGION: ap-northeast-2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate immutable promotion inputs
+        env:
+          APP_IMAGE: ${{ inputs.app_image }}
+          APP_SECRET_ID: ${{ vars.APP_SECRET_ID }}
+          AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          BUNDLE_KEY: ${{ inputs.bundle_key }}
+          DEPLOYMENT_BUCKET: ${{ vars.DEPLOYMENT_BUCKET }}
+          PRODUCTION_INSTANCE_ID: ${{ vars.PRODUCTION_INSTANCE_ID }}
+          PRODUCTION_LOG_GROUP: ${{ vars.PRODUCTION_LOG_GROUP }}
+          SITE_ADDRESS: ${{ inputs.site_address }}
+        run: |
+          [[ "$APP_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
+          [[ "$BUNDLE_KEY" =~ ^deployments/[A-Za-z0-9._/-]+[.]tgz$ ]]
+          [[ "$SITE_ADDRESS" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]]
+          test -n "$APP_SECRET_ID"
+          test -n "$AWS_DEPLOY_ROLE_ARN"
+          test -n "$DEPLOYMENT_BUCKET"
+          test -n "$PRODUCTION_INSTANCE_ID"
+          test -n "$PRODUCTION_LOG_GROUP"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Promote through SSM without rebuilding or migrating
+        env:
+          APP_IMAGE: ${{ inputs.app_image }}
+          APP_SECRET_ID: ${{ vars.APP_SECRET_ID }}
+          BUNDLE_KEY: ${{ inputs.bundle_key }}
+          DEPLOYMENT_BUCKET: ${{ vars.DEPLOYMENT_BUCKET }}
+          INSTANCE_ID: ${{ vars.PRODUCTION_INSTANCE_ID }}
+          LOG_GROUP: ${{ vars.PRODUCTION_LOG_GROUP }}
+          SITE_ADDRESS: ${{ inputs.site_address }}
+        run: |
+          python - <<'PY'
+          import json, os, shlex
+          values = {
+              "DEPLOY_BUCKET": os.environ["DEPLOYMENT_BUCKET"],
+              "BUNDLE_KEY": os.environ["BUNDLE_KEY"],
+              "DEPLOYMENT_ID": os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"],
+              "APP_IMAGE": os.environ["APP_IMAGE"],
+              "SITE_ADDRESS": os.environ["SITE_ADDRESS"],
+              "APP_SECRET_ID": os.environ["APP_SECRET_ID"],
+              "AWS_REGION": os.environ["AWS_REGION"],
+              "LOG_GROUP": os.environ["LOG_GROUP"],
+          }
+          source = "/tmp/shindang-promotion.tgz"
+          script = "/tmp/shindang-remote-deploy.sh"
+          command = "env " + " ".join(f"{key}={shlex.quote(value)}" for key, value in values.items())
+          commands = [
+              "set -euo pipefail",
+              f"aws s3 cp {shlex.quote('s3://' + values['DEPLOY_BUCKET'] + '/' + values['BUNDLE_KEY'])} {source} --only-show-errors",
+              f"tar -xOzf {source} remote_deploy.sh > {script}",
+              f"chmod 0700 {script}",
+              f"{command} bash {script}",
+              f"rm -f {source} {script}",
+          ]
+          with open("ssm-parameters.json", "w", encoding="utf-8") as handle:
+              json.dump({"commands": commands}, handle)
+          PY
+          command_id="$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --comment "shindang production immutable promotion" \
+            --parameters file://ssm-parameters.json \
+            --query Command.CommandId --output text)"
+          aws ssm wait command-executed --command-id "$command_id" --instance-id "$INSTANCE_ID"
+          test "$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$INSTANCE_ID" --query Status --output text)" = Success
+      - name: Production HTTPS smoke
+        env:
+          SITE_ADDRESS: ${{ inputs.site_address }}
+        run: |
+          curl --fail --silent --show-error --retry 6 --retry-delay 5 "$SITE_ADDRESS/healthz" | jq -e '.status == "ok"'
+          curl --fail --silent --show-error "$SITE_ADDRESS/readyz" | jq -e '.status == "ready"'

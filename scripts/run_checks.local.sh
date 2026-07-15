@@ -26,3 +26,6 @@ npm --prefix "$ROOT/frontend" run --silent build
 
 echo "── [project] Python dependency consistency"
 python3 -m pip check
+
+echo "── [project] container and deployment contract"
+bash "$ROOT/scripts/check_deployment_contract.sh"

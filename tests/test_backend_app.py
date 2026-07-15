@@ -265,6 +265,50 @@ class TestAuth:
         fresh = TestClient(create_app(backend="mock"), follow_redirects=False)
         assert fresh.get("/api/auth/dev-login").status_code == 404
 
+    def test_staging_requires_session_secret(self, monkeypatch):
+        monkeypatch.setenv("SHINDANG_ENV", "staging")
+        monkeypatch.delenv("SESSION_SECRET", raising=False)
+        with pytest.raises(RuntimeError, match="SESSION_SECRET is required"):
+            create_app(backend="mock")
+
+    def test_staging_rejects_dev_login(self, monkeypatch):
+        monkeypatch.setenv("SHINDANG_ENV", "staging")
+        monkeypatch.setenv("SESSION_SECRET", "staging-test-secret")
+        monkeypatch.setenv("SHINDANG_DEV_LOGIN", "1")
+        with pytest.raises(RuntimeError, match="SHINDANG_DEV_LOGIN=1 is forbidden"):
+            create_app(backend="mock")
+
+    def test_staging_auth_cookie_is_secure(self, monkeypatch):
+        monkeypatch.setenv("SHINDANG_ENV", "staging")
+        monkeypatch.setenv("SESSION_SECRET", "staging-test-secret")
+        monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client")
+        monkeypatch.delenv("SHINDANG_DEV_LOGIN", raising=False)
+        fresh = TestClient(create_app(backend="mock"), follow_redirects=False)
+        res = fresh.get("/api/auth/login/google")
+        cookie = res.headers.get("set-cookie", "")
+        assert res.status_code == 302
+        assert "Secure" in cookie and "HttpOnly" in cookie and "SameSite=lax" in cookie
+
+
+class TestRuntimeProbes:
+    def test_health_and_ready_without_database(self, client, monkeypatch):
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        assert client.get("/healthz").json() == {"status": "ok"}
+        res = client.get("/readyz")
+        assert res.status_code == 200
+        assert res.json() == {"status": "ready", "checks": {"database": "not-configured"}}
+
+    def test_database_configured_without_adapter_is_not_ready(self, client, monkeypatch):
+        marker = "postgresql://must-not-appear.example.invalid/private"
+        monkeypatch.setenv("DATABASE_URL", marker)
+        res = client.get("/readyz")
+        assert res.status_code == 503
+        assert res.json() == {
+            "status": "not_ready",
+            "checks": {"database": "adapter-unavailable"},
+        }
+        assert marker not in res.text
+
 
 # ── 레거시 스위트에서 이관한 고유 커버리지 (2026-07-09 레거시 서버 제거) ──
 class TestShareCardPrivacy:
