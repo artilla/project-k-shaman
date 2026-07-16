@@ -28,7 +28,7 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - (선택) `narration_composer.py`에 **동작 변경 없이** 정본 출처(시트 §4) 링크 주석 보강.
 
 **제외**
-- 조립 **순서/로직 변경**, presynth 풀 단일→다중 확장, `transition` 세그먼트 추가 — 이는 product/planner 결정 (시트 §5의 "(선택) 전환" 및 Plan.md §10 풀 분리).
+- 조립 **순서/로직 변경**, presynth 풀 단일→다중 확장, `transition` 세그먼트 추가 — 이는 product/planner 결정 (시트 §5의 "(선택) 전환" 및 docs/planning/Plan.md §10 풀 분리).
 - `fortune-schema.v1.1.json`·캐릭터 시트·프롬프트 **수정**.
 
 ## 3. 수용 기준 (Acceptance Criteria)

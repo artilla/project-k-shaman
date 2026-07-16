@@ -1,7 +1,7 @@
 # 홍연 에셋 프롬프트 팩 — 상태 4컷 + 공유카드 1컷 생성 사양 (정본)
 
 > **역할**: 이 문서만 보고 제3자가(사람이든 다른 AI 도구든) 동일 조건의 홍연 후보 세트를 생성할 수 있도록 하는 재현 가능한 생성 사양이다.
-> **상위 정본**: `fortune-engine/character-sheet-hongyeon.md` §6 (비주얼 톤 — 상충 시 그쪽이 우선하며, 이 문서는 §6을 이미지 생성 프롬프트로 구체화한 하위 문서다).
+> **상위 정본**: `docs/product/character-sheet-hongyeon.md` §6 (비주얼 톤 — 상충 시 그쪽이 우선하며, 이 문서는 §6을 이미지 생성 프롬프트로 구체화한 하위 문서다).
 > **결정 근거**: `docs/decisions/0002-character-asset-pipeline.md` (베타 = AI 정지컷 + CSS 연출, 리깅 없음).
 > **소비처**: `docs/ux/screen-ia.md` S4 (FSM 상태 ↔ 에셋 매핑), T024 (프론트 통합 — 이 문서의 파일명 규칙을 그대로 소비).
 > **범위**: 이 문서는 문서/사양만 정의한다. 실제 이미지 생성·과금 실행은 운영자 세션에서 별도로 수행한다 (T023 §2 Non-goals).
@@ -136,7 +136,7 @@ front-facing to slight angle. Transparent background.
 | 항목 | 값 |
 |---|---|
 | 대상 캐릭터 | 홍연 (베타 단독) |
-| 상위 정본 | `fortune-engine/character-sheet-hongyeon.md` §6 |
+| 상위 정본 | `docs/product/character-sheet-hongyeon.md` §6 |
 | 결정 근거 | `docs/decisions/0002-character-asset-pipeline.md` |
 | 소비 티켓 | T024 (프론트 통합) |
 | 작성 티켓 | T023 |

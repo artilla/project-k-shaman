@@ -18,7 +18,7 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 ## 1. 목표 (한 줄)
 > 이 티켓이 끝나면 무엇이 달라지는가?
 
-`fortune-engine/fortune-samples.v1.1.json`이 정본 스키마 `fortune-engine/fortune-schema.v1.1.json`(JSON Schema Draft 2020-12)을 만족하는지 **자동 검증**되고, 회귀 테스트로 고정된다. (Sprint 0: "운세 JSON schema validator 연결" — Plan.md §12·§15.2)
+`fortune-engine/fortune-samples.v1.1.json`이 정본 스키마 `fortune-engine/fortune-schema.v1.1.json`(JSON Schema Draft 2020-12)을 만족하는지 **자동 검증**되고, 회귀 테스트로 고정된다. (Sprint 0: "운세 JSON schema validator 연결" — docs/planning/Plan.md §12·§15.2)
 
 ## 2. 변경 범위 (Scope)
 

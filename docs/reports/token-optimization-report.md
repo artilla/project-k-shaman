@@ -75,7 +75,7 @@ LLM은 cache miss 건당 원가($0.0096)의 약 22%다. 따라서 LLM을 68% 줄
 
 - **즉시 반영**: 컨텍스트 캐시를 단위 경제 baseline으로 승격했다. `unit-economics-simulator.xlsx` v1.1은 캐시 프리픽스 2,164 tok, 가변 입력 104 tok, 출력 580 tok을 기본값으로 사용한다.
 - **청취 QA 후 결정**: narration 서버 조립 전면 채택은 보류하고, `scores_line` 중간안을 채택한다. LLM은 `narration` 배열 대신 `scores_line` 한 문장과 구조화 필드만 출력한다.
-- **문서 반영**: `today-shindang-service-plan-v3.md` §13의 baseline을 context cache ON 기준으로 갱신했다.
+- **문서 반영**: `docs/planning/today-shindang-service-plan-v3.md` §13의 baseline을 context cache ON 기준으로 갱신했다.
 
 ## 7. 한계와 후속
 

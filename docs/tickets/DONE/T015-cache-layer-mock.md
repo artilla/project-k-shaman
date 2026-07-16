@@ -18,7 +18,7 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 ## 1. 목표 (한 줄)
 > 이 티켓이 끝나면 무엇이 달라지는가?
 
-**기존 키 계약**(`seed_hash`→fortune, `tts:v1:…`→audio)을 그대로 재사용하는 **get-or-compute 캐시 레이어**가 생긴다 — 같은 키의 두 번째 요청은 **compute(LLM/TTS) 재호출 없이** 캐시에서 돌려준다(dedup). 실제 Redis/S3/CDN을 끼울 **단일 교체점**이 마련된다. (master-spec §2 흐름의 "Text/TTS 캐시" 노드, Plan.md §10 "같은 seed → 재호출 없음")
+**기존 키 계약**(`seed_hash`→fortune, `tts:v1:…`→audio)을 그대로 재사용하는 **get-or-compute 캐시 레이어**가 생긴다 — 같은 키의 두 번째 요청은 **compute(LLM/TTS) 재호출 없이** 캐시에서 돌려준다(dedup). 실제 Redis/S3/CDN을 끼울 **단일 교체점**이 마련된다. (master-spec §2 흐름의 "Text/TTS 캐시" 노드, docs/planning/Plan.md §10 "같은 seed → 재호출 없음")
 
 ## 2. 변경 범위 (Scope)
 

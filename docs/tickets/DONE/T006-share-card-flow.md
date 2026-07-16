@@ -35,9 +35,9 @@ spec_ref: docs/ux/screen-ia.md#s5--결과-카드
   - CLI 저장 검증.
 - 공유 카드 내용은 다음 정본에 grounded:
   - `docs/ux/screen-ia.md` S5/S6, §4.1–§4.2
-  - `fortune-engine/character-sheet-hongyeon.md` §6
-  - `Plan.md` §7 `POST /api/share-card`, §12 Sprint 4, §13 리뷰 질문
-  - `today-shindang-service-plan-v3.md` §16·§17
+  - `docs/product/character-sheet-hongyeon.md` §6
+  - `docs/planning/Plan.md` §7 `POST /api/share-card`, §12 Sprint 4, §13 리뷰 질문
+  - `docs/planning/today-shindang-service-plan-v3.md` §16·§17
 
 **제외**
 - 프론트엔드 툴체인 도입, PWA 화면 구현, Web Share API, 로컬 앨범 저장 권한 처리.

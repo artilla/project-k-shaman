@@ -1,9 +1,9 @@
 # 오늘신당 MVP 실행 계획
 
-작성일: 2026-05-22 · v3 동기화: 2026-05-29  
-기준 문서: `today-shindang-service-plan-v3.md` (이전 기준: v2)
+작성일: 2026-05-22 · v3 동기화: 2026-05-29
+기준 문서: `docs/planning/today-shindang-service-plan-v3.md` (이전 기준: v2)
 
-> **v3 동기화(2026-05-29)**: 본 실행계획을 분석 리포트(`문서-분석-리포트-2026-05-29.md`)에 따라 v3 결정값으로 정정했다. 핵심 변경 — ① 베타 캐릭터 **홍연 1종 단독** 고정, ② 운세 출력 스키마 **`fortune-schema.v1.1.json`**(narration 제거·`scores_line` 추가, narration은 서버 조립), ③ 개인정보 **동의 기반 서버 저장 단일화 + HMAC 캐시키 분리**, ④ **3초 SLA 재정의**(완성 음성이 아니라 '탭 후 첫 반응'까지), ⑤ **autoplay 금지 전제**(사용자 탭으로 AudioContext 오픈), ⑥ 실패/지연 분석 이벤트 보강.
+> **v3 동기화(2026-05-29)**: 본 실행계획을 분석 리포트(`docs/reports/문서-분석-리포트-2026-05-29.md`)에 따라 v3 결정값으로 정정했다. 핵심 변경 — ① 베타 캐릭터 **홍연 1종 단독** 고정, ② 운세 출력 스키마 **`fortune-schema.v1.1.json`**(narration 제거·`scores_line` 추가, narration은 서버 조립), ③ 개인정보 **동의 기반 서버 저장 단일화 + HMAC 캐시키 분리**, ④ **3초 SLA 재정의**(완성 음성이 아니라 '탭 후 첫 반응'까지), ⑤ **autoplay 금지 전제**(사용자 탭으로 AudioContext 오픈), ⑥ 실패/지연 분석 이벤트 보강.
 
 ## 1. 목표
 
@@ -88,9 +88,9 @@
 
 ### AI/TTS
 
-- 홍연 system prompt (`fortune-prompt-hongyeon.v1.1.md`, scores_line 중간안)
+- 홍연 system prompt (`docs/prompts/fortune-prompt-hongyeon.v1.1.md`, scores_line 중간안)
 - 운세 JSON schema (`fortune-schema.v1.1.json`: narration 제거·scores_line 추가)
-- narration 서버 조립기 (`narration_composer.py`): greeting→summary→scores_line→advice→lucky→avoid→blessing→ending
+- narration 서버 조립기 (`src/shindang/domain/narration.py`): greeting→summary→scores_line→advice→lucky→avoid→blessing→ending
 - 금지 표현 필터 (safety prompt 후처리 검증)
 - 45-60초 음성 길이 기준의 script compressor
 - TTS provider 추상화
@@ -215,7 +215,7 @@ flowchart LR
 
 ## 8. 운세 JSON 스키마
 
-운세 출력 스키마의 **정본은 `fortune-engine/fortune-schema.v1.1.json`**이다(JSON Schema Draft 2020-12). v1.1은 `narration` 배열을 LLM 출력에서 제거하고 `scores_line` 한 문장을 추가했으며, TTS narration은 서버(`narration_composer.py`)가 조립한다.
+운세 출력 스키마의 **정본은 `contracts/fortune/fortune-schema.v1.1.json`**이다(JSON Schema Draft 2020-12). v1.1은 `narration` 배열을 LLM 출력에서 제거하고 `scores_line` 한 문장을 추가했으며, TTS narration은 서버(`src/shindang/domain/narration.py`)가 조립한다.
 
 LLM 출력 필드(요약):
 

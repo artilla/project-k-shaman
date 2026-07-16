@@ -2,7 +2,7 @@
 
 > **이 파일은 검토용 초안입니다.** 승인하면 Spec Studio(또는 `./ralph/scripts/spec_edit.sh set`)로
 > `docs/master-spec.md`에 반영하세요 — 지배 문서 변경은 사유(reason)와 함께 스냅샷이 남습니다.
-> 근거 자료: `today-shindang-service-plan-v3.md`(정본 기획), `Plan.md`, ADR-0001,
+> 근거 자료: `docs/planning/today-shindang-service-plan-v3.md`(정본 기획), `docs/planning/Plan.md`, ADR-0001,
 > DONE 티켓 T001–T016, `fortune-engine/` 산출물. `[운영자 확정]` 표시는 사람 입력이 필요한 값.
 
 ---

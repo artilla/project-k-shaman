@@ -18,14 +18,14 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 ## 1. 목표 (한 줄)
 > 이 티켓이 끝나면 무엇이 달라지는가?
 
-`/api/fortune/today`의 **요청/응답 계약**을 코드로 고정하는 Python **mock**이 생긴다 — LLM·TTS 없이 `fortune-schema.v1.1` 유효 응답을 **결정적으로** 반환해, seed builder·TTS adapter·프론트 연동 티켓이 그 위에 붙는다. (Plan.md §6·§7·§8)
+`/api/fortune/today`의 **요청/응답 계약**을 코드로 고정하는 Python **mock**이 생긴다 — LLM·TTS 없이 `fortune-schema.v1.1` 유효 응답을 **결정적으로** 반환해, seed builder·TTS adapter·프론트 연동 티켓이 그 위에 붙는다. (docs/planning/Plan.md §6·§7·§8)
 
 ## 2. 변경 범위 (Scope)
 
 **포함**
 - `fortune-engine/fortune_api_mock.py` — `get_today_fortune(request: dict) -> dict`.
   - 응답에 **유효한 `fortune-schema.v1.1` 객체**(scores·scores_line·summary[2]·advice·lucky{color,item}·avoid 등) + API 엔벨로프(`fortuneId`, mock `audioUrl`, `durationSec`).
-  - **결정적**: 동일 요청 → 동일 응답 (Plan.md §10 "같은 seed → 재호출 없음" 캐시 전제).
+  - **결정적**: 동일 요청 → 동일 응답 (docs/planning/Plan.md §10 "같은 seed → 재호출 없음" 캐시 전제).
   - 본문 `script`는 T003 `compose_narration` 재사용(서버 조립).
 - `tests/test_fortune_api_mock.py` — 응답이 `validate_fortune`(T001) 통과 + 결정성 + 요청 필드 처리 검증.
 
@@ -66,5 +66,5 @@ git rm fortune-engine/fortune_api_mock.py tests/test_fortune_api_mock.py
 ## 7. 메모 / 결정 이력
 
 - 이 mock은 **계약(keystone)**이다. 후속: `T011 seed builder`(결정적 seed_hash 규칙), `T012 TTS adapter`(실제 합성은 §3 승인), 프론트 연동(툴체인 결정 후).
-- 클라이언트 평면 응답이 필요하면 Plan.md §7 매핑을 후속 티켓에서; 본 mock은 `fortune-schema.v1.1` 정본 구조를 1차로 반환한다.
+- 클라이언트 평면 응답이 필요하면 docs/planning/Plan.md §7 매핑을 후속 티켓에서; 본 mock은 `fortune-schema.v1.1` 정본 구조를 1차로 반환한다.
 - 실제 HTTP/Next.js 노출은 프론트 툴체인 확정(T004 메모) 이후 implementer 티켓.

@@ -2,7 +2,7 @@
 
 - 상태: 제안 (운영자 스타일 선정 시 확정)
 - 날짜: 2026-07-07
-- 관련: `fortune-engine/character-sheet-hongyeon.md` §6 (비주얼 정본), `docs/ux/screen-ia.md` S4 (아바타 상태 FSM), master-spec §1.5 (베타 = 홍연 1종)
+- 관련: `docs/product/character-sheet-hongyeon.md` §6 (비주얼 정본), `docs/ux/screen-ia.md` S4 (아바타 상태 FSM), master-spec §1.5 (베타 = 홍연 1종)
 
 ## 맥락
 

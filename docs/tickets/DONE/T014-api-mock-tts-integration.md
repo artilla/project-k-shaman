@@ -18,7 +18,7 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 ## 1. 목표 (한 줄)
 > 이 티켓이 끝나면 무엇이 달라지는가?
 
-`fortune_api_mock`의 placeholder `audioUrl`/고정 `durationSec`이 **`tts_adapter.synthesize(script, …)`의 결정적 출력**으로 교체되고, 응답 엔벨로프에 `tts` metadata가 붙는다 — mock 파이프라인이 **요청→응답 end-to-end**로 완성된다. (Plan.md §7 응답, §10 TTS 캐시 키)
+`fortune_api_mock`의 placeholder `audioUrl`/고정 `durationSec`이 **`tts_adapter.synthesize(script, …)`의 결정적 출력**으로 교체되고, 응답 엔벨로프에 `tts` metadata가 붙는다 — mock 파이프라인이 **요청→응답 end-to-end**로 완성된다. (docs/planning/Plan.md §7 응답, §10 TTS 캐시 키)
 
 ## 2. 변경 범위 (Scope)
 
@@ -63,4 +63,4 @@ git revert <commit>   # 리팩토링 — 단일 커밋 되돌리면 T010 placeho
 
 - 이 연결로 **mock 백엔드 계약이 end-to-end**(seed→fortune→narration→TTS-mock→응답)로 닫힌다.
 - 이후 후속: 실제 OpenAI TTS backend·LLM 생성·HTTP 노출은 전부 §3/프론트 툴체인 결정 이후.
-- `audioUrl`/`durationSec`은 이제 `tts:v1:...` 캐시 키(Plan.md §10)와 정합한 결정적 값이다.
+- `audioUrl`/`durationSec`은 이제 `tts:v1:...` 캐시 키(docs/planning/Plan.md §10)와 정합한 결정적 값이다.

@@ -25,7 +25,7 @@ started_at: 2026-07-07T19:51:12+09:00
 - T019/T020/T021로 파이프라인·실오디오·공유카드는 완성. 남은 것은 **핵심 경험 화면(S4)의 격차**:
   현재 페이지는 세그먼트 텍스트를 `<p>`로 나열하고 status 한 줄("재생 중")뿐이다.
 - 정본: `docs/ux/screen-ia.md` §2 S4 (phase C 텍스트 카드 요소, phase D 플레이어 상태 전이),
-  §3 오디오 재생 UX(FSM: idle→greeting→speaking→blessing), `fortune-engine/character-sheet-hongyeon.md`(말투·팔레트).
+  §3 오디오 재생 UX(FSM: idle→greeting→speaking→blessing), `docs/product/character-sheet-hongyeon.md`(말투·팔레트).
 - **캐릭터 모션/일러스트 에셋은 없다** — 아바타는 정적 플레이스홀더(이모지/도형) + 상태 레이블 +
   CSS 수준 애니메이션까지만. 리치 모션은 후속(§1.5 non-goal 경계 준수).
 

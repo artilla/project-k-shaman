@@ -18,15 +18,15 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 ## 1. 목표 (한 줄)
 > 이 티켓이 끝나면 무엇이 달라지는가?
 
-요청에서 **결정적 `seed_hash`와 파생 `seed_signals`(score_bias·day_theme)**를 만드는 seed builder가 생긴다 — 캐시 키와 LLM 입력의 단일 규칙이 되어, TTS adapter·HTTP 노출·실제 LLM 연결이 그 위에 안정적으로 붙는다. (Plan.md §10 캐시 키, §11 `birth_profile_hash`/`birth_time_bucket`, 프롬프트 §개인화 입력)
+요청에서 **결정적 `seed_hash`와 파생 `seed_signals`(score_bias·day_theme)**를 만드는 seed builder가 생긴다 — 캐시 키와 LLM 입력의 단일 규칙이 되어, TTS adapter·HTTP 노출·실제 LLM 연결이 그 위에 안정적으로 붙는다. (docs/planning/Plan.md §10 캐시 키, §11 `birth_profile_hash`/`birth_time_bucket`, 프롬프트 §개인화 입력)
 
 ## 2. 변경 범위 (Scope)
 
 **포함**
 - `fortune-engine/seed_builder.py` — `build_seed(request: dict, hash_fn=<dev default>) -> dict`.
   - 반환: `{ "seed_hash": str, "seed_signals": { "score_bias": {love,money,work,relationship,condition ∈ high|mid|low}, "day_theme": str } }`.
-  - `seed_hash`는 `birth_profile_hash : date : topic : character_id : tone : locale` 형태(Plan.md §10)로 조립.
-  - `birth_profile_hash`는 **birth_date + birth_time_bucket**(정확 시각 아님, Plan.md §11)에서 파생.
+  - `seed_hash`는 `birth_profile_hash : date : topic : character_id : tone : locale` 형태(docs/planning/Plan.md §10)로 조립.
+  - `birth_profile_hash`는 **birth_date + birth_time_bucket**(정확 시각 아님, docs/planning/Plan.md §11)에서 파생.
   - **결정적**: 동일 입력 → 동일 `seed_hash`/`seed_signals`.
 - `tests/test_seed_builder.py` — 결정성·구조·PII 비유출·버킷화·`hash_fn` 주입 검증.
 
@@ -67,4 +67,4 @@ git rm fortune-engine/seed_builder.py tests/test_seed_builder.py
 
 - **이 모듈은 캐시/개인화의 단일 규칙**이다. 후속: `fortune_api_mock`이 `build_seed`를 사용하도록 연결(별도 티켓 — 그때 mock 결정성 테스트 무회귀 확인), 실제 LLM/TTS 호출(§3 승인), HTTP 노출(프론트 툴체인 후).
 - 실제 HMAC 키·server secret 관리는 **§3 hold** — 본 티켓은 인터페이스(`hash_fn`)와 결정적 규칙까지만.
-- `birth_time_bucket`(아침/오후/저녁/밤 등) 정의는 Plan.md §11을 따른다(정확 시각 비저장으로 PII 최소화).
+- `birth_time_bucket`(아침/오후/저녁/밤 등) 정의는 docs/planning/Plan.md §11을 따른다(정확 시각 비저장으로 PII 최소화).

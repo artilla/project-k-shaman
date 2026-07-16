@@ -18,16 +18,16 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 ## 1. 목표 (한 줄)
 > 이 티켓이 끝나면 무엇이 달라지는가?
 
-`script` + 보이스 설정에서 **결정적 TTS 캐시 키와 `mock://` audioUrl·duration·metadata**를 만드는 adapter가 생긴다 — 실제 TTS를 끼울 **단일 교체점**이 마련된다. (Plan.md §10 TTS 캐시 키, §2 길이, ADR-0001 권고값)
+`script` + 보이스 설정에서 **결정적 TTS 캐시 키와 `mock://` audioUrl·duration·metadata**를 만드는 adapter가 생긴다 — 실제 TTS를 끼울 **단일 교체점**이 마련된다. (docs/planning/Plan.md §10 TTS 캐시 키, §2 길이, ADR-0001 권고값)
 
 ## 2. 변경 범위 (Scope)
 
 **포함**
 - `fortune-engine/tts_adapter.py` — `synthesize(script, *, provider, voice, speed, emotion, backend=<mock>) -> dict`.
-  - **결정적 캐시 키**: `tts:v1:{provider}:{voice_id}:{script_hash}:{speed}:{emotion}` (Plan.md §10 형태).
+  - **결정적 캐시 키**: `tts:v1:{provider}:{voice_id}:{script_hash}:{speed}:{emotion}` (docs/planning/Plan.md §10 형태).
   - 반환: `{ audioUrl: "mock://...", durationSec, cacheKey, metadata }`.
   - **기본값 = ADR-0001**: `provider=openai`, `voice=coral`, `model=gpt-4o-mini-tts`.
-  - `durationSec`는 script 길이 기반 결정적 추정(45–60초 밴드, Plan.md §2).
+  - `durationSec`는 script 길이 기반 결정적 추정(45–60초 밴드, docs/planning/Plan.md §2).
   - **주입형 backend 인터페이스만** 개방(기본은 mock backend — 호출/네트워크/비용 없음).
 - `tests/test_tts_adapter.py` — 결정성·캐시 키 형태·mock url·기본값·duration·주입형 backend 검증.
 
@@ -38,7 +38,7 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 ## 3. 수용 기준 (Acceptance Criteria)
 
 - [ ] `synthesize(script, ...)`가 `{ audioUrl, durationSec, cacheKey, metadata }`를 반환.
-- [ ] `cacheKey` == `tts:v1:{provider}:{voice_id}:{script_hash}:{speed}:{emotion}` (Plan.md §10 형태).
+- [ ] `cacheKey` == `tts:v1:{provider}:{voice_id}:{script_hash}:{speed}:{emotion}` (docs/planning/Plan.md §10 형태).
 - [ ] **결정적**: 동일 `script`+설정 → 동일 `audioUrl`·`cacheKey`·`durationSec`.
 - [ ] 기본값이 **ADR-0001**(`gpt-4o-mini-tts`, `coral`)을 따른다.
 - [ ] **실제 합성 미구현**: 기본 backend는 mock(`mock://`, 네트워크/비용 0). 주입형 backend가 호출됨을 테스트로 확인. 실제 호출 = §3 hold(주석 명시).

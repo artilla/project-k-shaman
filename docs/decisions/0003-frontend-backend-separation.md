@@ -2,7 +2,7 @@
 
 - 상태: 승인 (2026-07-08)
 - 결정자: artilla
-- 관련: Plan.md §2 (프론트엔드 스택 결정), docs/research/production-readiness.md §3 (서버 런타임 교체 P0)
+- 관련: docs/planning/Plan.md §2 (프론트엔드 스택 결정), docs/research/production-readiness.md §3 (서버 런타임 교체 P0)
 
 ## 맥락
 
@@ -10,7 +10,7 @@
 
 - `static/app.js`가 화면 6개(S0~S6) + 상태 머신을 담은 ~900줄 단일 파일로 성장 — 컴포넌트화 없이는 유지보수 비용이 계속 오른다.
 - 운영 준비(P0)로 stdlib http.server → 프로덕션 런타임 교체가 어차피 필요하다.
-- Plan.md의 MVP 스택 결정이 원래 "Vite React + TypeScript"였다 — 현 구조가 임시 형태.
+- docs/planning/Plan.md의 MVP 스택 결정이 원래 "Vite React + TypeScript"였다 — 현 구조가 임시 형태.
 - 실 LLM·DB가 들어오기 전이 마이그레이션 비용이 가장 싼 시점이다.
 
 ## 결정

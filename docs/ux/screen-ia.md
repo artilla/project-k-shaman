@@ -1,15 +1,15 @@
 # 모바일 PWA 화면 IA — 오늘신당
 
-> **Sprint 1 산출물 (T004)** — 화면 구현 implementer 티켓들의 골격 기준 문서.  
-> 근거: `Plan.md` §4(핵심 흐름·백로그)·§5(Analytics), `today-shindang-service-plan-v3.md` §11(재생 UX·autoplay 금지)·§12(개인정보), `fortune-engine/character-sheet-hongyeon.md` §6(아바타 상태), `fortune-engine/fortune-samples.v1.1.json`(mock 데이터).
+> **Sprint 1 산출물 (T004)** — 화면 구현 implementer 티켓들의 골격 기준 문서.
+> 근거: `docs/planning/Plan.md` §4(핵심 흐름·백로그)·§5(Analytics), `docs/planning/today-shindang-service-plan-v3.md` §11(재생 UX·autoplay 금지)·§12(개인정보), `docs/product/character-sheet-hongyeon.md` §6(아바타 상태), `fortune-engine/fortune-samples.v1.1.json`(mock 데이터).
 
 ---
 
 ## 1. 화면 인벤토리 + 전이도
 
-### 1.1 화면 목록 (Plan.md §4 9단계 매핑)
+### 1.1 화면 목록 (docs/planning/Plan.md §4 9단계 매핑)
 
-| 화면 ID | 화면 이름 | Plan.md §4 단계 | 설명 |
+| 화면 ID | 화면 이름 | docs/planning/Plan.md §4 단계 | 설명 |
 |---|---|---|---|
 | S0 | 온보딩 | 진입 전제 (1단계 이전) | 서비스 소개·시작 CTA |
 | S1 | 무당 선택 | Step 1 — 오늘의 무당 선택 | 홍연 고정(베타 단독), 선택 확인 UI |
@@ -49,8 +49,8 @@ S5 결과 카드
 S6 공유  (정적 부적 카드 이미지 · 외부 앱 공유)  ← share_click 이벤트
 ```
 
-> **불변식**: 홍연은 베타 유일 캐릭터다. S1에서 다캐릭터 선택 UI는 표시하지 않는다. (Plan.md §2, v3 §7)  
-> **불변식**: 공유 포맷은 **정적 이미지**만. 동영상 공유는 후속이다. (Plan.md §2·§3)
+> **불변식**: 홍연은 베타 유일 캐릭터다. S1에서 다캐릭터 선택 UI는 표시하지 않는다. (docs/planning/Plan.md §2, v3 §7)
+> **불변식**: 공유 포맷은 **정적 이미지**만. 동영상 공유는 후속이다. (docs/planning/Plan.md §2·§3)
 
 ---
 
@@ -178,7 +178,7 @@ S6 공유  (정적 부적 카드 이미지 · 외부 앱 공유)  ← share_clic
 
 #### phase C — 텍스트 노출 (음성 완성 대기 없이 즉시)
 
-> **핵심 UX 규칙**: 운세 텍스트는 API 응답 즉시 표시한다. 음성 완성을 기다리지 않는다. (v3 §11.1)  
+> **핵심 UX 규칙**: 운세 텍스트는 API 응답 즉시 표시한다. 음성 완성을 기다리지 않는다. (v3 §11.1)
 > **autoplay 금지**: 이 phase에서 오디오 자동 재생 없음. 사용자가 "듣기"를 탭해야 AudioContext가 열린다. (v3 §11.2)
 
 **핵심 요소**:
@@ -365,7 +365,7 @@ S6 공유  (정적 부적 카드 이미지 · 외부 앱 공유)  ← share_clic
 
 ---
 
-## 5. 분석 이벤트 매핑 (Plan.md §5 Analytics)
+## 5. 분석 이벤트 매핑 (docs/planning/Plan.md §5 Analytics)
 
 | 이벤트 | 발화 화면 / 액션 | 주요 속성 |
 |---|---|---|
@@ -423,8 +423,8 @@ S2 입력 화면 하단 배너:
 
 | 제약 | 근거 |
 |---|---|
-| 홍연 1종 단독 — S1 다캐릭터 선택 UI 없음 | Plan.md §2, v3 §7 |
-| 정적 부적 카드 — 동영상 공유 없음 | Plan.md §2·§3 |
+| 홍연 1종 단독 — S1 다캐릭터 선택 UI 없음 | docs/planning/Plan.md §2, v3 §7 |
+| 정적 부적 카드 — 동영상 공유 없음 | docs/planning/Plan.md §2·§3 |
 | 닉네임 음성 본문 미삽입 — "오늘의 손님" 고정 | character-sheet §2, v3 §9 |
 | autoplay 금지 — "듣기" 탭으로 AudioContext 열기 | v3 §11.2 |
 | 원본 생년월일 화면·카드 비노출 | v3 §12 |
@@ -440,4 +440,4 @@ S2 입력 화면 하단 배너:
 
 ---
 
-*참조: `Plan.md` §4·§5, `today-shindang-service-plan-v3.md` §11·§12, `fortune-engine/character-sheet-hongyeon.md` §4·§6, `fortune-engine/fortune-samples.v1.1.json`*
+*참조: `docs/planning/Plan.md` §4·§5, `docs/planning/today-shindang-service-plan-v3.md` §11·§12, `docs/product/character-sheet-hongyeon.md` §4·§6, `fortune-engine/fortune-samples.v1.1.json`*

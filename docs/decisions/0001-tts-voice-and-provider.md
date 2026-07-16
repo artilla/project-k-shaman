@@ -11,16 +11,16 @@ depends_on: ["T002"]
 
 # ADR-0001 — TTS 보이스·프로바이더 선정 (베타)
 
-> **범위 명확화**: 본 ADR은 "어떤 TTS 프로바이더와 음색으로 합성할지"를 결정한다.  
-> narration 조립 순서(greeting → summary → scores_line → … → ending)는  
-> `fortune-engine/tts-ab-kit/listening-decision-report.md`에서 **"scores_line 중간안"으로 이미 결정 완료**됐다.  
+> **범위 명확화**: 본 ADR은 "어떤 TTS 프로바이더와 음색으로 합성할지"를 결정한다.
+> narration 조립 순서(greeting → summary → scores_line → … → ending)는
+> `fortune-engine/tts-ab-kit/listening-decision-report.md`에서 **"scores_line 중간안"으로 이미 결정 완료**됐다.
 > 두 결정은 독립이며 혼동하지 않는다.
 
 ---
 
 ## 1. 컨텍스트
 
-오늘신당 베타는 홍연 캐릭터의 운세를 **45–60초 음성(TTS)으로 전달**하는 것이 핵심 차별점이다.  
+오늘신당 베타는 홍연 캐릭터의 운세를 **45–60초 음성(TTS)으로 전달**하는 것이 핵심 차별점이다.
 TTS 프로바이더·음색을 선정하지 않으면 어댑터 구현·presynth 합성·단위 경제 확정 모두 진행할 수 없다.
 
 ### 결정 제약 조건
@@ -28,10 +28,10 @@ TTS 프로바이더·음색을 선정하지 않으면 어댑터 구현·presynth
 | 조건 | 기준 | 출처 |
 |---|---|---|
 | 한국어 품질 | 홍연 캐릭터 시트 §4 톤 부합 — 밝고 리듬감, 신비롭지만 무섭지 않게 | character-sheet-hongyeon.md §4 |
-| 원가 | cache miss 신규합성 기여분 ≤ $0.01/세션 목표 | v3 §13, Plan.md §10 |
-| 지연 | 45–60초 narration 합성 속도 수용 가능 | Plan.md §2, v3 §11.1 |
+| 원가 | cache miss 신규합성 기여분 ≤ $0.01/세션 목표 | v3 §13, docs/planning/Plan.md §10 |
+| 지연 | 45–60초 narration 합성 속도 수용 가능 | docs/planning/Plan.md §2, v3 §11.1 |
 | 라이선스 | 상업적 서비스 운영 허용 | 공개 ToS |
-| 커스터마이즈 | 베타: 기본 제공 음색만 사용. 커스텀 보이스 계약은 베타 지표 이후 | Plan.md §2·§3 |
+| 커스터마이즈 | 베타: 기본 제공 음색만 사용. 커스텀 보이스 계약은 베타 지표 이후 | docs/planning/Plan.md §2·§3 |
 
 ### 홍연 음성 디렉션 — 톤 적합성 평가 기준 (캐릭터 시트 §4)
 
@@ -47,8 +47,8 @@ TTS 프로바이더·음색을 선정하지 않으면 어댑터 구현·presynth
 
 ## 2. 후보 비교
 
-> **기준**: 공식 공개 자료 확인일 2026-06-01, 사내 실측일 2026-05-22.  
-> 불확실값은 `(확인 필요)` 표기. 가격 확정은 provider usage 로그 기반 실제 청구액으로 교체 필요 (v3 §13 TBD).  
+> **기준**: 공식 공개 자료 확인일 2026-06-01, 사내 실측일 2026-05-22.
+> 불확실값은 `(확인 필요)` 표기. 가격 확정은 provider usage 로그 기반 실제 청구액으로 교체 필요 (v3 §13 TBD).
 > 참고 공식 자료: [OpenAI gpt-4o-mini-tts 모델 가격](https://developers.openai.com/api/docs/models/gpt-4o-mini-tts), [OpenAI Text to speech guide](https://developers.openai.com/api/docs/guides/text-to-speech), [OpenAI Terms of Use](https://openai.com/policies/terms-of-use/), [Google Cloud TTS pricing](https://cloud.google.com/text-to-speech/pricing), [ElevenLabs pricing](https://elevenlabs.io/pricing), [ElevenLabs models](https://elevenlabs.io/docs/models/).
 
 | 항목 | OpenAI gpt-4o-mini-tts | Google Cloud TTS Neural2 | ElevenLabs Multilingual v2 |
@@ -70,7 +70,7 @@ TTS 프로바이더·음색을 선정하지 않으면 어댑터 구현·presynth
 
 ### 선정 근거
 
-1. **실측 데이터 유일**: `synthesize_tts.py`로 coral 음색 5샘플을 합성·청취 완료.  
+1. **실측 데이터 유일**: `synthesize_tts.py`로 coral 음색 5샘플을 합성·청취 완료.
    31초 신규합성 기준 **$0.0078/miss 실측** — 타 프로바이더는 추정치만 존재 (`tts-ab-results-report.md`).
 
 2. **홍연 톤 적합성 (캐릭터 시트 §4 기준)**:
@@ -78,23 +78,23 @@ TTS 프로바이더·음색을 선정하지 않으면 어댑터 구현·presynth
    - `bright + energetic` 감정 파라미터를 TTS 호출 파라미터로 매핑 가능하다.
    - 닉네임 없이 "오늘의 손님" 호칭만으로도 몰입감 있는 음색 가능함을 청취에서 확인했다.
 
-3. **원가 투명성**: 공식 가격은 text input $0.60/1M tokens + audio output $12.00/1M audio tokens이고,  
-   기존 단위 경제 시뮬레이터는 이를 약 `$0.015/min`으로 환산해 반영했다 (v3 §13).  
+3. **원가 투명성**: 공식 가격은 text input $0.60/1M tokens + audio output $12.00/1M audio tokens이고,
+   기존 단위 경제 시뮬레이터는 이를 약 `$0.015/min`으로 환산해 반영했다 (v3 §13).
    cache hit율 30% 베타 목표 달성 시 블렌디드 원가 허용 범위 유지. 단, 실제 청구액으로 재보정 필요.
 
-4. **합성음 고지 경계 명확**: OpenAI TTS 가이드는 end user에게 AI-generated voice임을 명확히 고지해야 한다고 명시한다.  
+4. **합성음 고지 경계 명확**: OpenAI TTS 가이드는 end user에게 AI-generated voice임을 명확히 고지해야 한다고 명시한다.
    합성음 고지(v3 §18)는 UI에서 별도 표시한다.
 
-5. **어댑터 최소 변경**: `synthesize_tts.py`가 이미 어댑터 패턴으로 구조화되어 있어  
+5. **어댑터 최소 변경**: `synthesize_tts.py`가 이미 어댑터 패턴으로 구조화되어 있어
    일반화 비용 낮음. 프로바이더 교체 시 파라미터만 변경하면 된다.
 
 ### 베타 범위 명시
 
-> **기본 TTS 음색(`coral`) + 홍연 말투 (fortune-prompt-hongyeon.v1.1.md 지시)**  
+> **기본 TTS 음색(`coral`) + 홍연 말투 (fortune-prompt-hongyeon.v1.1.md 지시)**
 >
-> 커스텀 보이스 계약(성우 동의·음성권·2차 활용 문서화)은  
-> **베타 지표(청취 완료율 ≥60%, DAU 목표) 확인 이후** 판단한다.  
-> (Plan.md §2·§3, v3 §10, character-sheet-hongyeon.md §5)
+> 커스텀 보이스 계약(성우 동의·음성권·2차 활용 문서화)은
+> **베타 지표(청취 완료율 ≥60%, DAU 목표) 확인 이후** 판단한다.
+> (docs/planning/Plan.md §2·§3, v3 §10, character-sheet-hongyeon.md §5)
 
 ---
 

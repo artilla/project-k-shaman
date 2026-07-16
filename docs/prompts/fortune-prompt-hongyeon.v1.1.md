@@ -1,7 +1,7 @@
 # 홍연 운세 프롬프트 초안 v1.1
 
-대상 모델: Gemini 2.5 Flash (구조화 출력 / JSON mode)  
-출력 계약: `fortune-schema.v1.1.json` 을 100% 준수하는 단일 JSON 객체  
+대상 모델: Gemini 2.5 Flash (구조화 출력 / JSON mode)
+출력 계약: `fortune-schema.v1.1.json` 을 100% 준수하는 단일 JSON 객체
 content_version: `prompt.v1.1`
 
 ## 변경 요약
@@ -10,7 +10,7 @@ v1.1은 청취 QA 결과에 따라 `scores_line` 중간안을 채택한다.
 
 - LLM은 더 이상 `narration` 배열을 출력하지 않는다.
 - LLM은 구조화 필드와 `scores_line` 한 문장만 출력한다.
-- 서버는 `narration_composer.py`로 `greeting → summary → scores_line → advice → lucky → avoid → blessing → ending` 순서의 TTS narration을 조립한다.
+- 서버는 `src/shindang/domain/narration.py`로 `greeting → summary → scores_line → advice → lucky → avoid → blessing → ending` 순서의 TTS narration을 조립한다.
 - 비용 이득은 LLM 출력 토큰 절감에서 발생하고, scores 문장 자연스러움은 LLM이 유지한다.
 
 ---

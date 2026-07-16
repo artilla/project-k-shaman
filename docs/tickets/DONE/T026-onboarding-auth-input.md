@@ -25,7 +25,7 @@ spec_ref: docs/ux/screen-ia.md#s2--입력
 - v3 §12 개인정보 UX (**불변식**): 비회원 로컬 우선 — 입력값은 **localStorage에만** 저장,
   운세 요청 시 기존 `/api/fortune/today?birth_year=…` 쿼리로만 전달(이미 T019가 지원, seed_builder가
   HMAC 해시). **원본 생년월일·출생시간을 화면·공유카드에 재노출하지 않는다** (입력 화면 제외).
-- Plan.md §계정: 첫 운세는 비회원 가능 — 게스트가 기본 경로, 계정은 부가.
+- docs/planning/Plan.md §계정: 첫 운세는 비회원 가능 — 게스트가 기본 경로, 계정은 부가.
 
 ## 3. 변경 범위 (Scope)
 
@@ -51,7 +51,7 @@ spec_ref: docs/ux/screen-ia.md#s2--입력
   (시진→시각), 세션 쿠키 발급/조회/로그아웃, 원문 비노출(이벤트·카드), 전 스위트 GREEN.
 
 **제외 (Non-goals)**
-- DB/영속 계정·streak·결제(Plan.md 후속), 이메일/비밀번호 가입(소셜+게스트만), Apple 로그인,
+- DB/영속 계정·streak·결제(docs/planning/Plan.md 후속), 이메일/비밀번호 가입(소셜+게스트만), Apple 로그인,
   실 소셜 키 발급(운영자가 콘솔에서 발급해 .env.local에 넣는 것 — 안내 문구만), PWA·배포(§3 hold).
 
 ## 4. 수용 기준 (Acceptance Criteria)

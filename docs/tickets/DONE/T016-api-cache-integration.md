@@ -18,7 +18,7 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 ## 1. 목표 (한 줄)
 > 이 티켓이 끝나면 무엇이 달라지는가?
 
-`fortune_api_mock`이 T015 `cache_layer`를 사용해 동일 요청의 fortune/text 계산과 TTS 합성을 **각각 1회만 수행**한다 — 같은 seed/script의 두 번째 요청은 fortune cache(`fortune:v1:{seed_hash}`)와 TTS cache(`tts:v1:...`)에서 반환되어 compute 재호출 0회가 된다. (Plan.md §10 "같은 seed → 재호출 없음")
+`fortune_api_mock`이 T015 `cache_layer`를 사용해 동일 요청의 fortune/text 계산과 TTS 합성을 **각각 1회만 수행**한다 — 같은 seed/script의 두 번째 요청은 fortune cache(`fortune:v1:{seed_hash}`)와 TTS cache(`tts:v1:...`)에서 반환되어 compute 재호출 0회가 된다. (docs/planning/Plan.md §10 "같은 seed → 재호출 없음")
 
 ## 2. 변경 범위 (Scope)
 

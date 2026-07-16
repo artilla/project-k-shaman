@@ -18,7 +18,7 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 ## 1. 목표 (한 줄)
 > 이 티켓이 끝나면 무엇이 달라지는가?
 
-베타용 **TTS 프로바이더와 홍연 보이스**를 비교·선정한 **결정 기록(ADR)**이 생겨, 이후 TTS 어댑터 구현·합성이 한 기준 위에서 진행된다. (Plan.md §3·§12·§15.4 "TTS provider 후보 비용/한국어 품질 확인")
+베타용 **TTS 프로바이더와 홍연 보이스**를 비교·선정한 **결정 기록(ADR)**이 생겨, 이후 TTS 어댑터 구현·합성이 한 기준 위에서 진행된다. (docs/planning/Plan.md §3·§12·§15.4 "TTS provider 후보 비용/한국어 품질 확인")
 
 ## 2. 변경 범위 (Scope)
 
@@ -26,7 +26,7 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - 신규 ADR `docs/decisions/0001-tts-voice-and-provider.md` 작성 (형식: 컨텍스트 / 결정 / 대안과 기각 이유 / 후속 영향).
 - 후보 비교: 한국어 품질, **원가**(공개 가격·문자/초당), 지연, 라이선스·상업 사용, 보이스 커스터마이즈 가능성.
 - 홍연 톤 적합성 기준은 캐릭터 시트 §4(밝고 리듬감·speed/emotion)에 grounded.
-- 근거: `Plan.md` §2·§3(보이스 결정: 기본 TTS 음색+말투, 커스텀 계약은 지표 이후)·§13(단위 경제), `today-shindang-service-plan-v3.md` §10·§13·§18, 기존 `fortune-engine/tts-ab-kit/synthesize_tts.py`(현재 어댑터 가정).
+- 근거: `docs/planning/Plan.md` §2·§3(보이스 결정: 기본 TTS 음색+말투, 커스텀 계약은 지표 이후)·§13(단위 경제), `docs/planning/today-shindang-service-plan-v3.md` §10·§13·§18, 기존 `fortune-engine/tts-ab-kit/synthesize_tts.py`(현재 어댑터 가정).
 
 **제외 (중요)**
 - **실제 유료 TTS API 호출·합성·계약 체결** — master-spec §3에서 **인간 승인 필수**. 본 티켓은 결정 문서까지만.

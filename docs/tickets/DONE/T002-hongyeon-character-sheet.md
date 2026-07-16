@@ -18,13 +18,13 @@ spec_ref: docs/master-spec.md#1-office-hours--6가지-필수-질문
 ## 1. 목표 (한 줄)
 > 이 티켓이 끝나면 무엇이 달라지는가?
 
-홍연 캐릭터의 **단일 기준 시트**가 생겨, 이후 프롬프트 개정·TTS 톤·공유 카드·UI가 한 문서를 참조해 일관되게 정렬된다. (Sprint 0: 홍연 캐릭터 시트 — Plan.md §12·§15.1, v3 §7)
+홍연 캐릭터의 **단일 기준 시트**가 생겨, 이후 프롬프트 개정·TTS 톤·공유 카드·UI가 한 문서를 참조해 일관되게 정렬된다. (Sprint 0: 홍연 캐릭터 시트 — docs/planning/Plan.md §12·§15.1, v3 §7)
 
 ## 2. 변경 범위 (Scope)
 
 **포함**
-- 신규 문서 `fortune-engine/character-sheet-hongyeon.md` 작성.
-- 기존 출처를 **통합·확장**: `fortune-prompt-hongyeon.v1.1.md`(정체성·말투·콘텐츠 원칙·안전·lucky 풀·출력 계약), `Plan.md` §9, `today-shindang-service-plan-v3.md` §4·§7.
+- 신규 문서 `docs/product/character-sheet-hongyeon.md` 작성.
+- 기존 출처를 **통합·확장**: `fortune-prompt-hongyeon.v1.1.md`(정체성·말투·콘텐츠 원칙·안전·lucky 풀·출력 계약), `docs/planning/Plan.md` §9, `docs/planning/today-shindang-service-plan-v3.md` §4·§7.
 - 프롬프트에 **없는 공백을 보강**: 음성(TTS) 디렉션 디테일, presynth 문장 세트(인사·전환·축원·엔딩) 톤 가이드, 공유 카드·아바타 비주얼 톤.
 
 **제외**
@@ -36,14 +36,14 @@ spec_ref: docs/master-spec.md#1-office-hours--6가지-필수-질문
 
 > 객관적으로 "끝났다"를 판정할 수 있는 조건.
 
-- [ ] `fortune-engine/character-sheet-hongyeon.md`가 다음 **6개 섹션**을 모두 포함한다:
+- [ ] `docs/product/character-sheet-hongyeon.md`가 다음 **6개 섹션**을 모두 포함한다:
   1. 페르소나·세계관 (붉은 단청 K-pop 판타지 퇴마 아이돌 무당, 가상 퍼포머, 1분 공연 무대)
   2. 말투·톤 규칙 + **DO / DON'T 예시**
   3. 금지 표현·안전 기준 (공포·강매·단정·사칭·차별·미성년 부적절·닉네임 음성 삽입)
   4. 음성(TTS) 디렉션 (밝고 리듬감, 속도·감정·문장 끊기; 강점영역 연애·자신감·대인관계)
   5. presynth 문장 세트 가이드 (인사·전환·축원·엔딩 — 톤·길이·예시)
   6. 공유 카드·아바타 비주얼 톤 (팔레트는 `lucky.color` 풀과 정합)
-- [ ] 기존 `fortune-prompt-hongyeon.v1.1.md`·`Plan.md §9` 안전 기준과 **모순 없음**(상충 시 시트가 출처를 명시하고 프롬프트를 정본으로 표기).
+- [ ] 기존 `fortune-prompt-hongyeon.v1.1.md`·`docs/planning/Plan.md §9` 안전 기준과 **모순 없음**(상충 시 시트가 출처를 명시하고 프롬프트를 정본으로 표기).
 - [ ] 닉네임 음성 미포함, 실제 무속인 사칭 금지 등 **핵심 불변식**이 시트에 명시된다.
 - [ ] `./ralph/scripts/run_checks.sh` 0 exit.
 
@@ -53,14 +53,14 @@ spec_ref: docs/master-spec.md#1-office-hours--6가지-필수-질문
 
 ```bash
 # 6개 필수 섹션 헤더 존재 확인 (예시)
-grep -E "페르소나|말투|안전|음성|presynth|비주얼" fortune-engine/character-sheet-hongyeon.md
+grep -E "페르소나|말투|안전|음성|presynth|비주얼" docs/product/character-sheet-hongyeon.md
 ./ralph/scripts/run_checks.sh
 ```
 
 ## 5. 롤백 방법 (Reversibility)
 
 ```bash
-git rm fortune-engine/character-sheet-hongyeon.md   # 추가 문서만 제거
+git rm docs/product/character-sheet-hongyeon.md   # 추가 문서만 제거
 # 또는: git revert <commit>
 ```
 
