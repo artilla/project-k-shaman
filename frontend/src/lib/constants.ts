@@ -1,6 +1,6 @@
 import type { AvatarState, PlayerPhase } from "./types";
 
-// character-sheet-hongyeon.md §6 lucky.color 팔레트 — share_card.py PALETTE와 동일 유지.
+// docs/product/character-sheet-hongyeon.md §6 lucky.color 팔레트 — domain/fortune_card.py와 동일 유지.
 export const LUCKY_COLOR_HEX: Record<string, string> = {
   "코랄 핑크": "#ff6f91",
   "진홍": "#c9184a",

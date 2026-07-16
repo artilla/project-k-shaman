@@ -7,6 +7,7 @@ services:
     environment:
       SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET is required}
       SHINDANG_ENV: ${DEPLOY_ENV:?DEPLOY_ENV is required}
+      SHINDANG_PUBLIC_BASE_URL: ${SITE_ADDRESS:?SITE_ADDRESS is required}
       TRUST_PROXY: "1"
       TTS_BACKEND: ${TTS_BACKEND:-mock}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}

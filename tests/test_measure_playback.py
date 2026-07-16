@@ -1,20 +1,9 @@
-"""T020: fortune-engine/web/measure_playback.py — playback_events.jsonl 실측 요약 로직 검증.
+"""playback_events.jsonl 실측 요약 로직 검증.
 
 네트워크·서버 구동 없이, 기록된 세션 레코드 리스트에 대한 순수 집계만 검증한다.
 """
-import importlib.util
-from pathlib import Path
 
-ROOT = Path(__file__).parent.parent
-MOD_PATH = ROOT / "fortune-engine" / "web" / "measure_playback.py"
-
-_spec = importlib.util.spec_from_file_location("t020_measure_playback", MOD_PATH)
-measure_playback = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(measure_playback)
-
-load_records = measure_playback.load_records
-summarize = measure_playback.summarize
-format_report = measure_playback.format_report
+from tools.analytics.measure_playback import format_report, load_records, summarize
 
 
 def _record(text_latency, audio_latency, cache_status, synthesis_costs=()):
@@ -22,7 +11,10 @@ def _record(text_latency, audio_latency, cache_status, synthesis_costs=()):
         "fortuneId": "mock_x",
         "events": [
             {"event": "tts_generate_start"},
-            *({"event": "tts_generate_complete", "costUsd": cost} for cost in synthesis_costs),
+            *(
+                {"event": "tts_generate_complete", "costUsd": cost}
+                for cost in synthesis_costs
+            ),
         ],
         "summary": {
             "textLatencyMs": text_latency,
@@ -41,7 +33,11 @@ def _share_record(*, share_initiated=False, share_completed=False, text_latency=
     return {
         "fortuneId": "mock_x",
         "events": events,
-        "summary": {"textLatencyMs": text_latency, "audioLatencyMs": text_latency + 200, "cacheStatus": "hit"},
+        "summary": {
+            "textLatencyMs": text_latency,
+            "audioLatencyMs": text_latency + 200,
+            "cacheStatus": "hit",
+        },
     }
 
 
@@ -62,7 +58,9 @@ class TestLoadRecords:
 
     def test_skips_blank_lines(self, tmp_path):
         path = tmp_path / "events.jsonl"
-        path.write_text('{"fortuneId": "a", "events": [], "summary": {}}\n\n', encoding="utf-8")
+        path.write_text(
+            '{"fortuneId": "a", "events": [], "summary": {}}\n\n', encoding="utf-8"
+        )
         assert len(load_records(path)) == 1
 
 
@@ -88,7 +86,10 @@ class TestSummarize:
         assert summary["cacheHitRate"] == 1.0
 
     def test_cache_hit_rate_mixed(self):
-        records = [_record(100, 300, "hit"), _record(150, 1200, "miss", synthesis_costs=[0.0078])]
+        records = [
+            _record(100, 300, "hit"),
+            _record(150, 1200, "miss", synthesis_costs=[0.0078]),
+        ]
         summary = summarize(records)
         assert summary["cacheHitRate"] == 0.5
 
@@ -137,7 +138,11 @@ class TestShareRate:
             {
                 "fortuneId": "mock_x",
                 "events": [{"event": "share_completed"}],
-                "summary": {"textLatencyMs": None, "audioLatencyMs": None, "cacheStatus": "unknown"},
+                "summary": {
+                    "textLatencyMs": None,
+                    "audioLatencyMs": None,
+                    "cacheStatus": "unknown",
+                },
             },
         ]
         summary = summarize(records)
@@ -152,7 +157,9 @@ class TestFormatReport:
         assert "cacheHitRate" in report
 
     def test_reports_below_threshold_when_hit_rate_low(self):
-        records = [_record(150, 1200, "miss", synthesis_costs=[0.0078]) for _ in range(10)]
+        records = [
+            _record(150, 1200, "miss", synthesis_costs=[0.0078]) for _ in range(10)
+        ]
         report = format_report(summarize(records))
         assert "BELOW threshold" in report
 
@@ -163,12 +170,17 @@ class TestFormatReport:
         assert "cost/session" not in report
 
     def test_reports_pass_when_share_completed_rate_meets_threshold(self):
-        records = [_share_record(share_initiated=True, share_completed=True) for _ in range(10)]
+        records = [
+            _share_record(share_initiated=True, share_completed=True) for _ in range(10)
+        ]
         report = format_report(summarize(records))
         assert "shareCompletedRate" in report
         assert "PASS" in report
 
     def test_reports_below_threshold_when_share_completed_rate_low(self):
-        records = [_share_record(share_initiated=False, share_completed=False) for _ in range(10)]
+        records = [
+            _share_record(share_initiated=False, share_completed=False)
+            for _ in range(10)
+        ]
         report = format_report(summarize(records))
         assert "BELOW threshold" in report

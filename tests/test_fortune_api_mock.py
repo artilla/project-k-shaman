@@ -1,33 +1,61 @@
-"""T010/T012/T016/T018: Fortune API mock — 계약 경계, 결정적 응답, birth-의존, 2단 캐시·이벤트 테스트."""
-import importlib.util
+"""결정적 운세 도메인과 2단 캐시·이벤트 유스케이스 테스트."""
+
 import json
-import logging
 from pathlib import Path
 
 import jsonschema
 import pytest
 
+from shindang.adapters.cache import InMemoryCacheStore
+from shindang.adapters.tts import compute_cache_key, synthesize
+from shindang.application.cache import fortune_cache_key
+from shindang.application.playback import PlaybackService
+from shindang.domain.fortune import build_fortune
+from shindang.domain.seed import build_seed
+
 ROOT = Path(__file__).parent.parent
-MOCK_PATH = ROOT / "fortune-engine" / "fortune_api_mock.py"
-SCHEMA_PATH = ROOT / "fortune-engine" / "fortune-schema.v1.1.json"
-SEED_BUILDER_PATH = ROOT / "fortune-engine" / "seed_builder.py"
-CACHE_LAYER_PATH = ROOT / "fortune-engine" / "cache_layer.py"
+SCHEMA_PATH = ROOT / "contracts" / "fortune" / "fortune-schema.v1.1.json"
 
-_sb_spec = importlib.util.spec_from_file_location("seed_builder", SEED_BUILDER_PATH)
-_sb_mod = importlib.util.module_from_spec(_sb_spec)
-_sb_spec.loader.exec_module(_sb_mod)
-build_seed = _sb_mod.build_seed
 
-_spec = importlib.util.spec_from_file_location("fortune_api_mock", MOCK_PATH)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-get_today_fortune = _mod.get_today_fortune
+class _Speech:
+    mode = "mock"
 
-_cl_spec = importlib.util.spec_from_file_location("cache_layer", CACHE_LAYER_PATH)
-_cl_mod = importlib.util.module_from_spec(_cl_spec)
-_cl_spec.loader.exec_module(_cl_mod)
-InMemoryCacheStore = _cl_mod.InMemoryCacheStore
-fortune_cache_key = _cl_mod.fortune_cache_key
+    def __init__(self, synthesize_fn=None):
+        self._synthesize = synthesize_fn or synthesize
+
+    def cache_key(self, script):
+        return compute_cache_key(script)
+
+    def synthesize(self, script, *, event_sink=None):
+        if self._synthesize is synthesize:
+            return synthesize(script, event_sink=event_sink)
+        return self._synthesize(script)
+
+
+class _LegacyNames:
+    _build_fortune_data = staticmethod(build_fortune)
+    _tts_synthesize = staticmethod(synthesize)
+
+
+_mod = _LegacyNames()
+_default_store = InMemoryCacheStore()
+
+
+def get_today_fortune(
+    request,
+    *,
+    store=None,
+    fortune_build_fn=None,
+    tts_synthesize_fn=None,
+    include_tts=True,
+):
+    service = PlaybackService(store or _default_store, _Speech(tts_synthesize_fn))
+    return service.build(
+        request,
+        include_tts=include_tts,
+        fortune_builder=fortune_build_fn or build_fortune,
+    )
+
 
 _BASE_REQ = {
     "date": "2026-06-02",
@@ -65,9 +93,13 @@ class TestSchemaValidation:
         fortune = result["fortune"]
         validator = jsonschema.Draft202012Validator(schema)
         errors = list(validator.iter_errors(fortune))
-        assert not errors, f"birth 필드 포함 요청의 스키마 검증 실패: {errors[0].message}"
+        assert not errors, (
+            f"birth 필드 포함 요청의 스키마 검증 실패: {errors[0].message}"
+        )
 
-    @pytest.mark.parametrize("topic", ["total", "love", "money", "work", "relationship"])
+    @pytest.mark.parametrize(
+        "topic", ["total", "love", "money", "work", "relationship"]
+    )
     def test_all_topics_pass_schema(self, schema, topic):
         req = {**_BASE_REQ, "topic": topic}
         result = get_today_fortune(req)
@@ -88,12 +120,17 @@ class TestDeterminism:
     def test_different_topic_gives_different_fortune_id(self):
         req_love = {**_BASE_REQ, "topic": "love"}
         req_money = {**_BASE_REQ, "topic": "money"}
-        assert get_today_fortune(req_love)["fortuneId"] != get_today_fortune(req_money)["fortuneId"]
+        assert (
+            get_today_fortune(req_love)["fortuneId"]
+            != get_today_fortune(req_money)["fortuneId"]
+        )
 
     def test_different_date_gives_different_fortune_id(self):
         req1 = {**_BASE_REQ, "date": "2026-06-02"}
         req2 = {**_BASE_REQ, "date": "2026-06-03"}
-        assert get_today_fortune(req1)["fortuneId"] != get_today_fortune(req2)["fortuneId"]
+        assert (
+            get_today_fortune(req1)["fortuneId"] != get_today_fortune(req2)["fortuneId"]
+        )
 
 
 class TestEnvelope:
@@ -130,7 +167,16 @@ class TestScript:
 
     def test_script_segment_order_matches_spec(self):
         result = get_today_fortune(_BASE_REQ)
-        expected = ["greeting", "summary", "scores", "advice", "lucky", "avoid", "blessing", "ending"]
+        expected = [
+            "greeting",
+            "summary",
+            "scores",
+            "advice",
+            "lucky",
+            "avoid",
+            "blessing",
+            "ending",
+        ]
         actual = [s["segment"] for s in result["script"]]
         assert actual == expected
 
@@ -186,7 +232,9 @@ class TestPrivacyGuard:
         result = get_today_fortune(_BIRTH_REQ)
         result_str = json.dumps(result, ensure_ascii=False)
         for field in ("birth_year", "birth_month", "birth_day", "birth_hour"):
-            assert field not in result_str, f"birth 필드명 '{field}'가 응답 JSON에 존재함"
+            assert field not in result_str, (
+                f"birth 필드명 '{field}'가 응답 JSON에 존재함"
+            )
 
 
 # ─── T012 ────────────────────────────────────────────────────────────────────
@@ -197,7 +245,7 @@ _MORNING_BIRTH_REQ = {
     "birth_year": 1990,
     "birth_month": 3,
     "birth_day": 15,
-    "birth_hour": 7,   # morning bucket (5–11)
+    "birth_hour": 7,  # morning bucket (5–11)
 }
 _MORNING_BIRTH_REQ2 = {
     **_BASE_REQ,
@@ -228,13 +276,18 @@ class TestBirthDependency:
         """morning vs evening 버킷 → fortune.meta.seed_hash 상이."""
         r_morning = get_today_fortune(_MORNING_BIRTH_REQ)
         r_evening = get_today_fortune(_EVENING_BIRTH_REQ)
-        assert r_morning["fortune"]["meta"]["seed_hash"] != r_evening["fortune"]["meta"]["seed_hash"]
+        assert (
+            r_morning["fortune"]["meta"]["seed_hash"]
+            != r_evening["fortune"]["meta"]["seed_hash"]
+        )
 
     def test_same_birth_bucket_same_response(self):
         """birth_hour=7과 birth_hour=10은 동일 morning 버킷 → 동일 응답."""
         r1 = get_today_fortune(_MORNING_BIRTH_REQ)
         r2 = get_today_fortune(_MORNING_BIRTH_REQ2)
-        assert r1 == r2
+        assert {k: v for k, v in r1.items() if k != "events"} == {
+            k: v for k, v in r2.items() if k != "events"
+        }
 
     def test_birth_request_is_deterministic(self):
         """동일 birth 요청 반복 → 동일 응답."""
@@ -246,11 +299,15 @@ class TestBirthDependency:
         """birth 포함 요청 vs 제외 요청 → seed_hash 상이 (birth가 키에 반영됨)."""
         r_no_birth = get_today_fortune(_BASE_REQ)
         r_birth = get_today_fortune(_MORNING_BIRTH_REQ)
-        assert r_no_birth["fortune"]["meta"]["seed_hash"] != r_birth["fortune"]["meta"]["seed_hash"]
+        assert (
+            r_no_birth["fortune"]["meta"]["seed_hash"]
+            != r_birth["fortune"]["meta"]["seed_hash"]
+        )
 
 
 # ─── T014 ────────────────────────────────────────────────────────────────────
 # 이하 클래스는 T014(tts_adapter 연결) 수용 기준 검증용이다.
+
 
 class TestTtsMetadata:
     """T014: 엔벨로프에 tts metadata(cacheKey·provider·voice)가 포함된다."""
@@ -330,6 +387,7 @@ class TestSeedBuilderContract:
 # ─── T016 ────────────────────────────────────────────────────────────────────
 # 이하 클래스는 T016(cache_layer 2단 배선) 수용 기준 검증용이다.
 
+
 class TestCacheIntegration:
     """T016: 2단 캐시 dedup — fortune build·TTS synthesize가 각각 1회만 호출된다."""
 
@@ -368,11 +426,13 @@ class TestCacheIntegration:
         assert len(calls) == 1, f"TTS synthesize가 2회차에 추가 호출됨: {len(calls)}회"
 
     def test_cached_response_identical(self):
-        """동일 request + 동일 store → 응답 완전 동일."""
+        """동일 request + 동일 store → 관측 이벤트를 제외한 도메인 응답은 동일."""
         store = self._fresh_store()
         r1 = get_today_fortune(_BASE_REQ, store=store)
         r2 = get_today_fortune(_BASE_REQ, store=store)
-        assert r1 == r2
+        assert {k: v for k, v in r1.items() if k != "events"} == {
+            k: v for k, v in r2.items() if k != "events"
+        }
 
     def test_fortune_cache_key_format(self):
         """Fortune 캐시 키는 fortune:v1:{seed_hash} 형식이다."""
@@ -458,31 +518,25 @@ class TestCacheEventLayerTags:
     """
 
     @staticmethod
-    def _tts_events(records):
-        return [json.loads(r.message) for r in records if json.loads(r.message).get("layer") == "tts"]
+    def _tts_events(result):
+        return [event for event in result["events"] if event.get("layer") == "tts"]
 
-    def test_first_request_is_fortune_and_tts_cache_miss(self, caplog):
+    def test_first_request_is_fortune_and_tts_cache_miss(self):
         store = InMemoryCacheStore()
-        with caplog.at_level(logging.INFO, logger="fortune_engine.cache_layer"):
-            get_today_fortune(_BASE_REQ, store=store)
-        events = [json.loads(r.message) for r in caplog.records]
-        layers_and_kinds = [(e["layer"], e["event"]) for e in events]
+        events = get_today_fortune(_BASE_REQ, store=store)["events"]
+        layers_and_kinds = [(e.get("layer"), e["event"]) for e in events]
         assert ("fortune", "cache_miss") in layers_and_kinds
         assert ("tts", "cache_miss") in layers_and_kinds
 
-    def test_same_seed_second_call_is_tts_cache_hit(self, caplog):
+    def test_same_seed_second_call_is_tts_cache_hit(self):
         store = InMemoryCacheStore()
         get_today_fortune(_BASE_REQ, store=store)
-        caplog.clear()
-        with caplog.at_level(logging.INFO, logger="fortune_engine.cache_layer"):
-            get_today_fortune(_BASE_REQ, store=store)
-        assert [e["event"] for e in self._tts_events(caplog.records)] == ["cache_hit"]
+        result = get_today_fortune(_BASE_REQ, store=store)
+        assert [e["event"] for e in self._tts_events(result)] == ["cache_hit"]
 
-    def test_changed_seed_is_tts_cache_miss(self, caplog):
+    def test_changed_seed_is_tts_cache_miss(self):
         store = InMemoryCacheStore()
         get_today_fortune(_BASE_REQ, store=store)
-        caplog.clear()
         req2 = {**_BASE_REQ, "date": "2026-06-09"}
-        with caplog.at_level(logging.INFO, logger="fortune_engine.cache_layer"):
-            get_today_fortune(req2, store=store)
-        assert [e["event"] for e in self._tts_events(caplog.records)] == ["cache_miss"]
+        result = get_today_fortune(req2, store=store)
+        assert [e["event"] for e in self._tts_events(result)] == ["cache_miss"]

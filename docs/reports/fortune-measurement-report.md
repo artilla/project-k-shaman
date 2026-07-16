@@ -53,7 +53,7 @@
 
 ## 5. 후속 실측 반영 (2026-05-22)
 
-`tts-ab-kit`에서 `gpt-4o-mini-tts` + `coral` 음색으로 A/B 샘플 5개를 실제 합성했다. 상세는 `tts-ab-kit/tts-ab-results-report.md`를 기준으로 한다.
+`tools/tts`에서 `gpt-4o-mini-tts` + `coral` 음색으로 A/B 샘플 5개를 실제 합성했다. 상세는 `docs/reports/tts/tts-ab-results-report.md`를 기준으로 한다.
 
 - A(현행 LLM narration) full mp3 평균: 42.1초
 - A 신규합성 구간(personalized+semi 세그먼트 합) 평균: 31.0초

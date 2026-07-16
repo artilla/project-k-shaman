@@ -1,7 +1,7 @@
 # 모바일 PWA 화면 IA — 오늘신당
 
 > **Sprint 1 산출물 (T004)** — 화면 구현 implementer 티켓들의 골격 기준 문서.
-> 근거: `docs/planning/Plan.md` §4(핵심 흐름·백로그)·§5(Analytics), `docs/planning/today-shindang-service-plan-v3.md` §11(재생 UX·autoplay 금지)·§12(개인정보), `docs/product/character-sheet-hongyeon.md` §6(아바타 상태), `fortune-engine/fortune-samples.v1.1.json`(mock 데이터).
+> 근거: `docs/planning/Plan.md` §4(핵심 흐름·백로그)·§5(Analytics), `docs/planning/today-shindang-service-plan-v3.md` §11(재생 UX·autoplay 금지)·§12(개인정보), `docs/product/character-sheet-hongyeon.md` §6(아바타 상태), `contracts/fortune/fortune-samples.v1.1.json`(mock 데이터).
 
 ---
 
@@ -440,4 +440,4 @@ S2 입력 화면 하단 배너:
 
 ---
 
-*참조: `docs/planning/Plan.md` §4·§5, `docs/planning/today-shindang-service-plan-v3.md` §11·§12, `docs/product/character-sheet-hongyeon.md` §4·§6, `fortune-engine/fortune-samples.v1.1.json`*
+*참조: `docs/planning/Plan.md` §4·§5, `docs/planning/today-shindang-service-plan-v3.md` §11·§12, `docs/product/character-sheet-hongyeon.md` §4·§6, `contracts/fortune/fortune-samples.v1.1.json`*

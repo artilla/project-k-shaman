@@ -1,3 +1,0 @@
-# backend (ADR-0003) — fortune-engine 루트 requirements.txt에 더해 필요
-fastapi>=0.110
-uvicorn>=0.29

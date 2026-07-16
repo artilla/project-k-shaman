@@ -1,4 +1,5 @@
 """T001: fortune-schema.v1.1 validator regression tests."""
+
 import copy
 import json
 from pathlib import Path
@@ -6,8 +7,12 @@ from pathlib import Path
 import jsonschema
 import pytest
 
-SCHEMA_PATH = Path(__file__).parent.parent / "fortune-engine" / "fortune-schema.v1.1.json"
-SAMPLES_PATH = Path(__file__).parent.parent / "fortune-engine" / "fortune-samples.v1.1.json"
+SCHEMA_PATH = (
+    Path(__file__).parent.parent / "contracts" / "fortune" / "fortune-schema.v1.1.json"
+)
+SAMPLES_PATH = (
+    Path(__file__).parent.parent / "contracts" / "fortune" / "fortune-samples.v1.1.json"
+)
 
 _VALID_SAMPLE = {
     "schema_version": "fortune.v1.1",
@@ -120,13 +125,17 @@ class TestSummaryConstraint:
 
 
 class TestScoresRange:
-    @pytest.mark.parametrize("field", ["love", "money", "work", "relationship", "condition"])
+    @pytest.mark.parametrize(
+        "field", ["love", "money", "work", "relationship", "condition"]
+    )
     def test_score_above_100_rejected(self, schema, field):
         sample = _valid(schema)
         sample["scores"][field] = 101
         assert _errors(schema, sample), f"scores.{field}=101이 거부되지 않음"
 
-    @pytest.mark.parametrize("field", ["love", "money", "work", "relationship", "condition"])
+    @pytest.mark.parametrize(
+        "field", ["love", "money", "work", "relationship", "condition"]
+    )
     def test_score_below_0_rejected(self, schema, field):
         sample = _valid(schema)
         sample["scores"][field] = -1

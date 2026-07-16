@@ -1,0 +1,140 @@
+{
+  "evaluated_at": "2026-05-22T13:24:23.039Z",
+  "rubric": "docs/reports/tts/listening-qa-rubric.md",
+  "decision_hint": {
+    "status": "scores_line_middle",
+    "text": "scores_line 중간안 후보: B scores 3.00, 연결 3.00"
+  },
+  "rows": [
+    {
+      "seed": "h_love_001",
+      "topic": "love",
+      "version": "A",
+      "scores": {
+        "naturalness": 3,
+        "connection": 4,
+        "scores": 3,
+        "character": 4,
+        "overall": 3
+      },
+      "note": ""
+    },
+    {
+      "seed": "h_love_001",
+      "topic": "love",
+      "version": "B",
+      "scores": {
+        "naturalness": 4,
+        "connection": 3,
+        "scores": 3,
+        "character": 3,
+        "overall": 4
+      },
+      "note": ""
+    },
+    {
+      "seed": "h_money_001",
+      "topic": "money",
+      "version": "A",
+      "scores": {
+        "naturalness": 3,
+        "connection": 3,
+        "scores": 3,
+        "character": 3,
+        "overall": 3
+      },
+      "note": ""
+    },
+    {
+      "seed": "h_money_001",
+      "topic": "money",
+      "version": "B",
+      "scores": {
+        "naturalness": 3,
+        "connection": 3,
+        "scores": 3,
+        "character": 3,
+        "overall": 4
+      },
+      "note": ""
+    },
+    {
+      "seed": "h_work_001",
+      "topic": "work",
+      "version": "A",
+      "scores": {
+        "naturalness": 2,
+        "connection": 2,
+        "scores": 2,
+        "character": 2,
+        "overall": 2
+      },
+      "note": ""
+    },
+    {
+      "seed": "h_work_001",
+      "topic": "work",
+      "version": "B",
+      "scores": {
+        "naturalness": 4,
+        "connection": 4,
+        "scores": 4,
+        "character": 4,
+        "overall": 4
+      },
+      "note": ""
+    },
+    {
+      "seed": "h_rel_001",
+      "topic": "relationship",
+      "version": "A",
+      "scores": {
+        "naturalness": 2,
+        "connection": 3,
+        "scores": 3,
+        "character": 2,
+        "overall": 3
+      },
+      "note": ""
+    },
+    {
+      "seed": "h_rel_001",
+      "topic": "relationship",
+      "version": "B",
+      "scores": {
+        "naturalness": 2,
+        "connection": 2,
+        "scores": 2,
+        "character": 2,
+        "overall": 2
+      },
+      "note": ""
+    },
+    {
+      "seed": "h_total_001",
+      "topic": "total",
+      "version": "A",
+      "scores": {
+        "naturalness": 4,
+        "connection": 4,
+        "scores": 4,
+        "character": 4,
+        "overall": 4
+      },
+      "note": ""
+    },
+    {
+      "seed": "h_total_001",
+      "topic": "total",
+      "version": "B",
+      "scores": {
+        "naturalness": 3,
+        "connection": 3,
+        "scores": 3,
+        "character": 3,
+        "overall": 4
+      },
+      "note": ""
+    }
+  ]
+}

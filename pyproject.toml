@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shindang"
+version = "0.1.0"
+description = "오늘신당 same-origin application"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  "fastapi==0.128.6",
+  "jsonschema==4.26.0",
+  "openai==2.44.0",
+  "uvicorn==0.40.0",
+]
+
+[tool.fastapi]
+entrypoint = "shindang.web.app:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["shindang*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+
+[tool.ruff]
+target-version = "py313"
+extend-exclude = ["frontend/node_modules", "frontend/public/static"]

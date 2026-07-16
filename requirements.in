@@ -1,5 +1,0 @@
-# Direct runtime dependencies. Regenerate requirements.lock with Python 3.13 and pip-tools.
-fastapi==0.128.6
-jsonschema==4.26.0
-openai==2.44.0
-uvicorn==0.40.0

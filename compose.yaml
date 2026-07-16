@@ -8,6 +8,7 @@ services:
     environment:
       SESSION_SECRET: ${SESSION_SECRET:-local-development-session-secret}
       SHINDANG_ENV: ${SHINDANG_ENV:-development}
+      SHINDANG_PUBLIC_BASE_URL: ${SITE_ADDRESS:-http://127.0.0.1}
       TRUST_PROXY: "1"
       TTS_BACKEND: ${TTS_BACKEND:-mock}
     expose:

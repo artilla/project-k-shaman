@@ -10,7 +10,7 @@ require_file() {
 }
 
 for file in \
-  Dockerfile .dockerignore compose.yaml \
+  Dockerfile .dockerignore compose.yaml requirements-build.lock \
   deploy/Caddyfile deploy/compose.aws.yaml \
   deploy/remote_deploy.sh deploy/remote_rollback.sh \
   infra/cloudformation/staging.yaml \
@@ -30,7 +30,7 @@ if ! awk '
     runtime_user_seen = 0
     next
   }
-  /^[[:space:]]*RUN[[:space:]]+chmod[[:space:]]+-R[[:space:]]+a\+rX[[:space:]]+frontend\/dist[[:space:]]+fortune-engine\/web\/static([[:space:]]|\\$)/ {
+  /^[[:space:]]*RUN[[:space:]]+chmod[[:space:]]+-R[[:space:]]+a\+rX[[:space:]]+frontend\/dist([[:space:]]|\\$)/ {
     if (runtime_user_seen) exit 1
     asset_mode_set = 1
   }
@@ -131,8 +131,10 @@ grep -q 's3:GetObjectVersion' infra/cloudformation/staging.yaml
 grep -q 'DOCKER_CONFIG=' deploy/remote_deploy.sh
 grep -q 'ECR_REPOSITORY_URI@sha256:<64hex>' deploy/remote_deploy.sh
 compose_env_contract="SHINDANG_ENV: \${DEPLOY_ENV:?"
+public_origin_contract="SHINDANG_PUBLIC_BASE_URL: \${SITE_ADDRESS:?"
 github_env_contract="DEPLOY_ENV: \${{ vars.SHINDANG_ENV }}"
 grep -Fq "$compose_env_contract" deploy/compose.aws.yaml
+grep -Fq "$public_origin_contract" deploy/compose.aws.yaml
 grep -Fq "$github_env_contract" .github/workflows/deploy-staging.yml
 grep -Fq "$github_env_contract" .github/workflows/promote-production.yml
 

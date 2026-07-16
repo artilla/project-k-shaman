@@ -1,8 +1,12 @@
 # ADR-0003: 프론트엔드/백엔드 구조 분리
 
-- 상태: 승인 (2026-07-08)
+- 상태: 일부 대체됨 (2026-07-16, ADR-0006)
 - 결정자: artilla
 - 관련: docs/planning/Plan.md §2 (프론트엔드 스택 결정), docs/research/production-readiness.md §3 (서버 런타임 교체 P0)
+
+> React/FastAPI와 same-origin 결정은 유지한다. `backend/`와 `fortune-engine/`를
+> 별도 최상위 소스 트리로 두는 결정은 ADR-0006의 `src/shindang` 모듈러
+> 모놀리스로 대체되었다. 아래 내용은 2026-07-08 당시의 이행 기록이다.
 
 ## 맥락
 

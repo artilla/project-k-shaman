@@ -1,4 +1,4 @@
-// 꿈 해몽 — 타입 + API. 상징 풀이는 서버(backend/dream.py)가 조립한다 (게이트 + LLM 교체 지점).
+// 꿈 해몽 — 타입 + API. 상징 풀이는 서버 domain/dream.py가 조립한다 (게이트 + LLM 교체 지점).
 import type { ScriptSegment } from "./types";
 
 export const DREAM_SYMBOL_LABELS = [

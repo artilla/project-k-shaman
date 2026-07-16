@@ -215,7 +215,7 @@ tts:v1:{provider}:{voice_id}:{script_hash}:{speed}:{emotion}
 
 ## 13. 단위 경제 숫자표 (실측 + 컨텍스트 캐시 + 공개 가격)
 
-> 주의: 아래 단가는 `docs/reports/fortune-measurement-report.md`, `docs/reports/token-optimization-report.md`, `fortune-engine/tts-ab-kit/tts-ab-results-report.md`의 측정값과 2026-05 공개 가격을 결합한 **추정치**다. 토큰은 Gemini 공식 토크나이저가 아닌 o200k 프록시이며, TTS는 `gpt-4o-mini-tts` + `coral` 음색의 5개 샘플 실측이다. 실제 의사결정 전 Gemini `count_tokens`, provider usage 로그, 사내 협상 단가로 교체해야 한다. 환율은 $1 = ₩1,380 가정. 상세 민감도 계산은 `docs/reports/unit-economics-simulator.xlsx`를 기준으로 한다.
+> 주의: 아래 단가는 `docs/reports/fortune-measurement-report.md`, `docs/reports/token-optimization-report.md`, `docs/reports/tts/tts-ab-results-report.md`의 측정값과 2026-05 공개 가격을 결합한 **추정치**다. 토큰은 Gemini 공식 토크나이저가 아닌 o200k 프록시이며, TTS는 `gpt-4o-mini-tts` + `coral` 음색의 5개 샘플 실측이다. 실제 의사결정 전 Gemini `count_tokens`, provider usage 로그, 사내 협상 단가로 교체해야 한다. 환율은 $1 = ₩1,380 가정. 상세 민감도 계산은 `docs/reports/unit-economics-simulator.xlsx`를 기준으로 한다.
 
 ### 13.1 실측 기반 단가 가정
 
@@ -258,10 +258,10 @@ tts:v1:{provider}:{voice_id}:{script_hash}:{speed}:{emotion}
 
 **변경 이력(2026-05-22)**:
 
-- v3 최초 공개가 가정($0.012/miss, 2.0% break-even)을 `fortune-engine` 샘플 15개 실측 기본값($0.0096/miss, 1.63% break-even)으로 갱신했다.
-- `token-optimization-report.md` 결과를 반영해 컨텍스트 캐시를 baseline으로 올리고, 기본값을 $0.0091/miss, 1.54% break-even으로 갱신했다.
-- `tts-ab-results-report.md`의 실제 `coral` 합성 결과를 반영해 TTS 신규합성 길이를 28초에서 31초로 보정하고, 기본값을 $0.0098/miss, 1.66% break-even으로 갱신했다.
-- `listening-decision-report.md`의 청취 QA 결과를 반영해 v1.1은 `scores_line` 중간안을 채택했다.
+- v3 최초 공개가 가정($0.012/miss, 2.0% break-even)을 `contracts/fortune` 샘플 15개 실측 기본값($0.0096/miss, 1.63% break-even)으로 갱신했다.
+- `docs/reports/token-optimization-report.md` 결과를 반영해 컨텍스트 캐시를 baseline으로 올리고, 기본값을 $0.0091/miss, 1.54% break-even으로 갱신했다.
+- `docs/reports/tts/tts-ab-results-report.md`의 실제 `coral` 합성 결과를 반영해 TTS 신규합성 길이를 28초에서 31초로 보정하고, 기본값을 $0.0098/miss, 1.66% break-even으로 갱신했다.
+- `docs/reports/tts/listening-decision-report.md`의 청취 QA 결과를 반영해 v1.1은 `scores_line` 중간안을 채택했다.
 - v1.1 출력 토큰을 o200k 프록시로 측정(580 → **278**)해 **v1.1 잠정치**로 baseline에 반영했다. 기본값을 $0.0098/miss·1.66% → **$0.0090/miss·1.54% break-even**으로 갱신(정식 10k 월 $1,266 → $1,175). Gemini `count_tokens` 정식 재측정은 TBD 유지.
 
 **TBD(사내 입력 필요)**: Gemini 공식 `count_tokens` 재측정, 컨텍스트 캐시 최소 토큰 요건·TTL·실제 청구 방식 확인, provider usage 로그 기반 실제 청구액 확인, 최종 홍연 음색 재측정, 사전합성 세그먼트 상각 기준, 고정 운영비(서버 baseline·분석툴·인건비), provider 협상 단가.
@@ -391,7 +391,7 @@ Unity WebGL은 초기 로딩·모바일 성능 부담이 커 MVP에서 제외하
 - MVP 캐릭터 수: **1종(홍연)** (§7)
 - 개인정보 처리: **서버 저장(동의 기반) + HMAC 캐시 키 분리** (§12)
 - 단위 경제: **샌드박스 실측 기본값 + 컨텍스트 캐시 baseline + 공개 가격 추정표** 작성, 시나리오·break-even 제시 (§13)
-- narration v1.1: **`scores_line` 중간안 채택**. `narration` 배열은 LLM 출력에서 제거하고 서버가 조립 (§13, `listening-decision-report.md`)
+- narration v1.1: **`scores_line` 중간안 채택**. `narration` 배열은 LLM 출력에서 제거하고 서버가 조립 (§13, `docs/reports/tts/listening-decision-report.md`)
 - 공유: **정적 카드부터** (§16)
 - autoplay: **자동 재생 금지 전제, 탭으로 컨텍스트 오픈** (§11.2)
 

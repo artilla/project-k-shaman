@@ -1,35 +1,54 @@
-"""T013/T018: TTS adapter — determinism, cache key format, mock/real backend, events."""
-import importlib.util
+"""TTS adapter — determinism, cache key format, mock/real backend, events."""
+
 import os
 from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).parent.parent
-TTS_ADAPTER_PATH = ROOT / "fortune-engine" / "tts_adapter.py"
-
-_spec = importlib.util.spec_from_file_location("tts_adapter", TTS_ADAPTER_PATH)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-synthesize = _mod.synthesize
+from shindang.adapters import tts as _mod
+from shindang.adapters.tts import synthesize
 
 _SAMPLE_SCRIPT = [
-    {"segment": "greeting", "type": "presynth",
-     "text": "오늘신당에 오셨군요. 홍연이 오늘의 기운을 무대 위에 올려볼게요."},
-    {"segment": "summary", "type": "personalized",
-     "text": "오늘은 마음이 먼저 움직이는 날이에요. 솔직한 한마디가 관계의 온도를 한 칸 올려줘요."},
-    {"segment": "scores", "type": "personalized",
-     "text": "연애운이 활짝 열렸고 인간관계도 좋아요. 다만 컨디션은 조금 낮으니 무리하진 마세요."},
-    {"segment": "advice", "type": "personalized",
-     "text": "마음에 둔 사람에게 짧은 안부 한마디를 먼저 건네 보세요."},
-    {"segment": "lucky", "type": "semi",
-     "text": "오늘의 행운 색은 코랄 핑크, 행운 아이템은 작은 손거울이에요."},
-    {"segment": "avoid", "type": "personalized",
-     "text": "지난 대화를 너무 곱씹으며 혼자 결론 내리는 일은 잠시 미뤄두세요."},
-    {"segment": "blessing", "type": "presynth",
-     "text": "오늘 하루, 홍연이 손님 곁에서 기운을 더해드릴게요."},
-    {"segment": "ending", "type": "presynth",
-     "text": "내일도 무대는 열려 있어요. 오늘도 좋은 하루 보내요."},
+    {
+        "segment": "greeting",
+        "type": "presynth",
+        "text": "오늘신당에 오셨군요. 홍연이 오늘의 기운을 무대 위에 올려볼게요.",
+    },
+    {
+        "segment": "summary",
+        "type": "personalized",
+        "text": "오늘은 마음이 먼저 움직이는 날이에요. 솔직한 한마디가 관계의 온도를 한 칸 올려줘요.",
+    },
+    {
+        "segment": "scores",
+        "type": "personalized",
+        "text": "연애운이 활짝 열렸고 인간관계도 좋아요. 다만 컨디션은 조금 낮으니 무리하진 마세요.",
+    },
+    {
+        "segment": "advice",
+        "type": "personalized",
+        "text": "마음에 둔 사람에게 짧은 안부 한마디를 먼저 건네 보세요.",
+    },
+    {
+        "segment": "lucky",
+        "type": "semi",
+        "text": "오늘의 행운 색은 코랄 핑크, 행운 아이템은 작은 손거울이에요.",
+    },
+    {
+        "segment": "avoid",
+        "type": "personalized",
+        "text": "지난 대화를 너무 곱씹으며 혼자 결론 내리는 일은 잠시 미뤄두세요.",
+    },
+    {
+        "segment": "blessing",
+        "type": "presynth",
+        "text": "오늘 하루, 홍연이 손님 곁에서 기운을 더해드릴게요.",
+    },
+    {
+        "segment": "ending",
+        "type": "presynth",
+        "text": "내일도 무대는 열려 있어요. 오늘도 좋은 하루 보내요.",
+    },
 ]
 
 
@@ -65,8 +84,13 @@ class TestCacheKey:
     """AC2: cacheKey == tts:v1:{provider}:{voice_id}:{script_hash}:{speed}:{emotion}"""
 
     def test_cache_key_token_order(self):
-        result = synthesize(_SAMPLE_SCRIPT, provider="openai", voice="coral",
-                            speed=1.0, emotion="bright")
+        result = synthesize(
+            _SAMPLE_SCRIPT,
+            provider="openai",
+            voice="coral",
+            speed=1.0,
+            emotion="bright",
+        )
         parts = result["cacheKey"].split(":")
         assert parts[0] == "tts"
         assert parts[1] == "v1"
@@ -109,13 +133,17 @@ class TestDeterminism:
         assert r1 == r2
 
     def test_different_script_different_cache_key(self):
-        script2 = [{"segment": "greeting", "type": "presynth", "text": "다른 텍스트입니다."}]
+        script2 = [
+            {"segment": "greeting", "type": "presynth", "text": "다른 텍스트입니다."}
+        ]
         r1 = synthesize(_SAMPLE_SCRIPT)
         r2 = synthesize(script2)
         assert r1["cacheKey"] != r2["cacheKey"]
 
     def test_different_script_different_audio_url(self):
-        script2 = [{"segment": "greeting", "type": "presynth", "text": "다른 텍스트입니다."}]
+        script2 = [
+            {"segment": "greeting", "type": "presynth", "text": "다른 텍스트입니다."}
+        ]
         r1 = synthesize(_SAMPLE_SCRIPT)
         r2 = synthesize(script2)
         assert r1["audioUrl"] != r2["audioUrl"]
@@ -256,7 +284,10 @@ class TestEventInstrumentation:
     def test_events_fire_in_order(self):
         events = []
         synthesize(_SAMPLE_SCRIPT, event_sink=events.append)
-        assert [e["event"] for e in events] == ["tts_generate_start", "tts_generate_complete"]
+        assert [e["event"] for e in events] == [
+            "tts_generate_start",
+            "tts_generate_complete",
+        ]
 
     def test_start_event_has_cache_key(self):
         events = []
@@ -319,16 +350,25 @@ class TestOpenAIBackendContract:
     )
     def test_real_synthesis_produces_audio_and_events(self):
         tiny_script = [
-            {"segment": "greeting", "type": "presynth", "text": "안녕하세요, 오늘의 손님."},
+            {
+                "segment": "greeting",
+                "type": "presynth",
+                "text": "안녕하세요, 오늘의 손님.",
+            },
         ]
         events = []
-        result = synthesize(tiny_script, backend=_mod.openai_backend, event_sink=events.append)
+        result = synthesize(
+            tiny_script, backend=_mod.openai_backend, event_sink=events.append
+        )
 
         assert result["audioUrl"].startswith("file://")
-        audio_path = Path(result["audioUrl"][len("file://"):])
+        audio_path = Path(result["audioUrl"][len("file://") :])
         try:
             assert audio_path.exists()
             assert audio_path.stat().st_size > 0
-            assert [e["event"] for e in events] == ["tts_generate_start", "tts_generate_complete"]
+            assert [e["event"] for e in events] == [
+                "tts_generate_start",
+                "tts_generate_complete",
+            ]
         finally:
             audio_path.unlink(missing_ok=True)

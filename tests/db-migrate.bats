@@ -2,7 +2,9 @@
 # tests/db-migrate.bats — scripts/db_migrate.sh 회귀 (리뷰 15차~16차 P1: DB runner 계약)
 #
 # disposable PostgreSQL 클러스터(초기화→기동→폐기)에서 실행한다.
-# 서버 바이너리(initdb/pg_ctl)가 없으면 전체 skip — 게이트를 막지 않는다.
+# 서버 바이너리(initdb/pg_ctl)가 없으면 기본 로컬 실행은 전체 skip한다.
+# REQUIRE_PG16=1인 CI/deploy 게이트에서는 도구 부재, init/start 실패, 실제 서버가
+# PostgreSQL 16이 아닌 경우를 모두 fail-closed로 처리한다.
 # root로 실행되면(컨테이너 CI) postgres 시스템 사용자로 클러스터를 돌린다.
 #
 # 리뷰 16차 P2: fixture 격리 — 테스트는 실제 db/migrations/를 절대 만지지 않는다.
@@ -10,12 +12,23 @@
 # (병렬 실행·중단이 저장소와 다른 테스트를 오염시키지 않음).
 
 _pg_bin() {
-  local d
+  local d version
   for d in /usr/lib/postgresql/*/bin /opt/homebrew/opt/postgresql@*/bin \
            /usr/local/opt/postgresql@*/bin /usr/local/bin /opt/homebrew/bin; do
-    [ -x "$d/initdb" ] && [ -x "$d/pg_ctl" ] && { echo "$d"; return 0; }
+    [ -x "$d/initdb" ] && [ -x "$d/pg_ctl" ] || continue
+    if [ "${REQUIRE_PG16:-0}" = "1" ]; then
+      [ -x "$d/postgres" ] && [ -x "$d/createdb" ] && [ -x "$d/psql" ] || continue
+      version="$("$d/postgres" --version 2>/dev/null)" || continue
+      [[ "$version" =~ ^postgres\ \(PostgreSQL\)\ 16([.]|$) ]] || continue
+    fi
+    echo "$d"
+    return 0
   done
   return 1
+}
+
+_require_pg16() {
+  [ "${REQUIRE_PG16:-0}" = "1" ]
 }
 
 # root면 postgres 사용자로, 아니면 현재 사용자로 실행
@@ -32,8 +45,18 @@ setup_file() {
   # 실패한다 (CoreFoundation 로케일 초기화) — 비대화형/자동화 환경에서 재현.
   # C 로케일로 고정한다 (Linux에는 무해).
   export LC_ALL="${LC_ALL:-C}"
-  PGBIN="$(_pg_bin)" || skip "PostgreSQL 서버 바이너리 없음 — migration 회귀 skip"
+  if ! PGBIN="$(_pg_bin)"; then
+    if _require_pg16; then
+      echo "REQUIRE_PG16=1: PostgreSQL 16 서버/클라이언트 바이너리가 필요합니다" >&2
+      return 1
+    fi
+    skip "PostgreSQL 서버 바이너리 없음 — migration 회귀 skip"
+  fi
   if [ "$(id -u)" = "0" ] && ! id postgres >/dev/null 2>&1; then
+    if _require_pg16; then
+      echo "REQUIRE_PG16=1: root 실행에는 postgres 시스템 사용자가 필요합니다" >&2
+      return 1
+    fi
     skip "root인데 postgres 사용자 없음 — skip"
   fi
   export PGBIN
@@ -41,10 +64,24 @@ setup_file() {
   export PGT_PORT=$(( 54400 + RANDOM % 100 ))
   chmod 777 "$PGT"
   [ "$(id -u)" = "0" ] && chown postgres "$PGT"
-  _as_pg "'$PGBIN/initdb' -D '$PGT/data' -A trust -U postgres" > "$PGT/initdb.log" 2>&1 \
-    || skip "initdb 실패 — skip"
-  _as_pg "'$PGBIN/pg_ctl' -D '$PGT/data' -l '$PGT/pg.log' -o '-p $PGT_PORT -c listen_addresses=127.0.0.1 -k $PGT' start" >/dev/null \
-    || skip "pg_ctl start 실패 — skip"
+  if ! _as_pg "'$PGBIN/initdb' -D '$PGT/data' -A trust -U postgres" > "$PGT/initdb.log" 2>&1; then
+    _require_pg16 && { echo "REQUIRE_PG16=1: initdb 실패" >&2; return 1; }
+    skip "initdb 실패 — skip"
+  fi
+  if ! _as_pg "'$PGBIN/pg_ctl' -D '$PGT/data' -l '$PGT/pg.log' -o '-p $PGT_PORT -c listen_addresses=127.0.0.1 -k $PGT' start" >/dev/null; then
+    _require_pg16 && { echo "REQUIRE_PG16=1: pg_ctl start 실패" >&2; return 1; }
+    skip "pg_ctl start 실패 — skip"
+  fi
+  if _require_pg16; then
+    server_version_num="$("$PGBIN/psql" -X -h 127.0.0.1 -p "$PGT_PORT" -U postgres -d postgres -tAc 'show server_version_num')" || {
+      echo "REQUIRE_PG16=1: PostgreSQL 서버 버전을 확인할 수 없습니다" >&2
+      return 1
+    }
+    [[ "$server_version_num" =~ ^16[0-9]{4}$ ]] || {
+      echo "REQUIRE_PG16=1: PostgreSQL 16 서버가 필요합니다 (server_version_num=$server_version_num)" >&2
+      return 1
+    }
+  fi
   export REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
 }
 
@@ -55,7 +92,10 @@ teardown_file() {
 }
 
 setup() {
-  [ -n "${PGT:-}" ] || skip "클러스터 없음"
+  if [ -z "${PGT:-}" ]; then
+    _require_pg16 && { echo "REQUIRE_PG16=1: disposable PostgreSQL 16 클러스터가 없습니다" >&2; return 1; }
+    skip "클러스터 없음"
+  fi
   TEST_DB="t$$_${BATS_TEST_NUMBER}"
   _as_pg "'$PGBIN/createdb' -h 127.0.0.1 -p $PGT_PORT -U postgres $TEST_DB"
   ENVF="$PGT/${TEST_DB}.env"

@@ -1,24 +1,11 @@
-"""T015: cache_layer — get_or_compute dedup, InMemoryCacheStore, FileCacheStore, key helpers."""
-import importlib.util
+"""캐시 유스케이스와 로컬 어댑터 회귀 테스트."""
+
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).parent.parent
-CACHE_LAYER_PATH = ROOT / "fortune-engine" / "cache_layer.py"
-TTS_ADAPTER_PATH = ROOT / "fortune-engine" / "tts_adapter.py"
-
-_spec = importlib.util.spec_from_file_location("cache_layer", CACHE_LAYER_PATH)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-get_or_compute = _mod.get_or_compute
-InMemoryCacheStore = _mod.InMemoryCacheStore
-FileCacheStore = _mod.FileCacheStore
-fortune_cache_key = _mod.fortune_cache_key
-
-_tts_spec = importlib.util.spec_from_file_location("tts_adapter", TTS_ADAPTER_PATH)
-_tts_mod = importlib.util.module_from_spec(_tts_spec)
-_tts_spec.loader.exec_module(_tts_mod)
-synthesize = _tts_mod.synthesize
+from shindang.adapters.cache import FileCacheStore, InMemoryCacheStore
+from shindang.adapters.tts import synthesize
+from shindang.application.cache import fortune_cache_key, get_or_compute
 
 _SAMPLE_SCRIPT = [{"segment": "greeting", "type": "presynth", "text": "안녕하세요."}]
 

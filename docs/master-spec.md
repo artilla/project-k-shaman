@@ -62,19 +62,19 @@
 
 ```
 사용자 입력(생년월일 등)
-  → seed_builder (T011)
-  → fortune API (LLM · 베타는 mock: fortune_api_mock, T010)
-  → fortune-schema v1.1 검증 (validate_fortune, T001)
-  → narration composer (T003 — greeting→summary→scores_line→…→ending, "scores_line 중간안" 확정)
-  → TTS adapter (T013 · 프로바이더/음색 = ADR-0001)
-  → cache layer (T015 — presynth 우선, 키는 HMAC 해시만)
+  → domain.seed + HMAC adapter (T011)
+  → application.playback + domain.fortune (베타 mock, T010)
+  → contracts/fortune schema v1.1 검증 (T001)
+  → domain.narration (T003 — greeting→summary→scores_line→…→ending)
+  → adapters.tts (T013 · 프로바이더/음색 = ADR-0001)
+  → application.cache (T015 — presynth 우선, 키는 HMAC 해시만)
   → 재생 (모바일 웹/PWA · 첫 재생은 사용자 탭으로 오디오 컨텍스트 오픈, v3 §11)
   + share card (T006)
 ```
 
-**컴포넌트 ↔ 테스트 매핑**: `fortune-engine/` — `seed_builder.py`·`fortune_api_mock.py`·
-`validate_fortune.py`·`tts_adapter.py`·`cache_layer.py`·`share_card.py`, 각
-`tests/test_*.py` (T008 엔진 smoke 포함). 통합: T012(mock+seed) → T014(api+tts) → T016(api+cache).
+**컴포넌트 ↔ 테스트 매핑**: 제품 코드는 `src/shindang/{domain,application,adapters,web}`,
+공유 계약은 `contracts/fortune/`, 오프라인 검증은 `tools/fortune/`에 둔다. 각
+`tests/test_*.py`와 `tests/test_architecture.py`가 기능·의존성 방향을 검증한다.
 
 **개인정보/데이터 경계** (v3 §12·§18): 생년월일·최근 선택 기록은 **서버 저장(동의 기반)** 단일
 경로. 캐시 키는 **HMAC 해시만** 사용 — 원문 개인정보가 캐시 계층에 닿지 않는다.
@@ -87,7 +87,7 @@
 > 자동 허용(loop) vs 인간 승인(hold). 판단 기준: "잘못됐을 때 즉시 되돌릴 수 있는가?"
 > 상세는 ralph/docs/runbook.md §4 참조.
 
-- **자동 허용(loop)**: `fortune-engine/` 코드·mock·테스트, 문서/티켓 초안, 하네스 스크립트 보수.
+- **자동 허용(loop)**: `src/shindang/` 코드·mock·테스트, 문서/티켓 초안, 하네스 스크립트 보수.
   (전부 git revert 가능)
 - **인간 승인(hold)**: 실 프로바이더 API 키·과금 호출(TTS/LLM 계약 전환), 개인정보 스키마·저장
   경로 변경(§2 데이터 경계), 가격·단위경제 가정 변경(v3 §13), 외부 배포/공개.

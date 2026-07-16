@@ -1,16 +1,9 @@
 """T011: Seed builder — determinism, structure, PII non-leakage, bucketing, hash_fn injection."""
+
 import hashlib
 import json
-import importlib.util
-from pathlib import Path
 
-ROOT = Path(__file__).parent.parent
-SEED_BUILDER_PATH = ROOT / "fortune-engine" / "seed_builder.py"
-
-_spec = importlib.util.spec_from_file_location("seed_builder", SEED_BUILDER_PATH)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-build_seed = _mod.build_seed
+from shindang.domain.seed import build_seed
 
 _BASE_REQ = {
     "date": "2026-06-02",
@@ -91,24 +84,60 @@ class TestDeterminism:
 
 
 class TestBucketing:
-    """AC3: birth_hour is bucketed — exact hour never forwarded (Plan.md §11)."""
+    """AC3: birth_hour is bucketed — exact hour never forwarded (docs/planning/Plan.md §11)."""
 
     def test_same_bucket_same_seed_hash(self):
         """birth_hour=7 and birth_hour=10 are both 'morning' → same seed_hash."""
-        r7 = {**_BASE_REQ, "birth_year": 1990, "birth_month": 3, "birth_day": 15, "birth_hour": 7}
-        r10 = {**_BASE_REQ, "birth_year": 1990, "birth_month": 3, "birth_day": 15, "birth_hour": 10}
+        r7 = {
+            **_BASE_REQ,
+            "birth_year": 1990,
+            "birth_month": 3,
+            "birth_day": 15,
+            "birth_hour": 7,
+        }
+        r10 = {
+            **_BASE_REQ,
+            "birth_year": 1990,
+            "birth_month": 3,
+            "birth_day": 15,
+            "birth_hour": 10,
+        }
         assert build_seed(r7)["seed_hash"] == build_seed(r10)["seed_hash"]
 
     def test_different_bucket_different_seed_hash(self):
         """birth_hour=7 (morning) vs birth_hour=19 (evening) → different seed_hash."""
-        r_morning = {**_BASE_REQ, "birth_year": 1990, "birth_month": 3, "birth_day": 15, "birth_hour": 7}
-        r_evening = {**_BASE_REQ, "birth_year": 1990, "birth_month": 3, "birth_day": 15, "birth_hour": 19}
+        r_morning = {
+            **_BASE_REQ,
+            "birth_year": 1990,
+            "birth_month": 3,
+            "birth_day": 15,
+            "birth_hour": 7,
+        }
+        r_evening = {
+            **_BASE_REQ,
+            "birth_year": 1990,
+            "birth_month": 3,
+            "birth_day": 15,
+            "birth_hour": 19,
+        }
         assert build_seed(r_morning)["seed_hash"] != build_seed(r_evening)["seed_hash"]
 
     def test_night_bucket_spans_midnight(self):
         """birth_hour=23 and birth_hour=2 are both 'night' → same seed_hash."""
-        r23 = {**_BASE_REQ, "birth_year": 1990, "birth_month": 3, "birth_day": 15, "birth_hour": 23}
-        r2 = {**_BASE_REQ, "birth_year": 1990, "birth_month": 3, "birth_day": 15, "birth_hour": 2}
+        r23 = {
+            **_BASE_REQ,
+            "birth_year": 1990,
+            "birth_month": 3,
+            "birth_day": 15,
+            "birth_hour": 23,
+        }
+        r2 = {
+            **_BASE_REQ,
+            "birth_year": 1990,
+            "birth_month": 3,
+            "birth_day": 15,
+            "birth_hour": 2,
+        }
         assert build_seed(r23)["seed_hash"] == build_seed(r2)["seed_hash"]
 
 
@@ -119,7 +148,9 @@ class TestPIILeakage:
         result = build_seed(_BIRTH_REQ)
         result_str = json.dumps(result, ensure_ascii=False)
         for field in ("birth_year", "birth_month", "birth_day", "birth_hour"):
-            assert field not in result_str, f"PII field name '{field}' found in output JSON"
+            assert field not in result_str, (
+                f"PII field name '{field}' found in output JSON"
+            )
 
     def test_birth_date_string_not_verbatim_in_seed_hash(self):
         """'1990-03-15' should never appear verbatim in seed_hash."""

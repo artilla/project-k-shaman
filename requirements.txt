@@ -1,4 +1,0 @@
-jsonschema>=4.0.0
-# T018: fortune-engine/tts_adapter.py openai_backend — only imported when
-# explicitly injected (real, billed synthesis). Not needed for the mock path.
-openai>=1.0.0

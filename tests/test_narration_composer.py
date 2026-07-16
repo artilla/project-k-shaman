@@ -1,37 +1,48 @@
 """T003: narration_composer ↔ 캐릭터 시트 §4 / 프롬프트 v1.1 정합 회귀 테스트.
 
-정본 출처: fortune-engine/character-sheet-hongyeon.md §4 narration 조립 순서
-  (= fortune-prompt-hongyeon.v1.1.md §변경요약과 동일)
+정본 출처: docs/product/character-sheet-hongyeon.md §4 narration 조립 순서
+  (= docs/prompts/fortune-prompt-hongyeon.v1.1.md §변경요약과 동일)
 조립 순서: greeting → summary → scores → advice → lucky → avoid → blessing → ending
 """
-import importlib.util
+
 import json
 from pathlib import Path
 
-# ── 경로 상수 ────────────────────────────────────────────────
-ROOT = Path(__file__).parent.parent
-COMPOSER_PATH = ROOT / "fortune-engine" / "tts-ab-kit" / "narration_composer.py"
-SAMPLES_PATH = ROOT / "fortune-engine" / "fortune-samples.v1.1.json"
+from shindang.domain.narration import PRESYNTH, compose_narration
 
-# ── importlib로 하이픈 포함 경로 모듈 로드 ────────────────────
-_spec = importlib.util.spec_from_file_location("narration_composer", COMPOSER_PATH)
-_mod = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_mod)
-compose_narration = _mod.compose_narration
-PRESYNTH = _mod.PRESYNTH
+ROOT = Path(__file__).parent.parent
+SAMPLES_PATH = ROOT / "contracts" / "fortune" / "fortune-samples.v1.1.json"
 
 # ── 테스트 픽스처 ─────────────────────────────────────────────
 _FIXTURE = {
-    "scores": {"love": 88, "money": 61, "work": 55, "relationship": 79, "condition": 48},
+    "scores": {
+        "love": 88,
+        "money": 61,
+        "work": 55,
+        "relationship": 79,
+        "condition": 48,
+    },
     "scores_line": "연애운이 활짝 열렸고 인간관계도 좋아요.",
-    "summary": ["오늘은 마음이 먼저 움직이는 날이에요.", "솔직한 한마디가 관계의 온도를 한 칸 올려줘요."],
+    "summary": [
+        "오늘은 마음이 먼저 움직이는 날이에요.",
+        "솔직한 한마디가 관계의 온도를 한 칸 올려줘요.",
+    ],
     "advice": "마음에 둔 사람에게 짧은 안부 한마디를 먼저 건네 보세요.",
     "lucky": {"color": "코랄 핑크", "item": "작은 손거울"},
     "avoid": "지난 대화를 너무 곱씹으며 혼자 결론 내리는 일은 잠시 미뤄두세요.",
 }
 
 # ── 정본 순서 (캐릭터 시트 §4 표) ────────────────────────────────
-EXPECTED_ORDER = ["greeting", "summary", "scores", "advice", "lucky", "avoid", "blessing", "ending"]
+EXPECTED_ORDER = [
+    "greeting",
+    "summary",
+    "scores",
+    "advice",
+    "lucky",
+    "avoid",
+    "blessing",
+    "ending",
+]
 
 
 class TestSegmentOrder:
@@ -83,7 +94,7 @@ class TestPresynthPool:
     """presynth 세그먼트가 PRESYNTH 풀에서 나오는지 검증.
 
     NOTE: presynth 단일 문자열 = MVP 허용 편차.
-    풀 확장(변형 세트)은 Sprint 후속 product 결정 (Plan.md §10 풀 분리 참조).
+    풀 확장(변형 세트)은 Sprint 후속 product 결정 (docs/planning/Plan.md §10 풀 분리 참조).
     """
 
     def test_presynth_texts_come_from_pool(self):

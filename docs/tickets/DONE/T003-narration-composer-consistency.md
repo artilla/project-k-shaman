@@ -18,7 +18,7 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 ## 1. 목표 (한 줄)
 > 이 티켓이 끝나면 무엇이 달라지는가?
 
-`fortune-engine/tts-ab-kit/narration_composer.py`의 **조립 순서·세그먼트·타이핑**이 캐릭터 시트 §4 / `fortune-prompt-hongyeon.v1.1.md`가 정의한 정본과 일치함을 pytest로 **고정**하여, 이후 변경이 정합을 깨면 즉시 잡힌다.
+`fortune-engine/tts-ab-kit/narration_composer.py`의 **조립 순서·세그먼트·타이핑**이 캐릭터 시트 §4 / `docs/prompts/fortune-prompt-hongyeon.v1.1.md`가 정의한 정본과 일치함을 pytest로 **고정**하여, 이후 변경이 정합을 깨면 즉시 잡힌다.
 
 ## 2. 변경 범위 (Scope)
 

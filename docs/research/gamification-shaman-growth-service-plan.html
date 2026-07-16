@@ -650,7 +650,7 @@
             <tbody>
               <tr>
                 <td><strong>홍연 1종 베타</strong></td>
-                <td>캐릭터 선택보다 핵심 루프·원가·품질을 먼저 검증한다. <a class="source-link" href="../../docs/planning/today-shindang-service-plan-v3.md">서비스 기획 v3 §7</a></td>
+                <td>캐릭터 선택보다 핵심 루프·원가·품질을 먼저 검증한다. <a class="source-link" href="../planning/today-shindang-service-plan-v3.md">서비스 기획 v3 §7</a></td>
                 <td>모두가 같은 홍연을 만나되, 계정마다 신력·해금·선택 이력이 다른 “나의 홍연”으로 만든다.</td>
               </tr>
               <tr>
@@ -660,7 +660,7 @@
               </tr>
               <tr>
                 <td><strong>현재 생년월일 개인화</strong></td>
-                <td>생년월일과 시간대는 HMAC용 profile hash를 만들고, hash byte로 점수 경향·날의 테마를 결정한다. 년주·월주·일주·시주나 오행은 계산하지 않는다. <a class="source-link" href="../../fortune-engine/seed_builder.py">seed_builder.py</a></td>
+                <td>생년월일과 시간대는 HMAC용 profile hash를 만들고, hash byte로 점수 경향·날의 테마를 결정한다. 년주·월주·일주·시주나 오행은 계산하지 않는다. <a class="source-link" href="../../src/shindang/domain/seed.py">domain/seed.py</a></td>
                 <td>현 상태를 “사주 기반”이라고 표시하면 안 된다. 검증된 명식 계산기를 별도 도입한 뒤 마케팅·결과 카피를 전환한다.</td>
               </tr>
               <tr>
@@ -680,7 +680,7 @@
               </tr>
               <tr>
                 <td><strong>안전 원칙</strong></td>
-                <td>오락·자기성찰 고지, 불안 조장 금지, 의료·법률·투자 단정 금지. <a class="source-link" href="../../docs/planning/today-shindang-service-plan-v3.md">서비스 기획 v3 §21</a></td>
+                <td>오락·자기성찰 고지, 불안 조장 금지, 의료·법률·투자 단정 금지. <a class="source-link" href="../planning/today-shindang-service-plan-v3.md">서비스 기획 v3 §21</a></td>
                 <td>레벨업 카피와 미션도 같은 정책을 상속한다. 공포·죄책감은 리텐션 도구가 될 수 없다.</td>
               </tr>
             </tbody>
@@ -797,7 +797,7 @@
 
         <div class="callout callout--red">
           <strong>현재 구현은 아직 사주팔자가 아니다</strong>
-          <p><a href="../../fortune-engine/seed_builder.py">현재 seed builder</a>는 생년월일과 시간대를 hash한 뒤 hash byte를 점수 경향과 12개 day theme에 매핑한다. 년주·월주·일주·시주, 천간·지지, 음양오행을 산출하지 않는다. 따라서 명식 계산기가 검증되기 전에는 “생년월일 기반 개인화”라고만 표현해야 한다.</p>
+          <p><a href="../../src/shindang/domain/seed.py">현재 seed builder</a>는 생년월일과 시간대를 hash한 뒤 hash byte를 점수 경향과 12개 day theme에 매핑한다. 년주·월주·일주·시주, 천간·지지, 음양오행을 산출하지 않는다. 따라서 명식 계산기가 검증되기 전에는 “생년월일 기반 개인화”라고만 표현해야 한다.</p>
         </div>
 
         <h3>개인화의 3층 구조</h3>
@@ -1311,10 +1311,10 @@
 
         <h3>현재 프로젝트 근거</h3>
         <ul class="references">
-          <li><span class="reference-type">Product</span><span class="reference-title"><a href="../../docs/planning/today-shindang-service-plan-v3.md">오늘신당 서비스 기획 문서 v3</a></span><span class="reference-note">서비스 정의, 타깃, 홍연 1종, 현재 리텐션 비전, 비용·안전·수익화 경계.</span></li>
+          <li><span class="reference-type">Product</span><span class="reference-title"><a href="../planning/today-shindang-service-plan-v3.md">오늘신당 서비스 기획 문서 v3</a></span><span class="reference-note">서비스 정의, 타깃, 홍연 1종, 현재 리텐션 비전, 비용·안전·수익화 경계.</span></li>
           <li><span class="reference-type">Current scope</span><span class="reference-title"><a href="../master-spec.md">Master Spec v0.3.0</a></span><span class="reference-note">2026-07-20 베타 목표와 streak·친밀도 non-goal.</span></li>
           <li><span class="reference-type">UX</span><span class="reference-title"><a href="../ux/screen-ia.md">모바일 PWA 화면 IA</a> · <a href="../ux/login-sequence-and-scenarios.md">로그인 시퀀스</a></span><span class="reference-note">S0–S6, 텍스트 우선, 오디오 제스처, 게스트·로그인 경계.</span></li>
-          <li><span class="reference-type">Implementation</span><span class="reference-title"><a href="../../frontend/src/lib/profile.ts">현재 localStorage profile·streak</a> · <a href="../../frontend/src/components/ResultCard.tsx">결과 카드 streak UI</a> · <a href="../../fortune-engine/seed_builder.py">현재 birth-seeded 신호</a></span><span class="reference-note">현 성장 요소가 계정 영속화 없는 방문 streak이고, 생년월일은 실제 명식이 아닌 hash seed로만 쓰임을 확인.</span></li>
+          <li><span class="reference-type">Implementation</span><span class="reference-title"><a href="../../frontend/src/lib/profile.ts">현재 localStorage profile·streak</a> · <a href="../../frontend/src/components/ResultCard.tsx">결과 카드 streak UI</a> · <a href="../../src/shindang/domain/seed.py">현재 birth-seeded 신호</a></span><span class="reference-note">현 성장 요소가 계정 영속화 없는 방문 streak이고, 생년월일은 실제 명식이 아닌 hash seed로만 쓰임을 확인.</span></li>
           <li><span class="reference-type">Data</span><span class="reference-title"><a href="../../db/migrations/001_init.sql">초기 DB 스키마</a> · <a href="../../db/migrations/002_schema_contract_fixes.sql">스키마 계약 보정</a></span><span class="reference-note">users·sessions·streaks·events·purchases와 동의·삭제 경계.</span></li>
           <li><span class="reference-type">Market snapshot</span><span class="reference-title"><a href="../../%EA%B2%BD%EC%9F%81%EB%B6%84%EC%84%9D-%EB%B3%B4%EA%B3%A0%EC%84%9C-2026-06-13.md">오늘신당 경쟁 분석 보고서</a></span><span class="reference-note">점신·포스텔러·헬로우봇의 현재 포지션과 오늘신당의 무대형 공백.</span></li>
         </ul>

@@ -3,24 +3,43 @@
 레거시 test_web_server.py의 HTTP 계약을 계승해 잠근다 (레거시 서버는 2026-07-09 제거):
 게이트 401 · 운세 게스트 허용 · 콜백 실패 리다이렉트 · 꿈 해몽(신규).
 """
+
 import json
 import secrets
-import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(ROOT))
+from shindang.adapters import rate_limit as ratelimit
+from shindang.adapters.cache import InMemoryCacheStore
+from shindang.adapters.fortune_store import RecentFortuneStore
+from shindang.adapters.oauth import HttpOAuthGateway
+from shindang.adapters.session import (
+    OAUTH_STATE_COOKIE_NAME,
+    SESSION_COOKIE_NAME,
+    make_session_cookie_value,
+    verify_session_cookie_value,
+)
+from shindang.adapters.tts import TTSAdapter
+from shindang.application.cache import get_or_compute
+from shindang.bootstrap import build_container
+from shindang.config import Settings
+from shindang.domain import dream
+from shindang.web.app import create_app
 
-from backend import core, dream  # noqa: E402
-from backend.app import create_app  # noqa: E402
+ROOT = Path(__file__).parent.parent
+SCHEMA_PATH = ROOT / "contracts" / "fortune" / "fortune-schema.v1.1.json"
 
 
 @pytest.fixture()
-def fastapi_app():
-    return create_app(backend="mock")
+def fastapi_app(monkeypatch):
+    monkeypatch.setenv("SHINDANG_ENV", "test")
+    monkeypatch.setenv("SESSION_SECRET", "test-session-secret")
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("SHINDANG_DEV_LOGIN", raising=False)
+    return create_app(settings=Settings.from_env(tts_backend="mock"))
 
 
 @pytest.fixture()
@@ -29,11 +48,12 @@ def client(fastapi_app):
 
 
 def login(fastapi_app, client):
-    """서버 메모리에 세션을 직접 심는다 (legacy _login_headers와 동일 전략)."""
+    """서버의 세션 포트에 테스트 세션을 직접 심는다."""
+    app = fastapi_app.state.container
     session_id = "testsession-" + secrets.token_hex(4)
-    fastapi_app.state.sessions[session_id] = {"provider": "google", "nickname": "테스트"}
-    value = core.make_session_cookie_value(session_id, fastapi_app.state.session_secret)
-    client.cookies.set(core.SESSION_COOKIE_NAME, value)
+    app.sessions.put(session_id, {"provider": "google", "nickname": "테스트"})
+    value = make_session_cookie_value(session_id, app.settings.session_secret)
+    client.cookies.set(SESSION_COOKIE_NAME, value)
 
 
 # ── 운세: 게스트 허용 (텍스트 먼저 원칙) ──
@@ -48,7 +68,13 @@ class TestFortune:
 
     def test_post_birth_body_is_deterministic(self, client):
         """리뷰 P1-2: birth 원문은 POST 본문으로만 — 결정성은 유지된다."""
-        body = {"topic": "love", "date": "2026-07-07", "birth_year": 1995, "birth_month": 3, "birth_day": 21}
+        body = {
+            "topic": "love",
+            "date": "2026-07-07",
+            "birth_year": 1995,
+            "birth_month": 3,
+            "birth_day": 21,
+        }
         first = client.post("/api/fortune/today", json=body).json()
         second = client.post("/api/fortune/today", json=body).json()
         assert first["fortuneId"] == second["fortuneId"]
@@ -78,104 +104,195 @@ class TestFortune:
 
     def test_all_topics_match_schema_and_share_card(self, fastapi_app, client):
         """2차 회귀 매트릭스: 5개 주제 전부 schema enum 일치 + 부적 카드 200."""
-        schema = json.loads(
-            (Path(__file__).parent.parent / "fortune-engine" / "fortune-schema.v1.1.json").read_text()
-        )
+        schema = json.loads(SCHEMA_PATH.read_text())
         allowed = set(schema["properties"]["meta"]["properties"]["topic"]["enum"])
         login(fastapi_app, client)
         for topic in ("total", "love", "money", "work", "relationship"):
-            data = client.post("/api/fortune/today", json={"topic": topic, "date": "2026-07-07"}).json()
+            data = client.post(
+                "/api/fortune/today", json={"topic": topic, "date": "2026-07-07"}
+            ).json()
             assert data["fortune"]["meta"]["topic"] in allowed, topic
             share = client.get(f"/api/share-card?fortuneId={data['fortuneId']}")
             assert share.status_code == 200, topic
 
     def test_invalid_birth_400(self, client):
-        res = client.post("/api/fortune/today", json={"topic": "love", "birth_year": "abc"})
+        res = client.post(
+            "/api/fortune/today", json={"topic": "love", "birth_year": "abc"}
+        )
         assert res.status_code == 400
 
-    def test_fortune_never_runs_real_tts(self, fastapi_app, client, monkeypatch):
+    def test_fortune_never_runs_real_tts(self, fastapi_app):
         """리뷰 P1-3(text-first): openai 모드여도 텍스트 API는 실 합성을 호출하지 않는다."""
         calls = []
-        original = core.build_playback_response
+        settings = replace(fastapi_app.state.container.settings, tts_backend="openai")
 
-        def spy(req, **kwargs):
-            calls.append(kwargs.get("tts_backend"))
-            return original(req, tts_backend="skip")
+        def fail_if_called(script, cache_key, metadata):
+            calls.append(cache_key)
+            raise AssertionError("text endpoint invoked TTS")
 
-        monkeypatch.setattr(core, "build_playback_response", spy)
-        fastapi_app.state.tts_backend_mode = "openai"
+        speech = TTSAdapter(
+            mode="openai",
+            cache_dir=settings.tts_cache_dir,
+            backend=fail_if_called,
+        )
+        app = create_app(
+            settings=settings, app_container=build_container(settings, speech=speech)
+        )
+        client = TestClient(app, follow_redirects=False)
         res = client.get("/api/fortune/today?topic=love&date=2026-07-07")
         assert res.status_code == 200
-        assert calls == ["skip"]  # 합성·캐시 기록 모두 없는 텍스트 전용 모드
+        assert calls == []
         assert res.json()["audioUrl"].startswith("/audio/real/")
+
+    def test_runtime_seed_is_keyed_by_server_secret(self, fastapi_app):
+        """같은 생년 입력도 서버 secret이 다르면 공개 seed와 fortuneId가 달라진다."""
+        base = fastapi_app.state.container.settings
+        first_settings = replace(base, session_secret="a" * 32)
+        second_settings = replace(base, session_secret="b" * 32)
+        first = (
+            TestClient(create_app(settings=first_settings))
+            .post(
+                "/api/fortune/today",
+                json={
+                    "topic": "love",
+                    "date": "2026-07-07",
+                    "birth_year": 1995,
+                    "birth_month": 3,
+                    "birth_day": 21,
+                },
+            )
+            .json()
+        )
+        second = (
+            TestClient(create_app(settings=second_settings))
+            .post(
+                "/api/fortune/today",
+                json={
+                    "topic": "love",
+                    "date": "2026-07-07",
+                    "birth_year": 1995,
+                    "birth_month": 3,
+                    "birth_day": 21,
+                },
+            )
+            .json()
+        )
+        assert first["fortuneId"] != second["fortuneId"]
+        assert (
+            first["fortune"]["meta"]["seed_hash"]
+            != second["fortune"]["meta"]["seed_hash"]
+        )
 
 
 # ── TTS 준비 (실 합성·과금 분리 지점) ──
 class TestTtsPrepare:
     def test_requires_login(self, client):
-        assert client.post("/api/tts/prepare", json={"topic": "love"}).status_code == 401
+        assert (
+            client.post("/api/tts/prepare", json={"topic": "love"}).status_code == 401
+        )
 
     def test_returns_audio_url_when_logged_in(self, fastapi_app, client):
         login(fastapi_app, client)
-        res = client.post("/api/tts/prepare", json={"topic": "love", "date": "2026-07-07"})
+        res = client.post(
+            "/api/tts/prepare", json={"topic": "love", "date": "2026-07-07"}
+        )
         assert res.status_code == 200
         assert res.json()["audioUrl"].startswith("/audio/mock/")
 
     def test_matches_fortune_audio_url(self, fastapi_app, client):
         """동일 파라미터의 운세 응답 audioUrl과 prepare 결과가 일치 — 클라 cacheKey 신뢰 없음."""
         login(fastapi_app, client)
-        body = {"topic": "love", "date": "2026-07-07", "birth_year": 1995, "birth_month": 3, "birth_day": 21}
+        body = {
+            "topic": "love",
+            "date": "2026-07-07",
+            "birth_year": 1995,
+            "birth_month": 3,
+            "birth_day": 21,
+        }
         fortune_url = client.post("/api/fortune/today", json=body).json()["audioUrl"]
         prepare_url = client.post("/api/tts/prepare", json=body).json()["audioUrl"]
         assert fortune_url == prepare_url
 
     def test_invalid_topic_400(self, fastapi_app, client):
         login(fastapi_app, client)
-        assert client.post("/api/tts/prepare", json={"topic": "hack"}).status_code == 400
+        assert (
+            client.post("/api/tts/prepare", json={"topic": "hack"}).status_code == 400
+        )
 
     def test_prepare_rejects_bad_inputs(self, fastapi_app, client):
         """2차 P2: 배열 body·잘못된 날짜·character·범위 밖 birth는 400."""
         login(fastapi_app, client)
-        assert client.post("/api/tts/prepare", json=["not", "a", "dict"]).status_code == 400
-        assert client.post("/api/tts/prepare", json={"topic": "love", "date": "2026-13-99"}).status_code == 400
-        assert client.post("/api/tts/prepare", json={"topic": "love", "date": "not-a-date"}).status_code == 400
-        assert client.post("/api/tts/prepare", json={"topic": "love", "character_id": "unknown"}).status_code == 400
-        assert client.post("/api/tts/prepare", json={"topic": "love", "birth_month": 13}).status_code == 400
-        assert client.post("/api/tts/prepare", json={"topic": "love", "birth_hour": 24}).status_code == 400
-        assert client.post("/api/fortune/today", json={"topic": "love", "birth_year": 1800}).status_code == 400
+        assert (
+            client.post("/api/tts/prepare", json=["not", "a", "dict"]).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                "/api/tts/prepare", json={"topic": "love", "date": "2026-13-99"}
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                "/api/tts/prepare", json={"topic": "love", "date": "not-a-date"}
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                "/api/tts/prepare", json={"topic": "love", "character_id": "unknown"}
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                "/api/tts/prepare", json={"topic": "love", "birth_month": 13}
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                "/api/tts/prepare", json={"topic": "love", "birth_hour": 24}
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                "/api/fortune/today", json={"topic": "love", "birth_year": 1800}
+            ).status_code
+            == 400
+        )
 
-    def test_text_endpoint_does_not_poison_tts_cache(self, fastapi_app, client, monkeypatch):
+    def test_text_endpoint_does_not_poison_tts_cache(self, fastapi_app):
         """2차 P1-1 회귀: 텍스트 응답이 TTS 캐시 키를 선점하지 않는다 —
         같은 파라미터의 prepare에서 합성 백엔드가 실제로 호출돼야 한다.
 
         주의: 엔진 기본 캐시 store는 프로세스 전역이라 다른 테스트와 겹치지 않는
         고유 날짜를 사용한다 (격리)."""
         body = {"topic": "love", "date": "2031-01-01"}
-        # 1) 텍스트 요청 (skip 모드 — 캐시 기록 없음)
-        assert client.post("/api/fortune/today", json=body).status_code == 200
-
-        # 2) prepare가 합성 함수를 실제로 호출하는지 spy로 확인
         synth_calls = []
-        original = core.build_playback_response
+        settings = replace(fastapi_app.state.container.settings, tts_backend="openai")
 
-        def spy(req, **kwargs):
-            tts_backend = kwargs.get("tts_backend")
+        def counting_backend(script, cache_key, metadata):
+            synth_calls.append(cache_key)
+            return {"audioUrl": "spy://synthesized"}
 
-            def counting_backend(script, cache_key, metadata):
-                synth_calls.append(cache_key)
-                return {"audioUrl": "spy://synthesized"}
-
-            # openai 모드를 흉내내되 실 네트워크 대신 counting_backend 주입
-            if tts_backend == "openai":
-                return original(req, tts_backend=counting_backend)
-            return original(req, **kwargs)
-
-        monkeypatch.setattr(core, "build_playback_response", spy)
-        fastapi_app.state.tts_backend_mode = "openai"
-        login(fastapi_app, client)
+        speech = TTSAdapter(
+            mode="openai",
+            cache_dir=settings.tts_cache_dir,
+            backend=counting_backend,
+        )
+        app = create_app(
+            settings=settings, app_container=build_container(settings, speech=speech)
+        )
+        client = TestClient(app, follow_redirects=False)
+        assert client.post("/api/fortune/today", json=body).status_code == 200
+        login(app, client)
         res = client.post("/api/tts/prepare", json=body)
         assert res.status_code == 200
-        assert len(synth_calls) == 1, "텍스트 요청이 캐시를 선점해 실합성이 skip되면 회귀"
+        assert len(synth_calls) == 1, (
+            "텍스트 요청이 캐시를 선점해 실합성이 skip되면 회귀"
+        )
 
 
 # ── 게이트: 재생·부적·꿈 해몽 로그인 필요 (US-9) ──
@@ -212,7 +329,10 @@ class TestLoginGates:
 class TestDreamInterpret:
     def test_snake_alias_detected(self, fastapi_app, client):
         login(fastapi_app, client)
-        res = client.post("/api/dream/interpret", json={"text": "커다란 구렁이가 품에 안기는 꿈", "symbols": []})
+        res = client.post(
+            "/api/dream/interpret",
+            json={"text": "커다란 구렁이가 품에 안기는 꿈", "symbols": []},
+        )
         assert res.status_code == 200
         data = res.json()
         labels = [s["label"] for s in data["reading"]["symbols"]]
@@ -231,7 +351,9 @@ class TestDreamInterpret:
     def test_invalid_json_rejected(self, fastapi_app, client):
         login(fastapi_app, client)
         res = client.post(
-            "/api/dream/interpret", content=b"not-json", headers={"Content-Type": "application/json"}
+            "/api/dream/interpret",
+            content=b"not-json",
+            headers={"Content-Type": "application/json"},
         )
         assert res.status_code == 400
 
@@ -257,33 +379,46 @@ class TestAuth:
 
     def test_login_without_keys_returns_400(self, client, monkeypatch):
         monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
-        assert client.get("/api/auth/login/google").status_code == 400
+        fresh = TestClient(
+            create_app(settings=Settings.from_env(tts_backend="mock")),
+            follow_redirects=False,
+        )
+        assert fresh.get("/api/auth/login/google").status_code == 400
 
     def test_dev_login_disabled_by_default(self, client, monkeypatch):
         """SHINDANG_DEV_LOGIN 미설정 시 dev-login 라우트는 존재하지 않아야 한다 (프로덕션 안전)."""
         monkeypatch.delenv("SHINDANG_DEV_LOGIN", raising=False)
-        fresh = TestClient(create_app(backend="mock"), follow_redirects=False)
+        fresh = TestClient(
+            create_app(settings=Settings.from_env(tts_backend="mock")),
+            follow_redirects=False,
+        )
         assert fresh.get("/api/auth/dev-login").status_code == 404
 
     def test_staging_requires_session_secret(self, monkeypatch):
         monkeypatch.setenv("SHINDANG_ENV", "staging")
         monkeypatch.delenv("SESSION_SECRET", raising=False)
         with pytest.raises(RuntimeError, match="SESSION_SECRET is required"):
-            create_app(backend="mock")
+            Settings.from_env(tts_backend="mock")
 
     def test_staging_rejects_dev_login(self, monkeypatch):
         monkeypatch.setenv("SHINDANG_ENV", "staging")
-        monkeypatch.setenv("SESSION_SECRET", "staging-test-secret")
+        monkeypatch.setenv("SESSION_SECRET", "staging-test-secret-at-least-32-bytes")
         monkeypatch.setenv("SHINDANG_DEV_LOGIN", "1")
         with pytest.raises(RuntimeError, match="SHINDANG_DEV_LOGIN=1 is forbidden"):
-            create_app(backend="mock")
+            Settings.from_env(tts_backend="mock")
 
     def test_staging_auth_cookie_is_secure(self, monkeypatch):
         monkeypatch.setenv("SHINDANG_ENV", "staging")
-        monkeypatch.setenv("SESSION_SECRET", "staging-test-secret")
+        monkeypatch.setenv("SESSION_SECRET", "staging-test-secret-at-least-32-bytes")
         monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client")
+        monkeypatch.setenv(
+            "SHINDANG_PUBLIC_BASE_URL", "https://staging.example.invalid"
+        )
         monkeypatch.delenv("SHINDANG_DEV_LOGIN", raising=False)
-        fresh = TestClient(create_app(backend="mock"), follow_redirects=False)
+        fresh = TestClient(
+            create_app(settings=Settings.from_env(tts_backend="mock")),
+            follow_redirects=False,
+        )
         res = fresh.get("/api/auth/login/google")
         cookie = res.headers.get("set-cookie", "")
         assert res.status_code == 302
@@ -296,12 +431,18 @@ class TestRuntimeProbes:
         assert client.get("/healthz").json() == {"status": "ok"}
         res = client.get("/readyz")
         assert res.status_code == 200
-        assert res.json() == {"status": "ready", "checks": {"database": "not-configured"}}
+        assert res.json() == {
+            "status": "ready",
+            "checks": {"database": "not-configured"},
+        }
 
-    def test_database_configured_without_adapter_is_not_ready(self, client, monkeypatch):
+    def test_database_configured_without_adapter_is_not_ready(
+        self, client, monkeypatch
+    ):
         marker = "postgresql://must-not-appear.example.invalid/private"
         monkeypatch.setenv("DATABASE_URL", marker)
-        res = client.get("/readyz")
+        fresh = TestClient(create_app(settings=Settings.from_env(tts_backend="mock")))
+        res = fresh.get("/readyz")
         assert res.status_code == 503
         assert res.json() == {
             "status": "not_ready",
@@ -312,12 +453,18 @@ class TestRuntimeProbes:
 
 # ── 레거시 스위트에서 이관한 고유 커버리지 (2026-07-09 레거시 서버 제거) ──
 class TestShareCardPrivacy:
-    def test_share_card_does_not_leak_birth_fields_or_seed_hash(self, fastapi_app, client):
+    def test_share_card_does_not_leak_birth_fields_or_seed_hash(
+        self, fastapi_app, client
+    ):
         """T021 개인정보 최소화 — SVG에 생년 원문·seed_hash가 노출되면 안 된다."""
         login(fastapi_app, client)
         body = {
-            "topic": "love", "date": "2026-07-07",
-            "birth_year": 1990, "birth_month": 5, "birth_day": 14, "birth_hour": 8,
+            "topic": "love",
+            "date": "2026-07-07",
+            "birth_year": 1990,
+            "birth_month": 5,
+            "birth_day": 14,
+            "birth_hour": 8,
         }
         data = client.post("/api/fortune/today", json=body).json()
         svg = client.get(f"/api/share-card?fortuneId={data['fortuneId']}").text
@@ -336,15 +483,19 @@ class TestAudioKeys:
 
     def test_same_seed_revisit_reuses_audio_url(self, client):
         path = "/api/fortune/today?topic=love&date=2026-07-07"
-        assert client.get(path).json()["audioUrl"] == client.get(path).json()["audioUrl"]
+        assert (
+            client.get(path).json()["audioUrl"] == client.get(path).json()["audioUrl"]
+        )
 
     def test_real_audio_served_from_cache_dir(self, fastapi_app, client):
         import hashlib
+
         login(fastapi_app, client)
         cache_key = "tts:v1:openai:coral:testfixture:1.0:bright"
         key_hash = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
-        core.TTS_REAL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        fixture = core.TTS_REAL_CACHE_DIR / f"{key_hash}.mp3"
+        cache_dir = fastapi_app.state.container.settings.tts_cache_dir
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        fixture = cache_dir / f"{key_hash}.mp3"
         fixture.write_bytes(b"\xff\xfb\x90\x00fake-mp3-fixture")
         try:
             res = client.get(f"/audio/real/{key_hash}.mp3")
@@ -360,62 +511,76 @@ class TestAudioKeys:
 
 class TestEventEndpoint:
     def test_event_accepts_timeline_and_returns_summary(self, client):
-        res = client.post("/api/event", json={
-            "fortuneId": "f1",
-            "sessionStartMs": 0,
-            "clientEvents": [{"event": "first_text_visible", "clientTs": 100}],
-            "serverEvents": [],
-        })
+        res = client.post(
+            "/api/event",
+            json={
+                "fortuneId": "f1",
+                "sessionStartMs": 0,
+                "clientEvents": [{"event": "first_text_visible", "clientTs": 100}],
+                "serverEvents": [],
+            },
+        )
         assert res.status_code == 200
         data = res.json()
         assert data["ok"] is True
         assert "summary" in data and "missing" in data
 
     def test_event_invalid_json_400(self, client):
-        res = client.post("/api/event", content=b"broken", headers={"Content-Type": "application/json"})
+        res = client.post(
+            "/api/event",
+            content=b"broken",
+            headers={"Content-Type": "application/json"},
+        )
         assert res.status_code == 400
 
 
 class TestCoreHelpers:
     def test_authorize_url_none_without_client_id(self, monkeypatch):
         monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
-        assert core.build_oauth_authorize_url("google", redirect_uri="http://x/cb", state="s1") is None
+        gateway = HttpOAuthGateway.from_env()
+        assert (
+            gateway.authorize_url("google", redirect_uri="http://x/cb", state="s1")
+            is None
+        )
 
     def test_authorize_url_contains_client_id_and_state(self, monkeypatch):
         monkeypatch.setenv("GOOGLE_CLIENT_ID", "abc123")
-        url = core.build_oauth_authorize_url("google", redirect_uri="http://x/cb", state="s1")
+        url = HttpOAuthGateway.from_env().authorize_url(
+            "google", redirect_uri="http://x/cb", state="s1"
+        )
         assert url.startswith("https://accounts.google.com/")
         assert "client_id=abc123" in url and "state=s1" in url
 
     def test_session_cookie_roundtrip_and_tamper_reject(self):
         secret = "top-secret"
-        value = core.make_session_cookie_value("sid123", secret)
-        assert core.verify_session_cookie_value(value, secret) == "sid123"
-        assert core.verify_session_cookie_value(value + "x", secret) is None
-        assert core.verify_session_cookie_value(value, "other-secret") is None
+        value = make_session_cookie_value("sid123", secret)
+        assert verify_session_cookie_value(value, secret) == "sid123"
+        assert verify_session_cookie_value(value + "x", secret) is None
+        assert verify_session_cookie_value(value, "other-secret") is None
 
     def test_fortune_cache_evicts_oldest(self):
-        cache = {}
-        for i in range(core.FORTUNE_CACHE_MAX + 1):
-            core.remember_fortune(cache, f"id{i}", {"n": i})
-        assert len(cache) == core.FORTUNE_CACHE_MAX
-        assert "id0" not in cache
-        assert f"id{core.FORTUNE_CACHE_MAX}" in cache
+        cache = RecentFortuneStore(max_items=500)
+        for i in range(501):
+            cache.put(f"id{i}", {"n": i})
+        assert len(cache) == 500
+        assert cache.get("id0") is None
+        assert cache.get("id500") == {"n": 500}
 
-    def test_openai_startup_guard(self):
-        with pytest.raises(RuntimeError):
-            core.validate_backend_startup("openai", has_api_key=False)
-        core.validate_backend_startup("openai", has_api_key=True)
-        core.validate_backend_startup("mock", has_api_key=False)
+    def test_openai_startup_guard(self, monkeypatch):
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
+            Settings.from_env(tts_backend="openai")
+        monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+        assert Settings.from_env(tts_backend="openai").tts_backend == "openai"
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        assert Settings.from_env(tts_backend="mock").tts_backend == "mock"
 
     def test_cache_get_or_compute_is_atomic(self):
         """리뷰 P1-9: 동일 키 병렬 miss에서 compute가 1회만 실행된다 (중복 과금 방지)."""
         import threading
         import time as time_mod
-        cache_layer = core._load_engine_module("cache_layer")
-        get_or_compute = cache_layer.get_or_compute
 
-        store = cache_layer.InMemoryCacheStore()
+        store = InMemoryCacheStore()
         calls = []
 
         def slow_compute():
@@ -424,7 +589,11 @@ class TestCoreHelpers:
             return {"v": 1}
 
         threads = [
-            threading.Thread(target=lambda: get_or_compute(store, "same-key", slow_compute, layer="tts"))
+            threading.Thread(
+                target=lambda: get_or_compute(
+                    store, "same-key", slow_compute, layer="tts"
+                )
+            )
             for _ in range(8)
         ]
         for t in threads:
@@ -436,18 +605,24 @@ class TestCoreHelpers:
 
 class TestCallbackFlows:
     def test_state_mismatch_redirects_without_session(self, client):
-        client.cookies.set(core.OAUTH_STATE_COOKIE_NAME, "good")
+        client.cookies.set(OAUTH_STATE_COOKIE_NAME, "good")
         res = client.get("/api/auth/callback/google?code=abc&state=bad")
         assert res.status_code == 302
         assert res.headers["location"] == "/?auth_error=1"
-        assert core.SESSION_COOKIE_NAME not in (res.headers.get("set-cookie") or "")
+        assert SESSION_COOKIE_NAME not in (res.headers.get("set-cookie") or "")
 
-    def test_successful_callback_creates_session(self, fastapi_app, client, monkeypatch):
+    def test_successful_callback_creates_session(
+        self, fastapi_app, client, monkeypatch
+    ):
         monkeypatch.setattr(
-            core, "oauth_token_and_profile",
-            lambda provider, code, *, redirect_uri: {"subject": "u1", "nickname": "테스트유저"},
+            fastapi_app.state.container.oauth,
+            "exchange_profile",
+            lambda provider, code, *, redirect_uri: {
+                "subject": "u1",
+                "nickname": "테스트유저",
+            },
         )
-        client.cookies.set(core.OAUTH_STATE_COOKIE_NAME, "st1")
+        client.cookies.set(OAUTH_STATE_COOKIE_NAME, "st1")
         res = client.get("/api/auth/callback/google?code=authcode123&state=st1")
         assert res.status_code == 302
         assert res.headers["location"] == "/"
@@ -459,14 +634,20 @@ class TestCallbackFlows:
         assert client.get("/api/auth/me").json()["loggedIn"] is True
         assert client.post("/api/auth/logout").status_code == 200
         # 서버 메모리에서 세션 제거 확인 (쿠키는 클라이언트가 유지해도 무효)
-        assert fastapi_app.state.sessions == {}
+        assert len(fastapi_app.state.container.sessions) == 0
 
 
 # ── rate limit + 일일 제한 (P0 비용 방어) ──
 class TestRateLimits:
+    def test_invalid_limit_configuration_fails_closed(self, monkeypatch):
+        monkeypatch.setenv("RL_TTS_PER_HOUR", "0")
+        with pytest.raises(RuntimeError, match="positive integer"):
+            ratelimit.RateLimits.from_env()
+
     def test_fortune_daily_limit_429(self, fastapi_app, client, monkeypatch):
-        from backend import ratelimit
-        monkeypatch.setitem(ratelimit.DAILY_LIMITS, "fortune-daily", 2)
+        monkeypatch.setitem(
+            fastapi_app.state.container.rate_limits.daily, "fortune-daily", 2
+        )
         path = "/api/fortune/today?topic=love&date=2026-07-07"
         assert client.get(path).status_code == 200
         assert client.get(path).status_code == 200
@@ -476,32 +657,38 @@ class TestRateLimits:
         assert "retry-after" in {k.lower() for k in res.headers}
 
     def test_dream_hourly_limit_429(self, fastapi_app, client, monkeypatch):
-        from backend import ratelimit
-        monkeypatch.setitem(ratelimit.LIMITS, "dream", (1, 3600))
+        monkeypatch.setitem(
+            fastapi_app.state.container.rate_limits.hourly, "dream", (1, 3600)
+        )
         login(fastapi_app, client)
         body = {"text": "뱀꿈", "symbols": []}
         assert client.post("/api/dream/interpret", json=body).status_code == 200
         assert client.post("/api/dream/interpret", json=body).status_code == 429
 
-    def test_login_rate_limit_429(self, client, monkeypatch):
-        from backend import ratelimit
-        monkeypatch.setitem(ratelimit.LIMITS, "login", (2, 600))
+    def test_login_rate_limit_429(self, fastapi_app, client, monkeypatch):
+        monkeypatch.setitem(
+            fastapi_app.state.container.rate_limits.hourly, "login", (2, 600)
+        )
         monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
         # 키 미설정이라 400이지만 rate 카운트는 소모된다 → 3번째는 429
         assert client.get("/api/auth/login/google").status_code == 400
         assert client.get("/api/auth/login/google").status_code == 400
         assert client.get("/api/auth/login/google").status_code == 429
 
-    def test_event_body_size_cap_413(self, client, monkeypatch):
-        from backend import ratelimit
-        monkeypatch.setattr(ratelimit, "EVENT_BODY_MAX_BYTES", 100)
-        big = {"fortuneId": "f1", "clientEvents": [{"event": "x" * 200, "clientTs": 1}], "serverEvents": []}
+    def test_event_body_size_cap_413(self, fastapi_app, client):
+        fastapi_app.state.container.rate_limits = replace(
+            fastapi_app.state.container.rate_limits, event_body_max_bytes=100
+        )
+        big = {
+            "fortuneId": "f1",
+            "clientEvents": [{"event": "x" * 200, "clientTs": 1}],
+            "serverEvents": [],
+        }
         res = client.post("/api/event", json=big)
         assert res.status_code == 413
 
     def test_identities_are_isolated(self):
-        from backend.ratelimit import MemoryRateLimiter
-        limiter = MemoryRateLimiter()
+        limiter = ratelimit.MemoryRateLimiter()
         assert limiter.check("s", "ip:a", 1, 3600) == (True, 0)
         allowed_a, retry_a = limiter.check("s", "ip:a", 1, 3600)
         assert allowed_a is False and retry_a >= 1
@@ -509,13 +696,13 @@ class TestRateLimits:
 
     def test_window_expiry_resets_count(self, monkeypatch):
         import time as time_mod
-        from backend import ratelimit as rl
-        limiter = rl.MemoryRateLimiter()
+
+        limiter = ratelimit.MemoryRateLimiter()
         base = 1_000_000.0
-        monkeypatch.setattr(rl.time, "time", lambda: base)
+        monkeypatch.setattr(ratelimit.time, "time", lambda: base)
         assert limiter.check("s", "ip:a", 1, 60)[0] is True
         assert limiter.check("s", "ip:a", 1, 60)[0] is False
-        monkeypatch.setattr(rl.time, "time", lambda: base + 61)
+        monkeypatch.setattr(ratelimit.time, "time", lambda: base + 61)
         assert limiter.check("s", "ip:a", 1, 60)[0] is True
         assert time_mod is not None
 
@@ -564,9 +751,9 @@ class TestDreamLogic:
         assert labels == ["뱀"]
 
     def test_tone_branches(self):
-        good = dream.build_reading(["뱀", "불"])       # good 우세
+        good = dream.build_reading(["뱀", "불"])  # good 우세
         caution = dream.build_reading(["추락", "이빨 빠짐"])  # caution 우세
-        mixed = dream.build_reading(["물"])             # 균형
+        mixed = dream.build_reading(["물"])  # 균형
         assert "길몽" in good["chips"][0]
         assert "액땜" in caution["chips"][0]
         assert "갈림길" in mixed["chips"][0]

@@ -23,7 +23,7 @@
 
 | 프로토타입 | 구현 |
 |---|---|
-| 상징 감지·reading·세그먼트 | **backend/dream.py** (순수 함수 — 클라이언트 조작 방지 + 추후 LLM 교체 지점). POST `/api/dream/interpret` {text, symbols[]} → 로그인 게이트(401) |
+| 상징 감지·reading·세그먼트 | **src/shindang/domain/dream.py** (순수 함수 — 클라이언트 조작 방지 + 추후 LLM 교체 지점). POST `/api/dream/interpret` {text, symbols[]} → 로그인 게이트(401) |
 | 오디오 | mock 톤 재사용 (`/audio/mock/…`, 세션 게이트 기존 적용). 실 TTS는 §3 hold와 동일 후속 |
 | E0 카드 | S3TopicSelect에 dream 전용 카드 추가 (NEW 배지 + 금선 하이라이트) |
 | 게이트 | 기존 LoginPrompt 재사용 + 전용 카피 prop |

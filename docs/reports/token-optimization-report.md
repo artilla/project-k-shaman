@@ -1,7 +1,7 @@
 # LLM 입력/출력 토큰 최적화 리포트 v1
 
 측정일: 2026-05-22
-대상: `fortune-prompt-hongyeon.v1.md`, `fortune-samples.v1.json` 15개
+대상: `docs/prompts/fortune-prompt-hongyeon.v1.md`, `contracts/fortune/fortune-samples.v1.json` 15개
 방법: 실제 API 호출 없이 `o200k_base` 프록시 토크나이저로 토큰 측정 + 공개 단가 적용
 단가(Gemini 2.5 Flash, 공개가): 입력 $0.30/1M · 출력 $2.50/1M · **캐시 읽기 $0.03/1M**(기본 입력의 10%) · 캐시 스토리지 $1.00/1M·시간
 
@@ -81,4 +81,4 @@ LLM은 cache miss 건당 원가($0.0096)의 약 22%다. 따라서 LLM을 68% 줄
 
 - 토큰은 `o200k_base` 프록시다. 상대 비교(트리밍/캐시 효과)에는 충분하나, 절대 비용은 Gemini 공식 `count_tokens`로 0단계에서 재측정해야 한다.
 - 컨텍스트 캐시의 최소 토큰 요건·TTL·실제 청구 방식은 provider 문서/실측으로 확정한다.
-- `scores_line` 중간안의 실제 Gemini 출력 토큰은 `fortune-schema.v1.1.json`/`fortune-prompt-hongyeon.v1.1.md` 기준으로 재측정한다.
+- `scores_line` 중간안의 실제 Gemini 출력 토큰은 `contracts/fortune/fortune-schema.v1.1.json`/`docs/prompts/fortune-prompt-hongyeon.v1.1.md` 기준으로 재측정한다.

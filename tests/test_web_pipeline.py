@@ -1,27 +1,24 @@
-"""T019: 재생 파이프라인 조립(fortune-engine/web/pipeline.py) — 서버 이벤트 캡처,
-재방문 cache_hit 회귀(신규합성 0회) 테스트."""
-import importlib.util
+"""재생 유스케이스의 이벤트 캡처와 재방문 cache_hit 회귀 테스트."""
+
 from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).parent.parent
-PIPELINE_PATH = ROOT / "fortune-engine" / "web" / "pipeline.py"
-CACHE_LAYER_PATH = ROOT / "fortune-engine" / "cache_layer.py"
+from shindang.adapters.cache import InMemoryCacheStore
+from shindang.adapters.tts import TTSAdapter
+from shindang.application.playback import PlaybackService
 
 
-def _load(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+def build_playback_response(request, *, store, tts_backend=None):
+    custom = tts_backend if callable(tts_backend) else None
+    mode = "openai" if tts_backend == "openai" else "mock"
+    speech = TTSAdapter(
+        mode=mode,
+        cache_dir=Path.cwd() / "state" / "tts_cache",
+        backend=custom,
+    )
+    return PlaybackService(store, speech).build(request, include_tts=True)
 
-
-_pipeline = _load("t019_web_pipeline", PIPELINE_PATH)
-build_playback_response = _pipeline.build_playback_response
-
-_cache_layer = _load("cache_layer", CACHE_LAYER_PATH)
-InMemoryCacheStore = _cache_layer.InMemoryCacheStore
 
 _BASE_REQ = {"date": "2026-07-07", "topic": "love", "character_id": "hongyeon"}
 
@@ -31,7 +28,15 @@ class TestEnvelope:
 
     def test_returns_fortune_envelope_keys(self):
         result = build_playback_response(_BASE_REQ, store=InMemoryCacheStore())
-        for key in ("fortuneId", "script", "audioUrl", "durationSec", "fortune", "tts", "events"):
+        for key in (
+            "fortuneId",
+            "script",
+            "audioUrl",
+            "durationSec",
+            "fortune",
+            "tts",
+            "events",
+        ):
             assert key in result, f"'{key}' 키 누락"
 
     def test_events_is_nonempty_list_of_dicts(self):
@@ -88,7 +93,9 @@ class TestRevisitCacheHit:
         build_playback_response(_BASE_REQ, store=store)
         other_req = {**_BASE_REQ, "topic": "money"}
         result = build_playback_response(other_req, store=store)
-        fortune_layer_events = [e for e in result["events"] if e.get("layer") == "fortune"]
+        fortune_layer_events = [
+            e for e in result["events"] if e.get("layer") == "fortune"
+        ]
         assert any(e["event"] == "cache_miss" for e in fortune_layer_events)
 
 
@@ -107,7 +114,9 @@ class TestTtsBackendInjection:
             calls.append(cache_key)
             return {"audioUrl": "mock://spy-injected"}
 
-        result = build_playback_response(_BASE_REQ, store=InMemoryCacheStore(), tts_backend=spy_backend)
+        result = build_playback_response(
+            _BASE_REQ, store=InMemoryCacheStore(), tts_backend=spy_backend
+        )
         assert len(calls) == 1
         assert result["audioUrl"] == "mock://spy-injected"
 
@@ -118,14 +127,18 @@ class TestTtsBackendInjection:
             received["cache_key"] = cache_key
             return {"audioUrl": "mock://spy"}
 
-        result = build_playback_response(_BASE_REQ, store=InMemoryCacheStore(), tts_backend=spy_backend)
+        result = build_playback_response(
+            _BASE_REQ, store=InMemoryCacheStore(), tts_backend=spy_backend
+        )
         assert received["cache_key"] == result["tts"]["cacheKey"]
 
     def test_openai_backend_without_api_key_raises(self, monkeypatch):
         """실백엔드("openai") 옵트인 + 키 없음 → 네트워크 호출 전에 즉시 거부 (T018 계약)."""
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         with pytest.raises(RuntimeError):
-            build_playback_response(_BASE_REQ, store=InMemoryCacheStore(), tts_backend="openai")
+            build_playback_response(
+                _BASE_REQ, store=InMemoryCacheStore(), tts_backend="openai"
+            )
 
     def test_revisit_with_injected_backend_skips_new_synthesis(self):
         """AC: 같은 seed 재방문 → cache_hit 경로 재생, 신규합성 0회 (백엔드 종류와 무관하게 성립).

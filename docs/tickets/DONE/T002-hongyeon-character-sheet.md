@@ -24,11 +24,11 @@ spec_ref: docs/master-spec.md#1-office-hours--6가지-필수-질문
 
 **포함**
 - 신규 문서 `docs/product/character-sheet-hongyeon.md` 작성.
-- 기존 출처를 **통합·확장**: `fortune-prompt-hongyeon.v1.1.md`(정체성·말투·콘텐츠 원칙·안전·lucky 풀·출력 계약), `docs/planning/Plan.md` §9, `docs/planning/today-shindang-service-plan-v3.md` §4·§7.
+- 기존 출처를 **통합·확장**: `docs/prompts/fortune-prompt-hongyeon.v1.1.md`(정체성·말투·콘텐츠 원칙·안전·lucky 풀·출력 계약), `docs/planning/Plan.md` §9, `docs/planning/today-shindang-service-plan-v3.md` §4·§7.
 - 프롬프트에 **없는 공백을 보강**: 음성(TTS) 디렉션 디테일, presynth 문장 세트(인사·전환·축원·엔딩) 톤 가이드, 공유 카드·아바타 비주얼 톤.
 
 **제외**
-- `fortune-prompt-hongyeon.v1.1.md` **자체 수정** — 시트는 이를 LLM 출력 계약의 **정본으로 참조**만 한다(상충 시 프롬프트 우선).
+- `docs/prompts/fortune-prompt-hongyeon.v1.1.md` **자체 수정** — 시트는 이를 LLM 출력 계약의 **정본으로 참조**만 한다(상충 시 프롬프트 우선).
 - `fortune-schema.v1.1.json`·코드·`narration_composer.py` 변경.
 - 소월·강림 등 다른 캐릭터 (v3 §7 후속).
 
@@ -43,7 +43,7 @@ spec_ref: docs/master-spec.md#1-office-hours--6가지-필수-질문
   4. 음성(TTS) 디렉션 (밝고 리듬감, 속도·감정·문장 끊기; 강점영역 연애·자신감·대인관계)
   5. presynth 문장 세트 가이드 (인사·전환·축원·엔딩 — 톤·길이·예시)
   6. 공유 카드·아바타 비주얼 톤 (팔레트는 `lucky.color` 풀과 정합)
-- [ ] 기존 `fortune-prompt-hongyeon.v1.1.md`·`docs/planning/Plan.md §9` 안전 기준과 **모순 없음**(상충 시 시트가 출처를 명시하고 프롬프트를 정본으로 표기).
+- [ ] 기존 `docs/prompts/fortune-prompt-hongyeon.v1.1.md`·`docs/planning/Plan.md §9` 안전 기준과 **모순 없음**(상충 시 시트가 출처를 명시하고 프롬프트를 정본으로 표기).
 - [ ] 닉네임 음성 미포함, 실제 무속인 사칭 금지 등 **핵심 불변식**이 시트에 명시된다.
 - [ ] `./ralph/scripts/run_checks.sh` 0 exit.
 
@@ -70,7 +70,7 @@ git rm docs/product/character-sheet-hongyeon.md   # 추가 문서만 제거
 |---|---|---|---|
 | 프롬프트와 시트가 중복·드리프트 | M | M | 시트는 LLM 출력 규칙을 **재서술하지 않고 프롬프트를 정본으로 링크**, 보강 영역만 상세화 |
 | 기획 v1.1 결정과 어긋남 | L | M | 모든 항목에 출처(§) 표기, 불일치 발견 시 시트 단독 결정 금지 → 별도 티켓 |
-| 비주얼 톤이 lucky 색상 풀과 불일치 | L | L | 팔레트를 `fortune-prompt-hongyeon.v1.1.md` color 풀에 맞춤 |
+| 비주얼 톤이 lucky 색상 풀과 불일치 | L | L | 팔레트를 `docs/prompts/fortune-prompt-hongyeon.v1.1.md` color 풀에 맞춤 |
 
 ## 7. 메모 / 결정 이력
 

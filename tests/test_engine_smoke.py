@@ -2,30 +2,20 @@
 
 단일 샘플(fortune-samples.v1.1.json[0])이 세 모듈을 모두 무오류로 통과함을 단언한다.
 """
-import importlib.util
+
 import json
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import jsonschema
 
+from shindang.domain.fortune_card import render_share_card_svg
+from shindang.domain.narration import compose_narration
+
 # ── 경로 상수 ──────────────────────────────────────────────────
 ROOT = Path(__file__).parent.parent
-SAMPLES_PATH = ROOT / "fortune-engine" / "fortune-samples.v1.1.json"
-SCHEMA_PATH = ROOT / "fortune-engine" / "fortune-schema.v1.1.json"
-COMPOSER_PATH = ROOT / "fortune-engine" / "tts-ab-kit" / "narration_composer.py"
-SHARE_CARD_PATH = ROOT / "fortune-engine" / "share_card.py"
-
-# ── importlib로 하이픈 포함 경로 모듈 로드 ────────────────────
-_nc_spec = importlib.util.spec_from_file_location("narration_composer", COMPOSER_PATH)
-_nc_mod = importlib.util.module_from_spec(_nc_spec)
-_nc_spec.loader.exec_module(_nc_mod)
-compose_narration = _nc_mod.compose_narration
-
-_sc_spec = importlib.util.spec_from_file_location("share_card", SHARE_CARD_PATH)
-_sc_mod = importlib.util.module_from_spec(_sc_spec)
-_sc_spec.loader.exec_module(_sc_mod)
-render_share_card_svg = _sc_mod.render_share_card_svg
+SAMPLES_PATH = ROOT / "contracts" / "fortune" / "fortune-samples.v1.1.json"
+SCHEMA_PATH = ROOT / "contracts" / "fortune" / "fortune-schema.v1.1.json"
 
 
 def _first_sample() -> dict:

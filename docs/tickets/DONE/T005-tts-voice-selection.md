@@ -31,7 +31,7 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 **제외 (중요)**
 - **실제 유료 TTS API 호출·합성·계약 체결** — master-spec §3에서 **인간 승인 필수**. 본 티켓은 결정 문서까지만.
 - TTS 어댑터 **구현 코드** (후속 implementer 티켓).
-- narration 조립 전략 — 이미 `listening-decision-report.md`에서 "scores_line 중간안"으로 **결정 완료**(보이스 선정과 별개, 혼동 금지).
+- narration 조립 전략 — 이미 `docs/reports/tts/listening-decision-report.md`에서 "scores_line 중간안"으로 **결정 완료**(보이스 선정과 별개, 혼동 금지).
 
 ## 3. 수용 기준 (Acceptance Criteria)
 

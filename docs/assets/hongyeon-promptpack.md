@@ -82,8 +82,8 @@ front-facing to slight angle. Transparent background.
 | 해상도 | 1024×1024 |
 | 최종 포맷 | WebP, 장당 ≤150KB |
 | 파일명 규칙 | `hongyeon-{state}.webp` (`state` ∈ `greeting`\|`idle`\|`speaking`\|`blessing`\|`share-card`) |
-| 배치 경로 | `fortune-engine/web/static/assets/` |
-| 매니페스트 | `fortune-engine/web/static/assets/assets-manifest.md` — 아래 §5 양식 |
+| 배치 경로 | `frontend/public/static/assets/` |
+| 매니페스트 | `docs/assets/hongyeon-assets-manifest.md` — 아래 §5 양식 |
 
 변환 순서: 생성 도구 원본(PNG 등) → 투명 배경 확인 → 1024×1024 크롭/리사이즈 → WebP 변환(품질 조정으로 ≤150KB 충족) → 파일명 규칙 적용 → 배치.
 
@@ -103,13 +103,13 @@ front-facing to slight angle. Transparent background.
    | 5 | 화풍 | 채색 스타일(셀셰이딩/반실사 등)이 5컷 모두 동일 톤 |
 
 3. **운영자 1회 선정**: 유효 후보 세트 중 운영자가 **1세트를 최종 선정**한다 (사람 게이트 — 자동 루프가 대신하지 않는다).
-4. **커밋**: 선정된 세트만 `fortune-engine/web/static/assets/`에 배치하고 커밋한다. 미선정 후보는 저장소에 포함하지 않는다.
+4. **커밋**: 선정된 세트만 `frontend/public/static/assets/`에 배치하고 커밋한다. 미선정 후보는 저장소에 포함하지 않는다.
 
 ---
 
 ## 5. 에셋 매니페스트 양식 (`assets-manifest.md`)
 
-선정 세트를 배치할 때 아래 표를 `fortune-engine/web/static/assets/assets-manifest.md`에 기록한다.
+선정 세트를 배치할 때 아래 표를 `docs/assets/hongyeon-assets-manifest.md`에 기록한다.
 
 ```markdown
 # Hongyeon Asset Manifest
