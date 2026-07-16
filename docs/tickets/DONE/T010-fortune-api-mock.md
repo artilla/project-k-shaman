@@ -40,13 +40,13 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - [ ] **결정적**: 동일 `req`에 대해 두 번 호출하면 **동일 응답**(딕셔너리 동등).
 - [ ] 엔벨로프에 `fortuneId`, `audioUrl`(명백한 `mock://` 플레이스홀더), `durationSec`가 있고 `script`는 `compose_narration` 8세그먼트로 조립된다.
 - [ ] **개인정보 비저장**: birth 필드는 응답·로그·파일에 평문으로 남지 않는다(테스트로 확인). 실제 HMAC은 구현하지 않는다(주석으로 §3 hold 명시).
-- [ ] `./scripts/run_checks.sh` 0 exit.
+- [ ] `./ralph/scripts/run_checks.sh` 0 exit.
 
 ## 4. 테스트 계획
 
 ```bash
 pytest -q tests/test_fortune_api_mock.py
-./scripts/run_checks.sh
+./ralph/scripts/run_checks.sh
 ```
 
 ## 5. 롤백 방법 (Reversibility)

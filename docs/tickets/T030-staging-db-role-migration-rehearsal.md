@@ -75,7 +75,7 @@ spec_ref: docs/research/closed-beta-deployment-runbook.md
 ## 5. 테스트 계획
 
 ```bash
-./scripts/run_checks.sh --full
+./ralph/scripts/run_checks.sh --full
 ENV_FILE="$STAGING_MIGRATION_ENV" ./scripts/db_migrate.sh --status
 ENV_FILE="$STAGING_MIGRATION_ENV" MIGRATION_OWNER=shindang_deploy MIGRATION_APP_ROLES=shindang_app ./scripts/db_migrate.sh
 ENV_FILE="$STAGING_MIGRATION_ENV" ./scripts/db_migrate.sh --status

@@ -39,15 +39,15 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - [ ] `fortune-samples.v1.1.json`의 모든 유효 샘플이 스키마 검증을 **통과**한다.
 - [ ] 필수 필드(`schema_version`, `meta`, `scores`, `scores_line`, `summary`(정확히 2문장), `advice`, `lucky.{color,item}`, `avoid`, `blessing`) 누락/형식 위반 샘플은 **거부**된다(테스트로 1건 이상 검증).
 - [ ] `scores`의 5개 항목(love/money/work/relationship/condition)이 0–100 정수 범위를 벗어나면 거부된다.
-- [ ] `pytest`가 통과하고 `./scripts/run_checks.sh` 가 **0 exit**.
+- [ ] `pytest`가 통과하고 `./ralph/scripts/run_checks.sh` 가 **0 exit**.
 
 ## 4. 테스트 계획
 
-> `scripts/run_checks.sh`가 이 명령들을 호출 가능해야 함.
+> `ralph/scripts/run_checks.sh`가 이 명령들을 호출 가능해야 함.
 
 ```bash
 pytest -q tests/test_fortune_schema.py
-./scripts/run_checks.sh
+./ralph/scripts/run_checks.sh
 ```
 
 ## 5. 롤백 방법 (Reversibility)

@@ -40,13 +40,13 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - [ ] **결정적**: 동일 `req` 두 번 호출 시 동일 결과.
 - [ ] **PII 비유출**: 원본 `birthDate`/정확 `birthTime`가 `seed_hash`·`seed_signals`·반환값·로그·파일에 **평문으로 남지 않는다**(테스트로 단언). birth는 **버킷+해시**로만 흐른다.
 - [ ] **실제 HMAC 미구현**: 기본 해시는 비밀키 없는 dev 해시이며, `hash_fn` 주입으로 실제 HMAC을 나중에 끼울 수 있음(주석에 §3 hold). 주입형이 동작함을 테스트로 확인.
-- [ ] `./scripts/run_checks.sh` 0 exit.
+- [ ] `./ralph/scripts/run_checks.sh` 0 exit.
 
 ## 4. 테스트 계획
 
 ```bash
 pytest -q tests/test_seed_builder.py
-./scripts/run_checks.sh
+./ralph/scripts/run_checks.sh
 ```
 
 ## 5. 롤백 방법 (Reversibility)

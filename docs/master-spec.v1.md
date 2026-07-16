@@ -41,4 +41,4 @@
 ## 3. 권한 경계 (가역성 기준)
 
 > 자동 허용(loop) vs 인간 승인(hold). 판단 기준: "잘못됐을 때 즉시 되돌릴 수 있는가?"
-> 상세는 docs/runbook.md §4 참조.
+> 상세는 ralph/docs/runbook.md §4 참조.

@@ -38,7 +38,7 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - [ ] `OPENAI_API_KEY` 있는 로컬 실행에서: narration 1건 실합성 → 오디오 산출 + `tts_generate_start/complete` 이벤트 기록
 - [ ] 동일 seed 재요청 → `cache_hit` (신규합성 0회), 변경 seed → `cache_miss` 1회
 - [ ] 신규합성 실측 비용 로그 산출 (≤ $0.01/세션 목표 대비 실측치 기록 — ADR-0001 $0.0078 재검증)
-- [ ] 키 부재 환경: 계약 테스트 skip, 그 외 전부 mock으로 GREEN (`./scripts/run_checks.sh` 0 exit)
+- [ ] 키 부재 환경: 계약 테스트 skip, 그 외 전부 mock으로 GREEN (`./ralph/scripts/run_checks.sh` 0 exit)
 - [ ] 키·응답 원문이 코드/로그/픽스처에 남지 않음
 
 ## 4. 롤백

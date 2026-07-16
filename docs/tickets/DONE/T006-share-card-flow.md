@@ -64,13 +64,13 @@ spec_ref: docs/ux/screen-ia.md#s5--결과-카드
 - [ ] lucky.color는 캐릭터 시트 §6의 8개 팔레트 이름만 허용한다: `코랄 핑크`, `진홍`, `자수정 보라`, `청록`, `살구색`, `금빛`, `먹색`, `은백`. 알 수 없는 색상은 조용히 대체하지 말고 명시적으로 실패한다.
 - [ ] 생성물은 모바일 공유 카드에 맞는 고정 뷰박스(예: 1080×1350 또는 1080×1920)를 갖고, `lucky.color`가 강조색으로 반영된다.
 - [ ] CLI는 `--sample <seed_hash>`와 `--out <path>`를 지원하고, 성공 시 파일을 저장한 뒤 0 exit 한다.
-- [ ] `tests/test_share_card.py`가 위 조건을 자동 검증하며 `./scripts/run_checks.sh`가 0 exit 한다.
+- [ ] `tests/test_share_card.py`가 위 조건을 자동 검증하며 `./ralph/scripts/run_checks.sh`가 0 exit 한다.
 
 ## 4. 테스트 계획
 
 ```bash
 pytest tests/test_share_card.py
-./scripts/run_checks.sh
+./ralph/scripts/run_checks.sh
 ```
 
 ## 5. 롤백 방법 (Reversibility)

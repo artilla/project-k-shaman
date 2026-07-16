@@ -64,8 +64,8 @@ spec_ref: docs/master-spec.md
 ## 5. 테스트 계획
 
 ```bash
-./scripts/lint_external_docs.sh
-./scripts/run_checks.sh --full
+./ralph/scripts/lint_external_docs.sh
+./ralph/scripts/run_checks.sh --full
 PATH="/usr/local/opt/postgresql@16/bin:$PATH" ENV_FILE=.env.local ./scripts/db_migrate.sh --status  # read-only only
 ```
 

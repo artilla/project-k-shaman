@@ -41,14 +41,14 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - [ ] 홍연 톤 적합성 평가 기준(시트 §4)이 선정 근거에 반영된다.
 - [ ] **인간 승인 경계 명시**: 실제 합성/유료 계약은 master-spec §3 hold 항목임을 ADR 후속에 적는다.
 - [ ] 기존 narration A/B 결정과 **혼동하지 않음**(보이스 선정 ≠ 조립 전략).
-- [ ] `./scripts/run_checks.sh` 0 exit (ADR도 `lint_external_docs` 대상 — git 명령 컨텍스트에 base 브랜치 하드코딩 금지).
+- [ ] `./ralph/scripts/run_checks.sh` 0 exit (ADR도 `lint_external_docs` 대상 — git 명령 컨텍스트에 base 브랜치 하드코딩 금지).
 
 ## 4. 테스트 계획
 
 ```bash
 # ADR 4부 구성 + 비교표 존재 확인 (예시)
 grep -E "컨텍스트|결정|대안|후속|한국어|원가|지연|라이선스" docs/decisions/0001-tts-voice-and-provider.md
-./scripts/run_checks.sh   # lint_external_docs가 docs/decisions/ 를 검사
+./ralph/scripts/run_checks.sh   # lint_external_docs가 docs/decisions/ 를 검사
 ```
 
 ## 5. 롤백 방법 (Reversibility)

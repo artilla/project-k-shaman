@@ -37,13 +37,13 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - [ ] **결정적**: 동일 `req` → 동일 응답.
 - [ ] **birth-의존으로 전환**: `birth_date`/`birth_time` 버킷만 다른 두 `req`는 **다른 응답**(최소 `seed_hash`/`fortuneId` 상이). 기존 "birth 무시" 단언은 이 동작으로 **갱신**한다.
 - [ ] **PII 비유출 유지**: raw birth가 응답·로그·파일에 평문으로 남지 않는다(재단언).
-- [ ] `./scripts/run_checks.sh` 0 exit, full `pytest` green.
+- [ ] `./ralph/scripts/run_checks.sh` 0 exit, full `pytest` green.
 
 ## 4. 테스트 계획
 
 ```bash
 pytest -q tests/test_fortune_api_mock.py tests/test_seed_builder.py
-./scripts/run_checks.sh
+./ralph/scripts/run_checks.sh
 ```
 
 ## 5. 롤백 방법 (Reversibility)

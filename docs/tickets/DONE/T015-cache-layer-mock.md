@@ -51,13 +51,13 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - [ ] **결정성**: 같은 `key` → 같은 캐시 값. 다른 `key` → 서로 영향 없음.
 - [ ] **PII 비유출**: 캐시 키·값은 이미 파생된 해시(`seed_hash`/`script_hash`)만 담고 raw birth(생년월일/출생시간)는 담지 않는다.
 - [ ] **실 백엔드 미구현**: 기본 store는 in-memory/file mock(네트워크/비용 0), 실제 Redis/S3/CDN = §3 hold(주석 명시·주입점으로만).
-- [ ] `./scripts/run_checks.sh` 0 exit, full `pytest` green.
+- [ ] `./ralph/scripts/run_checks.sh` 0 exit, full `pytest` green.
 
 ## 4. 테스트 계획
 
 ```bash
 pytest -q tests/test_cache_layer.py
-./scripts/run_checks.sh
+./ralph/scripts/run_checks.sh
 ```
 
 검증 포인트(필수):

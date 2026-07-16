@@ -42,14 +42,14 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - [ ] **mock 흐름 연결 계획**: `fortune-samples.v1.1.json`을 mock으로 전체 화면 흐름을 연결하는 방법 명시.
 - [ ] **분석 이벤트 매핑**: 화면/액션 → 이벤트(`fortune_start`·`character_select`·`tts_play_start/complete`·`share_card_create` 등, Plan.md §5).
 - [ ] **개인정보 UX**: 비회원 로컬 우선·동의 기반 저장 표기(원본 생년월일 비노출). (v3 §12)
-- [ ] 기존 결정과 **모순 없음**(홍연 1종·정적 부적 카드·닉네임 음성 미포함). `./scripts/run_checks.sh` 0 exit.
+- [ ] 기존 결정과 **모순 없음**(홍연 1종·정적 부적 카드·닉네임 음성 미포함). `./ralph/scripts/run_checks.sh` 0 exit.
 
 ## 4. 테스트 계획
 
 ```bash
 # 핵심 화면·상태가 문서에 존재하는지 (예시)
 grep -E "온보딩|무당 선택|입력|주제|stage|결과 카드|공유|idle|greeting|speaking|blessing" docs/ux/screen-ia.md
-./scripts/run_checks.sh
+./ralph/scripts/run_checks.sh
 ```
 
 ## 5. 롤백 방법 (Reversibility)

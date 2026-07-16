@@ -36,13 +36,13 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
   2. `compose_narration`(T003) — **8세그먼트** 정상 반환(순서 정합은 T003가 이미 고정, 여기선 무오류 실행만).
   3. `share_card`(T006) — **well-formed SVG** 생성(파싱 가능).
 - [ ] import는 기존 테스트 패턴 재사용(`tts-ab-kit` 경로는 `importlib`/`sys.path`).
-- [ ] `./scripts/run_checks.sh` 0 exit.
+- [ ] `./ralph/scripts/run_checks.sh` 0 exit.
 
 ## 4. 테스트 계획
 
 ```bash
 pytest -q tests/test_engine_smoke.py
-./scripts/run_checks.sh
+./ralph/scripts/run_checks.sh
 ```
 
 ## 5. 롤백 방법 (Reversibility)
@@ -61,7 +61,7 @@ git rm tests/test_engine_smoke.py
 ## 7. 메모 / 결정 이력 (진단 목적)
 
 - **이 티켓은 T007(Step 2 헤드리스 로그 캡처) 적용 후 첫 실제 사이클이다.** 기대 동작:
-  - `./scripts/run_loop.sh T008-engine-smoke-test` 실행 시 `.ralph/logs/T008-engine-smoke-test.log`(메타 헤더 `ticket/started_at/root/persona` 포함) 생성.
+  - `./ralph/scripts/run_loop.sh T008-engine-smoke-test` 실행 시 `.ralph/logs/T008-engine-smoke-test.log`(메타 헤더 `ticket/started_at/root/persona` 포함) 생성.
   - **자율 완료**되면 → headless 자율성 회복 확인.
   - **stall**이면 → 그 로그로 `timeout / 즉시 종료 / 행` 중 무엇인지 즉시 좁힘. §3.8 절차로 회수.
 - 의도적으로 작은 task라 stall 발생 시 task 난이도가 아니라 **infra 신호**로 명확히 해석된다.

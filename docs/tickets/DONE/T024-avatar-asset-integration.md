@@ -49,4 +49,4 @@ started_at: 2026-07-08T00:36:38+09:00
 `git revert <commit>` — 프론트 + 카드 임베드 분기만.
 
 ## 5. 운영 노트 (implementer에게)
-- `skills/implementer.md` §2.1 준수. 에셋 실물이 없어도 이 티켓은 완결된다 — 스텁 픽스처로 검증하라.
+- `ralph/skills/implementer.md` §2.1 준수. 에셋 실물이 없어도 이 티켓은 완결된다 — 스텁 픽스처로 검증하라.

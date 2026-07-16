@@ -80,12 +80,12 @@
 경로. 캐시 키는 **HMAC 해시만** 사용 — 원문 개인정보가 캐시 계층에 닿지 않는다.
 
 **운영 하네스**: Ralph Loop(명세→티켓→헤드리스→검증→승인) + 프로젝트 전용 Mission Control
-(`./scripts/mission_control.sh start`). 검증 GREEN 기준은 `scripts/run_checks.local.sh`.
+(`./ralph/scripts/mission_control.sh start`). 검증 GREEN 기준은 `ralph/scripts/run_checks.local.sh`.
 
 ## 3. 권한 경계 (가역성 기준)
 
 > 자동 허용(loop) vs 인간 승인(hold). 판단 기준: "잘못됐을 때 즉시 되돌릴 수 있는가?"
-> 상세는 docs/runbook.md §4 참조.
+> 상세는 ralph/docs/runbook.md §4 참조.
 
 - **자동 허용(loop)**: `fortune-engine/` 코드·mock·테스트, 문서/티켓 초안, 하네스 스크립트 보수.
   (전부 git revert 가능)

@@ -45,7 +45,7 @@ spec_ref: docs/master-spec.md#1-office-hours--6가지-필수-질문
   6. 공유 카드·아바타 비주얼 톤 (팔레트는 `lucky.color` 풀과 정합)
 - [ ] 기존 `fortune-prompt-hongyeon.v1.1.md`·`Plan.md §9` 안전 기준과 **모순 없음**(상충 시 시트가 출처를 명시하고 프롬프트를 정본으로 표기).
 - [ ] 닉네임 음성 미포함, 실제 무속인 사칭 금지 등 **핵심 불변식**이 시트에 명시된다.
-- [ ] `./scripts/run_checks.sh` 0 exit.
+- [ ] `./ralph/scripts/run_checks.sh` 0 exit.
 
 ## 4. 테스트 계획
 
@@ -54,7 +54,7 @@ spec_ref: docs/master-spec.md#1-office-hours--6가지-필수-질문
 ```bash
 # 6개 필수 섹션 헤더 존재 확인 (예시)
 grep -E "페르소나|말투|안전|음성|presynth|비주얼" fortune-engine/character-sheet-hongyeon.md
-./scripts/run_checks.sh
+./ralph/scripts/run_checks.sh
 ```
 
 ## 5. 롤백 방법 (Reversibility)

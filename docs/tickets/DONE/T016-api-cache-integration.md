@@ -49,13 +49,13 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - [ ] TTS 캐시 키는 T013 adapter의 `tts:v1:{provider}:{voice}:{script_hash}:{speed}:{emotion}` 값을 변형 없이 사용한다.
 - [ ] 유지: fortune 객체는 `fortune-schema.v1.1` 검증을 통과하고, 동일 요청 결정성·birth bucket 결정성·raw PII 비유출 테스트가 계속 통과한다.
 - [ ] 실 LLM/TTS/Redis/S3/CDN 호출은 없다. 실제 백엔드는 §3 hold 주석 또는 주입점으로만 존재한다.
-- [ ] `./scripts/run_checks.sh` 0 exit, full `pytest` green.
+- [ ] `./ralph/scripts/run_checks.sh` 0 exit, full `pytest` green.
 
 ## 4. 테스트 계획
 
 ```bash
 pytest -q tests/test_fortune_api_mock.py tests/test_cache_layer.py tests/test_tts_adapter.py
-./scripts/run_checks.sh
+./ralph/scripts/run_checks.sh
 ```
 
 검증 포인트:

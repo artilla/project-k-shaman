@@ -36,13 +36,13 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - [ ] 응답 엔벨로프에 `tts` metadata(최소 `cacheKey`·`provider`·`voice`)가 포함된다.
 - [ ] **유지**: fortune 객체 `validate_fortune`(T001) 통과 · 결정성(동일 req→동일 응답) · **PII 비유출**(raw birth 비노출).
 - [ ] **실제 TTS 미호출**: adapter mock backend 사용(네트워크/비용 0), 실제 호출은 §3 hold(주석).
-- [ ] 기존 placeholder/고정 duration 단언은 adapter-도출값으로 **갱신**. `./scripts/run_checks.sh` 0 exit, full `pytest` green.
+- [ ] 기존 placeholder/고정 duration 단언은 adapter-도출값으로 **갱신**. `./ralph/scripts/run_checks.sh` 0 exit, full `pytest` green.
 
 ## 4. 테스트 계획
 
 ```bash
 pytest -q tests/test_fortune_api_mock.py tests/test_tts_adapter.py
-./scripts/run_checks.sh
+./ralph/scripts/run_checks.sh
 ```
 
 ## 5. 롤백 방법 (Reversibility)

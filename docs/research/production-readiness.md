@@ -122,7 +122,7 @@ read-only preflight
 repo gate:
 
 ```bash
-./scripts/run_checks.sh --full
+./ralph/scripts/run_checks.sh --full
 ```
 
 DB read-only preflight:

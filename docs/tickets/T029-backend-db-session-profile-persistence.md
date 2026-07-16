@@ -78,7 +78,7 @@ spec_ref: docs/decisions/0005-closed-beta-deployment-and-staging-contract.md
 ## 5. 테스트 계획
 
 ```bash
-./scripts/run_checks.sh --full
+./ralph/scripts/run_checks.sh --full
 python3 -m pytest tests/test_backend_db.py tests/test_backend_app.py
 bats tests/db-migrate.bats
 ```

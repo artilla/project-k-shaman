@@ -30,6 +30,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes bats
       - name: Run the full repository gate
-        run: ./scripts/run_checks.sh --full
+        run: ./ralph/scripts/run_checks.sh --full
       - name: Build the same-origin application image
         run: docker build --tag shindang:${GITHUB_SHA} .

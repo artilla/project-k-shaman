@@ -23,7 +23,7 @@ bash-watchdog 경로에서 claude가 timeout **전에** 끝날 때 셸 job-contr
 ## 2. 변경 범위 (Scope)
 
 **포함**
-- `scripts/run_headless.sh`의 watchdog watcher 정리 보강 — watcher `sleep` 백그라운드 잡을 `disown`(또는 그 구간만 monitor-mode off)하여 종료 시 job-control 알림이 찍히지 않게.
+- `ralph/scripts/run_headless.sh`의 watchdog watcher 정리 보강 — watcher `sleep` 백그라운드 잡을 `disown`(또는 그 구간만 monitor-mode off)하여 종료 시 job-control 알림이 찍히지 않게.
 - bats 테스트로 "watchdog 정상 동작 + 노이즈 없음" 고정.
 
 **제외**
@@ -34,14 +34,14 @@ bash-watchdog 경로에서 claude가 timeout **전에** 끝날 때 셸 job-contr
 
 - [ ] bash-watchdog 경로(`timeout`·`gtimeout` 둘 다 없을 때)에서 claude가 빠르게 끝나면 stderr/로그에 **`Terminated` job-control 노이즈가 남지 않는다**.
 - [ ] **타임아웃 강제는 그대로** — 초과 시 여전히 rc=5 + 프로세스 트리 종료(기존 `run-headless` 타임아웃 bats **무회귀**).
-- [ ] `./scripts/run_checks.sh` 0 exit (bats 포함).
+- [ ] `./ralph/scripts/run_checks.sh` 0 exit (bats 포함).
 
 ## 4. 테스트 계획
 
 ```bash
 # fake CLAUDE_CMD(빠른 종료) + timeout/gtimeout 마스킹으로 watchdog 경로 강제 → stderr에 "Terminated" 없음 단언
-bats tests/run-headless-*.bats
-./scripts/run_checks.sh
+bats ralph/tests/run-headless-*.bats
+./ralph/scripts/run_checks.sh
 ```
 
 ## 5. 롤백 방법 (Reversibility)

@@ -49,4 +49,4 @@ started_at: 2026-07-08T00:24:37+09:00
 `git revert <commit>` — 문서만.
 
 ## 5. 운영 노트 (implementer/planner에게)
-- `skills/implementer.md` §2.1 헤드리스 실행 모델 준수 (턴=세션, 질문 종료 금지 — 판단 갈리면 시트 §6을 정본으로 보수적 선택 후 메모).
+- `ralph/skills/implementer.md` §2.1 헤드리스 실행 모델 준수 (턴=세션, 질문 종료 금지 — 판단 갈리면 시트 §6을 정본으로 보수적 선택 후 메모).

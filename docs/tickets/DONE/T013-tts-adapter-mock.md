@@ -43,13 +43,13 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - [ ] 기본값이 **ADR-0001**(`gpt-4o-mini-tts`, `coral`)을 따른다.
 - [ ] **실제 합성 미구현**: 기본 backend는 mock(`mock://`, 네트워크/비용 0). 주입형 backend가 호출됨을 테스트로 확인. 실제 호출 = §3 hold(주석 명시).
 - [ ] `durationSec`가 script 길이에서 결정적으로 나오고 합리적 밴드 안.
-- [ ] `./scripts/run_checks.sh` 0 exit.
+- [ ] `./ralph/scripts/run_checks.sh` 0 exit.
 
 ## 4. 테스트 계획
 
 ```bash
 pytest -q tests/test_tts_adapter.py
-./scripts/run_checks.sh
+./ralph/scripts/run_checks.sh
 ```
 
 ## 5. 롤백 방법 (Reversibility)

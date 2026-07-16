@@ -80,4 +80,4 @@ git revert <commit>   # 서버 플래그·서빙 경로·스크립트만. 기본
     - 실 오디오 파일 정상 서빙 확인 (`/audio/real/<hash>.mp3`, 642432 bytes, 유효 mp3).
     - `measure_playback.py` 누적 로그(개발 중 축적된 mock 세션 포함 20건) 집계: cacheHitRate 94.7% (임계 ≥70% PASS), 세션당 추정 비용 $0.00075 (임계 ≤$0.01 PASS).
   - 실과금: 이번 구현 세션 중 실제 청구된 OpenAI TTS 호출은 총 3회 — presynth 1회(추정 $0.015) + T018 기존 실계약 테스트(`test_real_synthesis_produces_audio_and_events`)가 셸에 이미 존재하던 `OPENAI_API_KEY` 때문에 의도치 않게 2회 자동 실행(각 추정 ~$0.01, 매우 짧은 고정 픽스처 텍스트). 총 추정 비용 ≈ $0.035 — 승인 한도(≤50회·≤$1) 내. 이후 검증은 `env -u OPENAI_API_KEY`로 명시 격리해 재발 방지.
-  - `./scripts/run_checks.sh`: pytest·ruff 등 코드 검증 항목 전부 GREEN. bats 회귀만 실패하는데, 이 실패는 `timeout`/`gtimeout` 바이너리가 이 로컬 macOS 환경에 없어서 발생하는 기존(T020 이전 master에서도 동일) 환경 문제이며 `tests/run-headless-timeout.bats`(T020 범위 밖)에 한정된다 — `git stash`로 비교해 사전 존재를 확인함.
+  - `./ralph/scripts/run_checks.sh`: pytest·ruff 등 코드 검증 항목 전부 GREEN. bats 회귀만 실패하는데, 이 실패는 `timeout`/`gtimeout` 바이너리가 이 로컬 macOS 환경에 없어서 발생하는 기존(T020 이전 master에서도 동일) 환경 문제이며 `ralph/tests/run-headless-timeout.bats`(T020 범위 밖)에 한정된다 — `git stash`로 비교해 사전 존재를 확인함.

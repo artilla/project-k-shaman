@@ -37,13 +37,13 @@ spec_ref: docs/master-spec.md#2-범위--아키텍처-개요
 - [ ] presynth 세그먼트(`greeting`/`blessing`/`ending`)는 `type == "presynth"`이고 `PRESYNTH` 풀에서 나온다; 개인화(`summary`/`scores`/`advice`/`avoid`)는 LLM 필드에서; `lucky`는 `type == "semi"`(템플릿).
 - [ ] `fortune-samples.v1.1.json`의 유효 샘플을 통과시키면 모든 세그먼트 `text`가 **비어 있지 않다**.
 - [ ] **알려진 허용 편차**(transition 미포함=선택, presynth 단일 문자열=MVP)는 테스트에서 **실패로 취급하지 않는다**(주석으로 의도 명시).
-- [ ] `./scripts/run_checks.sh` 0 exit (pytest 포함).
+- [ ] `./ralph/scripts/run_checks.sh` 0 exit (pytest 포함).
 
 ## 4. 테스트 계획
 
 ```bash
 pytest -q tests/test_narration_composer.py
-./scripts/run_checks.sh
+./ralph/scripts/run_checks.sh
 ```
 
 > `narration_composer.py`는 `fortune-engine/tts-ab-kit/` 하위이므로, 테스트에서 해당 경로를 `sys.path`에 추가하거나 `importlib`로 로드한다(경로 상수는 테스트 상단에).

@@ -48,7 +48,7 @@ spec_ref: docs/decisions/0005-closed-beta-deployment-and-staging-contract.md
   - HTTPS production/staging에서 `Secure`, `HttpOnly`, `SameSite=Lax`
   - `SHINDANG_DEV_LOGIN` production fail-closed
 - GitHub Actions:
-  - 전체 `./scripts/run_checks.sh --full` 통과 후에만 image build
+  - 전체 `./ralph/scripts/run_checks.sh --full` 통과 후에만 image build
   - commit SHA tag와 immutable digest 기록, ECR push
   - environment approval을 거치는 staging deploy와 production promotion job 분리
   - migration을 app startup/deploy job에 포함하지 않음
@@ -82,7 +82,7 @@ spec_ref: docs/decisions/0005-closed-beta-deployment-and-staging-contract.md
 ## 5. 테스트 계획
 
 ```bash
-./scripts/run_checks.sh --full
+./ralph/scripts/run_checks.sh --full
 docker build --tag shindang:test .
 docker compose config --quiet
 docker compose up -d --build

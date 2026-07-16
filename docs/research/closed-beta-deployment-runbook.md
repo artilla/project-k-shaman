@@ -22,7 +22,7 @@
 
 다음 중 하나라도 참이면 즉시 중단한다.
 
-- 승인 마커가 없거나 `mission-control/approval.mjs`가 `ok`가 아니다.
+- 승인 마커가 없거나 `ralph/mission-control/approval.mjs`가 `ok`가 아니다.
 - target environment, DB name, current role, image digest 중 하나가 불명확하다.
 - production과 staging `DATABASE_URL`을 사람이 구분해 확인하지 못했다.
 - `shindang_app`이 superuser이거나 `shindang_deploy`로 전환·상속·재부여할 수 있다.
@@ -39,7 +39,7 @@
 git status --short --branch
 git fetch remote
 git rev-list --left-right --count HEAD...remote/HEAD
-./scripts/run_checks.sh --full
+./ralph/scripts/run_checks.sh --full
 ```
 
 `run_checks.sh`가 모두 통과하고, 배포할 commit이 remote에 존재하며, unrelated WIP가

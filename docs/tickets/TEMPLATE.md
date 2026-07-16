@@ -8,9 +8,9 @@ priority: P2            # P0 | P1 | P2 | P3
 safe: true              # true면 Step 2/4 자동 루프 대상,
                         # false면 docs/approvals/<TXXX>.md 인간 승인 마커 필수
 persona: implementer    # implementer | planner | reviewer
-                        #   implementer → 코드 구현 (skills/implementer.md)
-                        #   planner     → 명세/티켓/문서 (skills/planner.md, master-spec 수정 가능)
-                        #   reviewer    → 교차 검증 (skills/reviewer.md, 코드 수정 금지)
+                        #   implementer → 코드 구현 (ralph/skills/implementer.md)
+                        #   planner     → 명세/티켓/문서 (ralph/skills/planner.md, master-spec 수정 가능)
+                        #   reviewer    → 교차 검증 (ralph/skills/reviewer.md, 코드 수정 금지)
 estimate: S             # S | M | L (~1h / ~4h / ~1d)
 depends_on: []          # ["TXXX", ...]
 blocks: []
@@ -42,7 +42,7 @@ spec_ref: docs/master-spec.md#section-id
 
 ## 4. 테스트 계획
 
-> 자동 검증 가능한 명령. `scripts/run_checks.sh`가 이 명령들을 호출 가능해야 함.
+> 자동 검증 가능한 명령. `ralph/scripts/run_checks.sh`가 이 명령들을 호출 가능해야 함.
 
 ```bash
 # 예시
