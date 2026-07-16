@@ -17,9 +17,7 @@ CLI:
   이 모듈은 library 전용이며 오프라인 검증은 tools/fortune/을 사용한다.
 """
 
-import json
 import re
-import sys
 
 PRESYNTH = {
     "greeting": "오늘신당에 오셨군요. 홍연이 오늘의 기운을 무대 위에 올려볼게요.",
@@ -88,8 +86,3 @@ def compose_narration(f: dict) -> list:
         {"segment": "blessing", "type": "presynth", "text": PRESYNTH["blessing"]},
         {"segment": "ending", "type": "presynth", "text": PRESYNTH["ending"]},
     ]
-
-
-if __name__ == "__main__":
-    data = json.load(sys.stdin)
-    print(json.dumps(compose_narration(data), ensure_ascii=False, indent=2))

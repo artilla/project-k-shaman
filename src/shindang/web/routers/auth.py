@@ -7,7 +7,7 @@ import secrets
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from shindang.adapters.session import (
+from ..cookies import (
     OAUTH_STATE_COOKIE_NAME,
     SESSION_COOKIE_NAME,
     make_session_cookie_value,
@@ -91,9 +91,18 @@ def callback(provider: str, request: Request):
     except Exception:
         _logger.exception("oauth token exchange failed for provider=%s", provider)
         return _auth_error(request)
+    subject = profile.get("subject") if isinstance(profile, dict) else None
+    if not isinstance(subject, str) or not subject.strip():
+        _logger.warning("oauth profile missing subject for provider=%s", provider)
+        return _auth_error(request)
     session_id = secrets.token_hex(16)
     app.sessions.put(
-        session_id, {"provider": provider, "nickname": profile.get("nickname")}
+        session_id,
+        {
+            "provider": provider,
+            "subject": subject,
+            "nickname": profile.get("nickname"),
+        },
     )
     response = RedirectResponse("/", status_code=302)
     set_auth_cookie(
@@ -102,6 +111,7 @@ def callback(provider: str, request: Request):
         make_session_cookie_value(session_id, app.settings.session_secret),
         app,
     )
+    set_auth_cookie(response, OAUTH_STATE_COOKIE_NAME, "", app, max_age=0)
     return response
 
 

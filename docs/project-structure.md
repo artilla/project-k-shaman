@@ -78,6 +78,7 @@ adapters ──> application ──> domain
 | `adapters/tts.py` | mock/OpenAI TTS 구현과 비용 경계 |
 | `adapters/seed_hash.py` | 용도 분리된 HMAC 개인화 해시 |
 | `adapters/session.py` | 현재 단일 인스턴스 세션 구현 |
+| `web/cookies.py` | HTTP 세션 쿠키 이름과 서명 형식 |
 | `web/routers/` | auth, fortune, dream, event, health route |
 | `bootstrap.py` | 구현 선택과 애플리케이션 컨테이너 구성 |
 

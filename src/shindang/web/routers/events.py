@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from shindang.application.telemetry import summarize_latency, validate_timeline
 
 from ..dependencies import container, rate_gate
-from ..validation import json_object
+from ..validation import json_object, timeline_request
 
 router = APIRouter(tags=["telemetry"])
 
@@ -21,15 +21,12 @@ async def event(request: Request):
     payload, error = await json_object(request)
     if error:
         return error
-    server_events = payload.get("serverEvents", [])
-    client_events = payload.get("clientEvents", [])
-    if not isinstance(server_events, list) or not isinstance(client_events, list):
-        return JSONResponse({"error": "invalid body"}, status_code=400)
-    events = [*server_events, *client_events]
+    parsed, error = timeline_request(payload)
+    if error:
+        return error
+    events, session_start_ms = parsed
     missing = validate_timeline(events)
-    summary = summarize_latency(
-        events, session_start_ms=payload.get("sessionStartMs", 0)
-    )
+    summary = summarize_latency(events, session_start_ms=session_start_ms)
     app.events.append(
         {"fortuneId": payload.get("fortuneId"), "events": events, "summary": summary}
     )

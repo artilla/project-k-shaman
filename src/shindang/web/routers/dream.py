@@ -26,7 +26,11 @@ async def dream_interpret(request: Request):
         return error
     text = payload.get("text", "")
     selected = payload.get("symbols", [])
-    if not isinstance(text, str) or not isinstance(selected, list):
+    if (
+        not isinstance(text, str)
+        or not isinstance(selected, list)
+        or any(not isinstance(symbol, str) for symbol in selected)
+    ):
         return JSONResponse({"error": "invalid body"}, status_code=400)
     if not text.strip() and not selected:
         return JSONResponse({"error": "text or symbols required"}, status_code=400)

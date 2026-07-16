@@ -4,14 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import math
-import re
 import struct
 import wave
 from io import BytesIO
 from pathlib import Path
-
-KEY_RE = re.compile(r"^[0-9a-f]{16,64}$")
-
 
 class AudioStore:
     def __init__(self, mode: str, cache_dir: Path) -> None:

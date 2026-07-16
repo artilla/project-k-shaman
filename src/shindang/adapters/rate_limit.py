@@ -66,14 +66,3 @@ class MemoryRateLimiter:
                 return False, max(1, int(window_end - now))
             self._buckets[key] = count + 1
             return True, 0
-
-
-def client_identity(request, session_id: str | None, *, trust_proxy: bool) -> str:
-    if session_id:
-        return "s:" + session_id
-    if trust_proxy:
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return "ip:" + forwarded.split(",")[0].strip()
-    client = getattr(request, "client", None)
-    return "ip:" + (client.host if client else "unknown")

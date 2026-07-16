@@ -1,6 +1,8 @@
 """TTS adapter — determinism, cache key format, mock/real backend, events."""
 
 import os
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -334,6 +336,71 @@ class TestOpenAIBackendKeyGuard:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         with pytest.raises(RuntimeError):
             synthesize(_SAMPLE_SCRIPT, backend=_mod.openai_backend)
+
+
+class TestOpenAIBackendAtomicCache:
+    @staticmethod
+    def _install_fake_openai(monkeypatch, stream_to_file):
+        class StreamingResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def stream_to_file(self, path):
+                stream_to_file(Path(path))
+
+        def create(**kwargs):
+            assert kwargs["model"] == "gpt-4o-mini-tts"
+            return StreamingResponse()
+        client = types.SimpleNamespace(
+            audio=types.SimpleNamespace(
+                speech=types.SimpleNamespace(
+                    with_streaming_response=types.SimpleNamespace(create=create)
+                )
+            )
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "openai",
+            types.SimpleNamespace(OpenAI=lambda: client),
+        )
+        monkeypatch.setenv("OPENAI_API_KEY", "non-billable-test-key")
+
+    def test_stream_failure_never_leaves_partial_cache_file(
+        self, tmp_path, monkeypatch
+    ):
+        def fail_after_partial_write(path: Path):
+            path.write_bytes(b"partial")
+            raise OSError("stream interrupted")
+
+        self._install_fake_openai(monkeypatch, fail_after_partial_write)
+        adapter = _mod.TTSAdapter(mode="openai", cache_dir=tmp_path)
+
+        with pytest.raises(OSError, match="stream interrupted"):
+            adapter._openai_backend(
+                _SAMPLE_SCRIPT,
+                "tts:v1:openai:coral:atomic-failure:1.0:bright",
+                {"model": "gpt-4o-mini-tts", "voice": "coral"},
+            )
+
+        assert list(tmp_path.iterdir()) == []
+
+    def test_complete_stream_is_atomically_published(self, tmp_path, monkeypatch):
+        audio = b"\xff\xfb\x90\x00complete-mp3"
+        self._install_fake_openai(monkeypatch, lambda path: path.write_bytes(audio))
+        adapter = _mod.TTSAdapter(mode="openai", cache_dir=tmp_path)
+
+        result = adapter._openai_backend(
+            _SAMPLE_SCRIPT,
+            "tts:v1:openai:coral:atomic-success:1.0:bright",
+            {"model": "gpt-4o-mini-tts", "voice": "coral"},
+        )
+
+        output = Path(result["audioUrl"].removeprefix("file://"))
+        assert output.read_bytes() == audio
+        assert sorted(path.suffix for path in tmp_path.iterdir()) == [".mp3"]
 
 
 class TestOpenAIBackendContract:

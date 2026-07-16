@@ -41,7 +41,7 @@ def _first_client_ts(events: list, event_name: str):
     return None
 
 
-def summarize_latency(events: list, *, session_start_ms: float) -> dict:
+def summarize_latency(events: list, *, session_start_ms: float | None) -> dict:
     """세션 이벤트 타임라인에서 지연 요약을 계산하고 구조화 로그로 남긴다.
 
     Args:
@@ -58,8 +58,16 @@ def summarize_latency(events: list, *, session_start_ms: float) -> dict:
     text_ts = _first_client_ts(events, "first_text_visible")
     audio_ts = _first_client_ts(events, "first_audio_play")
 
-    text_latency = (text_ts - session_start_ms) if text_ts is not None else None
-    audio_latency = (audio_ts - session_start_ms) if audio_ts is not None else None
+    text_latency = (
+        text_ts - session_start_ms
+        if text_ts is not None and session_start_ms is not None
+        else None
+    )
+    audio_latency = (
+        audio_ts - session_start_ms
+        if audio_ts is not None and session_start_ms is not None
+        else None
+    )
 
     cache_events = [e["event"] for e in events if e.get("event") in _CACHE_EVENT_TYPES]
     if not cache_events:

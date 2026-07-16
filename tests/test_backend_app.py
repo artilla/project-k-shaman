@@ -16,7 +16,7 @@ from shindang.adapters import rate_limit as ratelimit
 from shindang.adapters.cache import InMemoryCacheStore
 from shindang.adapters.fortune_store import RecentFortuneStore
 from shindang.adapters.oauth import HttpOAuthGateway
-from shindang.adapters.session import (
+from shindang.web.cookies import (
     OAUTH_STATE_COOKIE_NAME,
     SESSION_COOKIE_NAME,
     make_session_cookie_value,
@@ -119,6 +119,21 @@ class TestFortune:
         res = client.post(
             "/api/fortune/today", json={"topic": "love", "birth_year": "abc"}
         )
+        assert res.status_code == 400
+
+    @pytest.mark.parametrize(
+        "birth",
+        [
+            {"birth_year": 1995},
+            {"birth_hour": 8},
+            {"birth_year": 1995, "birth_month": 2, "birth_day": 29},
+            {"birth_year": 1995, "birth_month": 4, "birth_day": 31},
+            {"birth_year": 1995, "birth_month": 3.5, "birth_day": 21},
+            {"birth_year": 1995, "birth_month": True, "birth_day": 21},
+        ],
+    )
+    def test_incomplete_or_impossible_birth_date_400(self, client, birth):
+        res = client.post("/api/fortune/today", json={"topic": "love", **birth})
         assert res.status_code == 400
 
     def test_fortune_never_runs_real_tts(self, fastapi_app):
@@ -357,6 +372,14 @@ class TestDreamInterpret:
         )
         assert res.status_code == 400
 
+    @pytest.mark.parametrize("symbols", [[{}], [[]], [1, "뱀"]])
+    def test_non_string_symbols_rejected(self, fastapi_app, client, symbols):
+        login(fastapi_app, client)
+        res = client.post(
+            "/api/dream/interpret", json={"text": "", "symbols": symbols}
+        )
+        assert res.status_code == 400
+
 
 # ── 인증 플로우 ──
 class TestAuth:
@@ -533,6 +556,51 @@ class TestEventEndpoint:
         )
         assert res.status_code == 400
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"serverEvents": ["not-an-object"], "clientEvents": []},
+            {
+                "serverEvents": [],
+                "clientEvents": [
+                    {"event": "first_text_visible", "clientTs": "100"}
+                ],
+                "sessionStartMs": 0,
+            },
+            {
+                "serverEvents": [],
+                "clientEvents": [
+                    {"event": "first_text_visible", "clientTs": 100}
+                ],
+                "sessionStartMs": "0",
+            },
+        ],
+    )
+    def test_event_malformed_timeline_400(self, client, body):
+        assert client.post("/api/event", json=body).status_code == 400
+
+    def test_event_rejects_nonstandard_json_numbers(self, client):
+        res = client.post(
+            "/api/event",
+            content=b'{"clientEvents":[],"serverEvents":[],"sessionStartMs":NaN}',
+            headers={"Content-Type": "application/json"},
+        )
+        assert res.status_code == 400
+
+    def test_event_without_session_start_returns_null_latencies(self, client):
+        res = client.post(
+            "/api/event",
+            json={
+                "sessionStartMs": None,
+                "clientEvents": [
+                    {"event": "first_text_visible", "clientTs": 100}
+                ],
+                "serverEvents": [],
+            },
+        )
+        assert res.status_code == 200
+        assert res.json()["summary"]["textLatencyMs"] is None
+
 
 class TestCoreHelpers:
     def test_authorize_url_none_without_client_id(self, monkeypatch):
@@ -622,12 +690,29 @@ class TestCallbackFlows:
                 "nickname": "테스트유저",
             },
         )
-        client.cookies.set(OAUTH_STATE_COOKIE_NAME, "st1")
+        client.cookies.set(
+            OAUTH_STATE_COOKIE_NAME, "st1", domain="testserver.local"
+        )
         res = client.get("/api/auth/callback/google?code=authcode123&state=st1")
         assert res.status_code == 302
         assert res.headers["location"] == "/"
+        assert OAUTH_STATE_COOKIE_NAME not in client.cookies
         me = client.get("/api/auth/me").json()
         assert me == {"loggedIn": True, "provider": "google", "nickname": "테스트유저"}
+
+    def test_callback_rejects_profile_without_stable_subject(
+        self, fastapi_app, client, monkeypatch
+    ):
+        monkeypatch.setattr(
+            fastapi_app.state.container.oauth,
+            "exchange_profile",
+            lambda provider, code, *, redirect_uri: {"nickname": "이름뿐"},
+        )
+        client.cookies.set(OAUTH_STATE_COOKIE_NAME, "st1")
+        res = client.get("/api/auth/callback/google?code=authcode123&state=st1")
+        assert res.status_code == 302
+        assert res.headers["location"] == "/?auth_error=1"
+        assert len(fastapi_app.state.container.sessions) == 0
 
     def test_logout_clears_session(self, fastapi_app, client):
         login(fastapi_app, client)

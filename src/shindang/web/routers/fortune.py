@@ -3,11 +3,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 
-from shindang.adapters.audio import KEY_RE
 from shindang.domain.fortune_card import render_share_card_svg
 
 from ..dependencies import container, daily_gate, login_gate, rate_gate
-from ..validation import fortune_request, json_object
+from ..validation import AUDIO_KEY_RE, fortune_request, json_object
 
 router = APIRouter(tags=["fortune"])
 
@@ -95,7 +94,7 @@ def audio_mock(key_hash: str, request: Request):
     gate = login_gate(request)
     if gate:
         return gate
-    if not KEY_RE.fullmatch(key_hash):
+    if not AUDIO_KEY_RE.fullmatch(key_hash):
         return JSONResponse({"error": "invalid audio key"}, status_code=404)
     return Response(container(request).audio.mock_wav(), media_type="audio/wav")
 
@@ -105,7 +104,7 @@ def audio_real(key_hash: str, request: Request):
     gate = login_gate(request)
     if gate:
         return gate
-    if not KEY_RE.fullmatch(key_hash):
+    if not AUDIO_KEY_RE.fullmatch(key_hash):
         return JSONResponse({"error": "invalid audio key"}, status_code=404)
     path = container(request).audio.real_path(key_hash)
     if not path.is_file():

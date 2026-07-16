@@ -5,13 +5,25 @@ from __future__ import annotations
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 
-from shindang.adapters.rate_limit import client_identity
-from shindang.adapters.session import SESSION_COOKIE_NAME, verify_session_cookie_value
 from shindang.bootstrap import AppContainer
+
+from .cookies import SESSION_COOKIE_NAME, verify_session_cookie_value
 
 
 def container(request: Request) -> AppContainer:
     return request.app.state.container
+
+
+def client_identity(
+    request: Request, session_id: str | None, *, trust_proxy: bool
+) -> str:
+    if session_id:
+        return "s:" + session_id
+    if trust_proxy:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return "ip:" + forwarded.split(",")[0].strip()
+    return "ip:" + (request.client.host if request.client else "unknown")
 
 
 def set_auth_cookie(

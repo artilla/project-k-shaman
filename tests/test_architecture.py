@@ -27,12 +27,14 @@ FORBIDDEN_IMPORTS = {
     ),
     "application": ("shindang.adapters", "shindang.web", "shindang.bootstrap"),
     "adapters": ("shindang.web", "shindang.bootstrap"),
+    "web": ("shindang.adapters",),
 }
 
 DOMAIN_FORBIDDEN_IMPORTS = (
     # Environment and filesystem access.
     "os",
     "pathlib",
+    "sys",
     # Network clients and protocols.  Pure URL parsing (urllib.parse) is not I/O.
     "aiohttp",
     "boto3",
@@ -214,6 +216,22 @@ def test_domain_does_not_read_the_clock_directly():
             if reference in FORBIDDEN_CLOCK_REFERENCES:
                 violations.append(
                     f"{path.relative_to(ROOT)}:{node.lineno} -> {reference}"
+                )
+    assert violations == []
+
+
+def test_domain_does_not_use_builtin_io():
+    forbidden_calls = {"input", "open", "print"}
+    violations: list[str] = []
+    for path in (PACKAGE_ROOT / "domain").rglob("*.py"):
+        for node in ast.walk(_syntax_tree(path)):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in forbidden_calls
+            ):
+                violations.append(
+                    f"{path.relative_to(ROOT)}:{node.lineno} -> {node.func.id}"
                 )
     assert violations == []
 

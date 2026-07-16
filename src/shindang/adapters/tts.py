@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable
@@ -154,14 +155,32 @@ class TTSAdapter:
         output = (
             self.cache_dir / f"{hashlib.sha256(cache_key.encode()).hexdigest()}.mp3"
         )
-        if not output.exists():
+        if not output.is_file() or output.stat().st_size == 0:
             client = OpenAI()
-            with client.audio.speech.with_streaming_response.create(
-                model=metadata["model"],
-                voice=metadata["voice"],
-                input=_full_text(script),
-            ) as response:
-                response.stream_to_file(str(output))
+            temporary_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    dir=self.cache_dir,
+                    prefix=f".{output.stem}.",
+                    suffix=".tmp",
+                    delete=False,
+                ) as temporary:
+                    temporary_path = Path(temporary.name)
+                with client.audio.speech.with_streaming_response.create(
+                    model=metadata["model"],
+                    voice=metadata["voice"],
+                    input=_full_text(script),
+                ) as response:
+                    response.stream_to_file(str(temporary_path))
+                if temporary_path.stat().st_size == 0:
+                    raise RuntimeError("OpenAI TTS returned an empty audio file")
+                with temporary_path.open("rb") as audio_file:
+                    os.fsync(audio_file.fileno())
+                os.replace(temporary_path, output)
+                temporary_path = None
+            finally:
+                if temporary_path is not None:
+                    temporary_path.unlink(missing_ok=True)
         return {"audioUrl": f"file://{output}"}
 
 
