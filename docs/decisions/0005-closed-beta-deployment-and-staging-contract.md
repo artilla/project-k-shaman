@@ -58,6 +58,20 @@ FastAPI + Uvicorn
   ([Caddy reverse proxy 문서](https://caddyserver.com/docs/quick-starts/reverse-proxy))
 - FastAPI는 Caddy 한 홉만 trusted proxy로 취급한다. `TRUST_PROXY=1`은 Caddy가 직접
   연결하는 배포에서만 켜며, security group은 app 포트를 인터넷에 열지 않는다.
+- Caddy는 app으로 전달하는 `X-Forwarded-For`를 `{client_ip}` 한 값으로 덮어쓴다.
+  app은 클라이언트가 보낸 원본 XFF chain을 직접 해석하지 않는다. 현재처럼 Caddy가
+  public first hop이면 기본 정책이 들어온 XFF를 무시하므로 spoofing을 차단한다.
+- ALB·CloudFront·CDN을 Caddy 앞에 추가하는 변경은 이 ADR의 현재 topology와 호환되지
+  않는다. 그 변경을 apply하기 전에 정확한 앞단 proxy CIDR만 global
+  `trusted_proxies`에 등록하고 `trusted_proxies_strict`를 켜야 한다. 미설정 상태는
+  spoofing을 허용하지는 않지만 모든 사용자의 identity를 앞단 proxy IP 하나로 붕괴시켜
+  rate limit의 정확성과 가용성을 깨뜨린다.
+- 다중 proxy 전환 E2E는 (a) 클라이언트가 위조한 좌측 XFF가 resolved client IP를
+  바꾸지 못하고, (b) 서로 다른 실제 클라이언트가 서로 다른 rate-limit identity를
+  받는다는 두 조건을 모두 단언한다. Caddy는 ALB·CloudFront처럼 XFF 오른쪽에 주소를
+  추가하는 proxy에 우→좌 parsing인 `trusted_proxies_strict` 사용을 권장한다.
+  ([Caddy reverse proxy 기본값](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#defaults),
+  [Caddy trusted proxies](https://caddyserver.com/docs/caddyfile/options#trusted-proxies-strict))
 - OAuth callback은 `https://<domain>/api/auth/callback/{provider}`로 고정한다. provider
   console의 redirect URI 변경과 domain/DNS 변경은 T028 승인 범위에서만 수행한다.
 
@@ -65,6 +79,9 @@ FastAPI + Uvicorn
 
 - CI는 전체 gate를 통과한 commit에서 immutable image를 build하고 ECR에 commit SHA
   tag와 digest를 기록한다. `latest`만으로 배포하지 않는다.
+- staging workflow의 clean `docker buildx build --push` 성공은 SSM 배포보다 먼저
+  완료돼야 한다. 기존 image에 현재 source를 mount한 smoke는 Dockerfile의 base pin,
+  build layer, wheel·frontend 산출물을 검증하지 못하므로 이 gate를 대신하지 않는다.
 - staging과 production은 같은 image digest를 사용한다. 환경 차이는 secret/config와
   연결 대상뿐이다.
 - 애플리케이션 배포는 이전 정상 image digest를 보존하고, smoke 실패 시 Compose의

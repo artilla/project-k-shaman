@@ -100,6 +100,17 @@ grep -q 'workflow_dispatch' .github/workflows/deploy-staging.yml
 grep -q 'environment: staging' .github/workflows/deploy-staging.yml
 grep -q 'workflow_dispatch' .github/workflows/promote-production.yml
 grep -q 'environment: production' .github/workflows/promote-production.yml
+grep -Fq 'header_up X-Forwarded-For {client_ip}' deploy/Caddyfile
+
+build_step_line="$(grep -nF 'name: Build and push immutable ARM64 image' .github/workflows/deploy-staging.yml | cut -d: -f1)"
+deploy_step_line="$(grep -nF 'name: Deploy through SSM' .github/workflows/deploy-staging.yml | cut -d: -f1)"
+test -n "$build_step_line"
+test -n "$deploy_step_line"
+test "$build_step_line" -lt "$deploy_step_line"
+grep -Fq 'docker buildx build \' .github/workflows/deploy-staging.yml
+grep -Fq -- '--platform linux/arm64 \' .github/workflows/deploy-staging.yml
+grep -Fq -- '--push \' .github/workflows/deploy-staging.yml
+grep -Fq -- '--metadata-file image-metadata.json \' .github/workflows/deploy-staging.yml
 
 if awk '
   /^[[:space:]]*- uses:/ {
