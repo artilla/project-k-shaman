@@ -20,6 +20,9 @@ npm --prefix frontend ci
 
 서버 실행은 [`docs/runbooks/local-server.md`](docs/runbooks/local-server.md)를 따른다.
 
+구현 아키텍처와 실행 방법을 한 화면에서 보려면
+[`docs/architecture-and-execution-guide.html`](docs/architecture-and-execution-guide.html)을 연다.
+
 ## 구조
 
 | 경로 | 역할 |

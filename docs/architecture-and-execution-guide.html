@@ -1,0 +1,827 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="ProjectK-Shaman 오늘신당의 구현 아키텍처와 로컬·Docker 실행 가이드">
+  <title>오늘신당 — 구현 아키텍처와 실행 가이드</title>
+  <style>
+    :root {
+      --ink: #231f20;
+      --muted: #6b6264;
+      --paper: #f8f2e8;
+      --paper-2: #fffaf1;
+      --panel: rgba(255, 250, 241, 0.86);
+      --line: #d8cabb;
+      --red: #9f2d35;
+      --red-dark: #721c25;
+      --gold: #b37a24;
+      --green: #2f6c54;
+      --blue: #315d77;
+      --shadow: 0 18px 45px rgba(57, 37, 29, 0.10);
+      --radius: 20px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      --sans: Pretendard, "Noto Sans KR", "Apple SD Gothic Neo", system-ui, sans-serif;
+      --serif: "Iowan Old Style", "Noto Serif KR", "AppleMyungjo", Georgia, serif;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 4%, rgba(179, 122, 36, 0.14), transparent 28rem),
+        radial-gradient(circle at 92% 20%, rgba(159, 45, 53, 0.10), transparent 34rem),
+        linear-gradient(180deg, var(--paper) 0%, #f3eadc 100%);
+      font-family: var(--sans);
+      line-height: 1.72;
+    }
+
+    a { color: var(--red-dark); text-underline-offset: 0.18em; }
+    a:hover { color: var(--red); }
+    code, pre { font-family: var(--mono); }
+    code {
+      padding: 0.1em 0.34em;
+      border-radius: 6px;
+      background: rgba(114, 28, 37, 0.08);
+      font-size: 0.91em;
+    }
+    pre code { padding: 0; background: transparent; font-size: inherit; }
+
+    .skip-link {
+      position: fixed;
+      z-index: 99;
+      top: 12px;
+      left: 12px;
+      transform: translateY(-160%);
+      padding: 10px 14px;
+      border-radius: 10px;
+      color: white;
+      background: var(--red-dark);
+    }
+    .skip-link:focus { transform: translateY(0); }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      border-bottom: 1px solid rgba(159, 45, 53, 0.16);
+      background: rgba(255, 250, 241, 0.55);
+    }
+    .hero::after {
+      content: "巫";
+      position: absolute;
+      right: max(3vw, 28px);
+      top: -70px;
+      color: rgba(159, 45, 53, 0.055);
+      font: 360px/1 var(--serif);
+      pointer-events: none;
+    }
+    .hero-inner {
+      position: relative;
+      z-index: 1;
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 76px 32px 58px;
+    }
+    .eyebrow {
+      margin: 0 0 14px;
+      color: var(--red);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+    h1, h2, h3 { line-height: 1.25; text-wrap: balance; }
+    h1 {
+      max-width: 900px;
+      margin: 0;
+      font-family: var(--serif);
+      font-size: clamp(2.4rem, 6vw, 5rem);
+      font-weight: 700;
+      letter-spacing: -0.05em;
+      overflow-wrap: anywhere;
+    }
+    .hero-copy {
+      max-width: 780px;
+      margin: 22px 0 0;
+      color: var(--muted);
+      font-size: clamp(1rem, 2vw, 1.2rem);
+      overflow-wrap: anywhere;
+    }
+    .badge-row { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 28px; }
+    .badge {
+      display: inline-flex;
+      flex: 0 0 auto;
+      align-items: center;
+      gap: 7px;
+      padding: 7px 11px;
+      border: 1px solid rgba(159, 45, 53, 0.18);
+      border-radius: 999px;
+      color: var(--red-dark);
+      background: rgba(255, 255, 255, 0.58);
+      font-size: 0.82rem;
+      font-weight: 750;
+      white-space: nowrap;
+    }
+    .badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 250px minmax(0, 920px);
+      gap: 54px;
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 42px 32px 90px;
+    }
+    .toc {
+      position: sticky;
+      top: 24px;
+      align-self: start;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: rgba(255, 250, 241, 0.68);
+      backdrop-filter: blur(12px);
+    }
+    .toc strong {
+      display: block;
+      margin: 0 0 8px 10px;
+      color: var(--muted);
+      font-size: 0.75rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .toc a {
+      display: block;
+      padding: 8px 10px;
+      border-radius: 9px;
+      color: var(--ink);
+      font-size: 0.9rem;
+      text-decoration: none;
+    }
+    .toc a:hover, .toc a:focus-visible { color: var(--red-dark); background: rgba(159, 45, 53, 0.075); }
+
+    main { min-width: 0; }
+    section { scroll-margin-top: 28px; margin-bottom: 72px; }
+    h2 {
+      margin: 0 0 22px;
+      font-family: var(--serif);
+      font-size: clamp(1.8rem, 4vw, 2.65rem);
+      letter-spacing: -0.035em;
+    }
+    h2 .num { margin-right: 10px; color: var(--gold); font-family: var(--sans); font-size: 0.48em; letter-spacing: 0.1em; vertical-align: middle; }
+    h3 { margin: 30px 0 13px; font-size: 1.23rem; letter-spacing: -0.02em; }
+    .lead { max-width: 760px; color: var(--muted); font-size: 1.07rem; }
+
+    .notice {
+      margin: 22px 0;
+      padding: 18px 20px;
+      border-left: 4px solid var(--gold);
+      border-radius: 0 14px 14px 0;
+      background: rgba(179, 122, 36, 0.10);
+    }
+    .notice strong { color: #755016; }
+    .notice.danger { border-left-color: var(--red); background: rgba(159, 45, 53, 0.08); }
+    .notice.danger strong { color: var(--red-dark); }
+    .notice.ok { border-left-color: var(--green); background: rgba(47, 108, 84, 0.09); }
+    .notice.ok strong { color: var(--green); }
+
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+    .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .card {
+      min-width: 0;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+    .card h3 { margin-top: 0; }
+    .card p:last-child { margin-bottom: 0; }
+    .kicker { color: var(--red); font-size: 0.73rem; font-weight: 850; letter-spacing: 0.1em; text-transform: uppercase; }
+
+    .system-map {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1.15fr;
+      align-items: stretch;
+      gap: 10px;
+      margin: 28px 0;
+    }
+    .system-node {
+      display: grid;
+      place-items: center;
+      min-height: 126px;
+      padding: 17px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      text-align: center;
+      background: var(--paper-2);
+      box-shadow: var(--shadow);
+    }
+    .system-node strong { display: block; margin-bottom: 4px; color: var(--red-dark); font-size: 1.03rem; }
+    .system-node small { color: var(--muted); }
+    .arrow { display: grid; place-items: center; color: var(--gold); font-size: 1.55rem; font-weight: 900; }
+
+    .layers { display: grid; gap: 10px; margin-top: 24px; }
+    .layer {
+      display: grid;
+      grid-template-columns: 120px 1fr auto;
+      gap: 18px;
+      align-items: center;
+      padding: 17px 19px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255, 250, 241, 0.75);
+    }
+    .layer-name { font-weight: 850; }
+    .layer-rule { color: var(--muted); font-size: 0.9rem; }
+    .layer-tag { padding: 4px 8px; border-radius: 999px; color: white; background: var(--blue); font-size: 0.72rem; font-weight: 800; }
+
+    .flow { counter-reset: flow; display: grid; gap: 12px; margin-top: 20px; }
+    .flow-step {
+      position: relative;
+      padding: 15px 18px 15px 58px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: rgba(255, 255, 255, 0.55);
+    }
+    .flow-step::before {
+      counter-increment: flow;
+      content: counter(flow);
+      position: absolute;
+      left: 16px;
+      top: 14px;
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      color: white;
+      background: var(--red-dark);
+      font-size: 0.78rem;
+      font-weight: 850;
+    }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 15px; background: rgba(255,255,255,0.5); }
+    table { width: 100%; border-collapse: collapse; min-width: 620px; }
+    th, td { padding: 13px 15px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    tr:last-child td { border-bottom: 0; }
+    th { color: var(--red-dark); background: rgba(159, 45, 53, 0.055); font-size: 0.82rem; letter-spacing: 0.02em; }
+    td { font-size: 0.92rem; }
+
+    .tree {
+      overflow-x: auto;
+      padding: 22px;
+      border: 1px solid #3f3638;
+      border-radius: 16px;
+      color: #f7eadc;
+      background: #241f20;
+      font: 0.86rem/1.62 var(--mono);
+      white-space: pre;
+    }
+
+    .code-shell { position: relative; margin: 14px 0 23px; }
+    .code-shell pre {
+      overflow-x: auto;
+      margin: 0;
+      padding: 22px;
+      border: 1px solid #3f3638;
+      border-radius: 16px;
+      color: #f8efe5;
+      background: #211d1e;
+      font-size: 0.84rem;
+      line-height: 1.65;
+    }
+    .copy {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      padding: 7px 10px;
+      border: 1px solid rgba(255,255,255,0.22);
+      border-radius: 9px;
+      color: #f8efe5;
+      background: rgba(255,255,255,0.08);
+      font: 700 0.72rem var(--sans);
+      cursor: pointer;
+    }
+    .copy:hover, .copy:focus-visible { background: rgba(255,255,255,0.16); }
+
+    .tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 20px 0; }
+    .mode {
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255,255,255,0.55);
+      text-align: center;
+    }
+    .mode strong { display: block; color: var(--red-dark); }
+    .mode small { color: var(--muted); }
+
+    details {
+      margin: 11px 0;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: rgba(255,255,255,0.5);
+    }
+    summary { padding: 15px 18px; font-weight: 800; cursor: pointer; }
+    details > div { padding: 0 18px 17px; color: var(--muted); }
+
+    .footer {
+      padding: 28px 32px 44px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      text-align: center;
+      font-size: 0.83rem;
+    }
+
+    :focus-visible { outline: 3px solid rgba(179, 122, 36, 0.65); outline-offset: 3px; }
+
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; gap: 28px; }
+      .toc { position: static; display: grid; grid-template-columns: repeat(2, 1fr); }
+      .toc strong { grid-column: 1 / -1; }
+      .grid.three { grid-template-columns: 1fr 1fr; }
+      .tabs { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 680px) {
+      .hero-inner, .layout { padding-left: 20px; padding-right: 20px; }
+      .hero-inner { padding-top: 54px; }
+      .grid, .grid.three { grid-template-columns: 1fr; }
+      .system-map { grid-template-columns: 1fr; }
+      .arrow { transform: rotate(90deg); min-height: 24px; }
+      .layer { grid-template-columns: 1fr; gap: 4px; }
+      .layer-tag { justify-self: start; }
+      .tabs { grid-template-columns: 1fr; }
+      .toc { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .toc a { font-size: 0.82rem; }
+    }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    @media print {
+      body { background: white; color: black; }
+      .hero-inner, .layout { max-width: none; }
+      .layout { display: block; padding-top: 20px; }
+      .toc, .copy { display: none; }
+      .card, .system-node { box-shadow: none; }
+      section { break-inside: avoid; margin-bottom: 35px; }
+      a { color: black; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#content">본문으로 이동</a>
+
+  <header class="hero">
+    <div class="hero-inner">
+      <p class="eyebrow">ProjectK-Shaman · Implementation Guide</p>
+      <h1>오늘신당 구현 아키텍처와 실행 가이드</h1>
+      <p class="hero-copy">
+        React와 FastAPI를 하나의 배포 단위로 묶되, Python 내부는 도메인 중심 의존성으로
+        분리한 same-origin 모듈러 모놀리스의 현재 구현과 실행 방법을 정리한다.
+      </p>
+      <div class="badge-row" aria-label="핵심 기술">
+        <span class="badge">Python 3.13</span>
+        <span class="badge">FastAPI 0.128.6</span>
+        <span class="badge">React 18 + Vite 8</span>
+        <span class="badge">Caddy 2.10.2</span>
+        <span class="badge">ARM64 container</span>
+        <span class="badge">작성 기준 2026-07-18</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="toc" aria-label="문서 목차">
+      <strong>Contents</strong>
+      <a href="#summary">1. 한눈에 보기</a>
+      <a href="#architecture">2. 내부 아키텍처</a>
+      <a href="#flows">3. 요청 흐름</a>
+      <a href="#structure">4. 디렉터리 구조</a>
+      <a href="#runtime">5. 런타임·보안</a>
+      <a href="#setup">6. 최초 설치</a>
+      <a href="#run">7. 실행 방법</a>
+      <a href="#verify">8. 검증 방법</a>
+      <a href="#environment">9. 환경변수</a>
+      <a href="#troubleshooting">10. 문제 해결</a>
+      <a href="#limits">11. 현재 제약</a>
+      <a href="#sources">12. 정본 문서</a>
+    </nav>
+
+    <main id="content">
+      <section id="summary">
+        <h2><span class="num">01</span>한눈에 보기</h2>
+        <p class="lead">
+          오늘신당은 프런트엔드와 백엔드를 별도 서비스로 배포하지 않는다. 하나의 image와
+          하나의 HTTPS origin을 사용하고, 서버 내부만 명시적 계층으로 나눈다.
+        </p>
+
+        <div class="system-map" role="img" aria-label="브라우저에서 Caddy와 FastAPI를 거쳐 애플리케이션 계층으로 이어지는 시스템 구조">
+          <div class="system-node"><div><strong>Browser</strong><small>React SPA · cookie · audio</small></div></div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="system-node"><div><strong>Caddy</strong><small>TLS · 80/443 · XFF 정규화</small></div></div>
+          <div class="arrow" aria-hidden="true">→</div>
+          <div class="system-node"><div><strong>FastAPI</strong><small>API + frontend/dist<br>private :8000</small></div></div>
+        </div>
+
+        <div class="grid three">
+          <article class="card">
+            <div class="kicker">Deployment</div>
+            <h3>하나의 배포 단위</h3>
+            <p>React production build와 Python wheel을 하나의 non-root image에 넣고 같은 revision으로 배포한다.</p>
+          </article>
+          <article class="card">
+            <div class="kicker">Boundary</div>
+            <h3>내부 계층은 강제</h3>
+            <p><code>domain</code>, <code>application</code>, <code>adapters</code>, <code>web</code>의 의존성 방향을 AST 테스트가 검사한다.</p>
+          </article>
+          <article class="card">
+            <div class="kicker">Evolution</div>
+            <h3>포트 뒤 구현 교체</h3>
+            <p>현재 메모리 어댑터는 PostgreSQL·Redis 구현으로 교체할 수 있지만 유스케이스와 route 계약은 유지한다.</p>
+          </article>
+        </div>
+
+        <div class="notice ok">
+          <strong>왜 마이크로서비스가 아닌가?</strong> 현재는 한 팀, 한 배포, 한 데이터 경계다.
+          독립 확장·소유권 요구가 생기기 전에는 네트워크 분리보다 모듈 경계와 테스트가 더 낮은 비용으로 같은 목적을 달성한다.
+        </div>
+      </section>
+
+      <section id="architecture">
+        <h2><span class="num">02</span>내부 아키텍처</h2>
+        <p class="lead">의존성은 바깥 기술에서 안쪽 정책으로만 향한다. 구현 선택은 <code>bootstrap.py</code> 한 곳에서 수행한다.</p>
+
+        <div class="layers">
+          <div class="layer">
+            <div class="layer-name">web</div>
+            <div>FastAPI route, JSON 검증, cookie, HTTP status, rate/login gate</div>
+            <div class="layer-tag">입력 어댑터</div>
+          </div>
+          <div class="layer">
+            <div class="layer-name">adapters</div>
+            <div>OAuth HTTP, TTS, cache, session, event JSONL, audio 저장 구현</div>
+            <div class="layer-tag">기술 구현</div>
+          </div>
+          <div class="layer">
+            <div class="layer-name">application</div>
+            <div>Playback 유스케이스, cache 원자성, telemetry, Protocol 포트</div>
+            <div class="layer-tag">오케스트레이션</div>
+          </div>
+          <div class="layer">
+            <div class="layer-name">domain</div>
+            <div>운세·꿈·낭독·공유 카드 규칙. HTTP, 환경, 파일, clock 직접 접근 금지</div>
+            <div class="layer-tag">순수 정책</div>
+          </div>
+          <div class="layer">
+            <div class="layer-name">bootstrap</div>
+            <div>Settings를 받아 실제 adapter와 PlaybackService를 AppContainer로 조립</div>
+            <div class="layer-tag">composition root</div>
+          </div>
+        </div>
+
+        <h3>강제되는 규칙</h3>
+        <div class="grid">
+          <article class="card">
+            <h3>Domain 순수성</h3>
+            <p><code>os</code>, <code>pathlib</code>, <code>sys</code>, 네트워크 client와 직접 clock 접근을 금지한다. <code>input</code>, <code>open</code>, <code>print</code>도 사용할 수 없다.</p>
+          </article>
+          <article class="card">
+            <h3>구현 역참조 금지</h3>
+            <p><code>application</code>은 adapters/web/bootstrap을 import하지 않고, <code>web</code>은 adapter 구현을 직접 import하지 않는다.</p>
+          </article>
+          <article class="card">
+            <h3>한 곳에서 조립</h3>
+            <p>구체 adapter class는 <code>bootstrap.py</code>에서만 연결된다. 테스트는 포트를 통해 fake 구현을 주입할 수 있다.</p>
+          </article>
+          <article class="card">
+            <h3>설치 의미 일치</h3>
+            <p><code>src</code> layout, editable install, production wheel이 같은 <code>shindang</code> import 의미를 갖는다.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="flows">
+        <h2><span class="num">03</span>주요 요청 흐름</h2>
+
+        <h3>오늘의 운세</h3>
+        <div class="flow">
+          <div class="flow-step"><strong>React</strong>가 <code>POST /api/fortune/today</code>로 topic·profile 입력을 보낸다.</div>
+          <div class="flow-step"><strong>web</strong>이 JSON 크기·타입·실제 생년월일을 검증하고 hourly/daily limit을 적용한다.</div>
+          <div class="flow-step"><strong>PlaybackService</strong>가 용도 분리 HMAC seed와 cache key를 만들고 cache miss를 직렬화한다.</div>
+          <div class="flow-step"><strong>domain</strong>이 운세, 점수, 8개 narration segment를 결정적으로 생성한다.</div>
+          <div class="flow-step">텍스트 응답을 먼저 반환한다. 실 TTS는 로그인 후 <code>POST /api/tts/prepare</code>에서만 선택적으로 실행한다.</div>
+        </div>
+
+        <h3>OAuth session</h3>
+        <div class="flow">
+          <div class="flow-step"><code>/api/auth/login/google|kakao</code>가 서명 전 state cookie와 provider authorize URL을 만든다.</div>
+          <div class="flow-step">callback이 state를 constant-time 비교하고 provider의 안정적인 subject가 없으면 fail-closed 처리한다.</div>
+          <div class="flow-step">성공 시 in-memory session을 만들고 <code>Secure</code> 환경 cookie를 설정하며 state cookie는 즉시 제거한다.</div>
+          <div class="flow-step"><code>/api/auth/me</code>와 <code>/api/auth/logout</code>이 브라우저 session 상태를 제공한다.</div>
+        </div>
+
+        <h3>꿈 풀이와 관측</h3>
+        <div class="grid">
+          <article class="card"><h3>꿈 풀이</h3><p>로그인·rate/daily gate 뒤 순수 <code>domain.dream</code>이 text와 symbol을 분석하고 SVG 공유 카드를 생성한다.</p></article>
+          <article class="card"><h3>재생 telemetry</h3><p><code>/api/event</code>가 유한 숫자 timestamp와 event object를 검증한 뒤 JSONL adapter로 기록한다.</p></article>
+        </div>
+      </section>
+
+      <section id="structure">
+        <h2><span class="num">04</span>디렉터리 구조</h2>
+        <div class="tree" role="img" aria-label="프로젝트 주요 디렉터리 트리">ProjectK-Shaman/
+├── src/shindang/
+│   ├── domain/              순수 운세·꿈·카드 규칙
+│   ├── application/         유스케이스와 Protocol 포트
+│   ├── adapters/            OAuth·TTS·cache·session·event 구현
+│   ├── web/                 FastAPI app, validation, routers, cookies
+│   ├── bootstrap.py         유일한 composition root
+│   └── config.py            환경변수 → 불변 Settings
+├── frontend/
+│   ├── src/                 React 화면·상태·API client
+│   └── public/static/       정적 자산 단일 원본
+├── contracts/fortune/       JSON Schema와 고정 sample
+├── db/migrations/           append-only PostgreSQL migration
+├── tests/                   제품·아키텍처·DB·배포 회귀
+├── tools/                   오프라인 분석·검증·TTS 도구
+├── deploy/                  Caddy, Compose, remote deploy/rollback
+├── infra/cloudformation/    AWS staging 선언
+├── scripts/                 DB·배포 계약 CLI
+├── docs/                    명세·ADR·runbook·report·ticket 정본
+├── ralph/                   Ralph Loop와 Mission Control 소스
+├── state/                   앱 runtime 쓰기 경계
+├── Dockerfile
+├── compose.yaml
+└── pyproject.toml</div>
+      </section>
+
+      <section id="runtime">
+        <h2><span class="num">05</span>런타임과 보안 경계</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>경계</th><th>현재 구현</th><th>효과</th></tr></thead>
+            <tbody>
+              <tr><td>Origin</td><td>FastAPI가 API와 <code>frontend/dist</code>를 함께 제공</td><td>CORS와 cross-site cookie 복잡도 제거</td></tr>
+              <tr><td>Edge</td><td>Caddy만 80/443 공개, app 8000은 Compose 내부</td><td>app 직접 접근 차단</td></tr>
+              <tr><td>Client IP</td><td>Caddy가 <code>X-Forwarded-For {client_ip}</code> 한 값으로 정규화</td><td>클라이언트 XFF spoof가 rate identity를 바꾸지 못함</td></tr>
+              <tr><td>Container</td><td>UID/GID 10001, read-only rootfs, capability drop</td><td>침해 시 쓰기·권한 범위 축소</td></tr>
+              <tr><td>Writable state</td><td><code>/app/state</code> volume과 <code>/tmp</code> tmpfs</td><td>event·TTS cache만 제한적으로 기록</td></tr>
+              <tr><td>Secret</td><td>local env 또는 AWS Secrets Manager</td><td>image·Compose·deployment record에 값 미포함</td></tr>
+              <tr><td>Image</td><td>digest-pinned base, hash-locked Python, immutable ECR digest</td><td>동일 revision 재현성과 mutable tag 차단</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="notice danger">
+          <strong>현재 DB 상태:</strong> migration runner와 SQL 계약은 구현돼 있지만 FastAPI runtime DB adapter는 아직 없다.
+          로컬 mock 실행에서는 <code>DATABASE_URL</code>을 unset해야 한다. 값만 넣으면 <code>/readyz</code>가 의도적으로 503을 반환한다.
+        </div>
+      </section>
+
+      <section id="setup">
+        <h2><span class="num">06</span>최초 1회 설치</h2>
+        <p>모든 명령은 repository root에서 실행한다. Python 3.13, Node.js/npm이 필요하며 Docker 방식에는 Docker Desktop과 Compose v2가 추가로 필요하다.</p>
+        <div class="code-shell">
+          <button class="copy" type="button" data-copy>복사</button>
+          <pre><code>python3 -m venv .venv
+source .venv/bin/activate
+
+python -m pip install --upgrade pip
+python -m pip install --require-hashes -r requirements-build.lock
+python -m pip install --require-hashes -r requirements.lock
+python -m pip install --no-deps --no-build-isolation -e .
+
+npm --prefix frontend ci</code></pre>
+        </div>
+        <p>새 터미널에서는 먼저 <code>source .venv/bin/activate</code>를 실행한다.</p>
+      </section>
+
+      <section id="run">
+        <h2><span class="num">07</span>실행 방법</h2>
+        <div class="tabs" aria-label="실행 모드 요약">
+          <div class="mode"><strong>개발</strong><small>5173 + 8788</small></div>
+          <div class="mode"><strong>Same-origin</strong><small>8000</small></div>
+          <div class="mode"><strong>Docker</strong><small>8080</small></div>
+          <div class="mode"><strong>Mission Control</strong><small>7474</small></div>
+        </div>
+
+        <h3>A. 개발 서버 — 권장</h3>
+        <p>FastAPI와 Vite를 각각 실행한다. Vite는 <code>/api</code>와 <code>/audio</code>만 고정 포트 8788로 proxy한다.</p>
+        <div class="grid">
+          <article class="card">
+            <div class="kicker">Terminal 1</div>
+            <h3>FastAPI</h3>
+            <div class="code-shell">
+              <button class="copy" type="button" data-copy>복사</button>
+              <pre><code>source .venv/bin/activate
+
+export SHINDANG_ENV=development
+export SESSION_SECRET=local-development-only
+export TTS_BACKEND=mock
+export SHINDANG_DEV_LOGIN=1
+export SHINDANG_PUBLIC_BASE_URL=http://127.0.0.1:5173
+unset DATABASE_URL TRUST_PROXY OPENAI_API_KEY
+
+python -m uvicorn shindang.web.app:app \
+  --host 127.0.0.1 \
+  --port 8788 \
+  --reload</code></pre>
+            </div>
+          </article>
+          <article class="card">
+            <div class="kicker">Terminal 2</div>
+            <h3>Vite</h3>
+            <div class="code-shell">
+              <button class="copy" type="button" data-copy>복사</button>
+              <pre><code>npm --prefix frontend run dev</code></pre>
+            </div>
+            <p>브라우저: <a href="http://127.0.0.1:5173"><code>http://127.0.0.1:5173</code></a></p>
+          </article>
+        </div>
+
+        <h3>B. 빌드된 SPA + FastAPI same-origin</h3>
+        <div class="code-shell">
+          <button class="copy" type="button" data-copy>복사</button>
+          <pre><code>npm --prefix frontend run build
+source .venv/bin/activate
+
+export SHINDANG_ENV=development
+export SESSION_SECRET=local-development-only
+export TTS_BACKEND=mock
+export SHINDANG_PUBLIC_BASE_URL=http://127.0.0.1:8000
+unset DATABASE_URL TRUST_PROXY OPENAI_API_KEY SHINDANG_DEV_LOGIN
+
+python -m uvicorn shindang.web.app:app \
+  --host 127.0.0.1 \
+  --port 8000</code></pre>
+        </div>
+        <p>브라우저: <a href="http://127.0.0.1:8000"><code>http://127.0.0.1:8000</code></a></p>
+
+        <h3>C. Docker Compose + Caddy</h3>
+        <div class="code-shell">
+          <button class="copy" type="button" data-copy>복사</button>
+          <pre><code>export HTTP_PORT=8080
+export HTTPS_PORT=8443
+export SITE_ADDRESS=http://127.0.0.1
+export SHINDANG_ENV=development
+export SESSION_SECRET=local-compose-only
+export TTS_BACKEND=mock
+
+docker compose config --quiet
+docker compose up --detach --build
+docker compose ps</code></pre>
+        </div>
+        <p>브라우저: <a href="http://127.0.0.1:8080"><code>http://127.0.0.1:8080</code></a></p>
+        <div class="code-shell">
+          <button class="copy" type="button" data-copy>복사</button>
+          <pre><code>docker compose logs --follow app caddy
+# 종료
+docker compose down</code></pre>
+        </div>
+        <div class="notice"><strong>주의:</strong> <code>docker compose down --volumes</code>는 app/Caddy local volume까지 삭제한다. 명시적 초기화 때만 사용한다.</div>
+
+        <h3>D. Ralph Mission Control</h3>
+        <p>제품 앱이 아니라 ticket·approval·Ralph Loop를 관리하는 별도 로컬 운영 UI다.</p>
+        <div class="code-shell">
+          <button class="copy" type="button" data-copy>복사</button>
+          <pre><code>./ralph/scripts/mission_control.sh start --port 7474
+./ralph/scripts/mission_control.sh status
+
+# 종료
+./ralph/scripts/mission_control.sh stop</code></pre>
+        </div>
+        <p>브라우저: <a href="http://127.0.0.1:7474"><code>http://127.0.0.1:7474</code></a></p>
+      </section>
+
+      <section id="verify">
+        <h2><span class="num">08</span>실행 후 검증</h2>
+        <h3>개발 모드 smoke</h3>
+        <div class="code-shell">
+          <button class="copy" type="button" data-copy>복사</button>
+          <pre><code>curl --fail --silent --show-error http://127.0.0.1:8788/healthz
+curl --fail --silent --show-error http://127.0.0.1:8788/readyz
+curl --fail --silent --show-error http://127.0.0.1:8788/api/auth/providers
+curl --fail --silent --show-error http://127.0.0.1:5173/ &gt;/dev/null</code></pre>
+        </div>
+
+        <h3>Docker mode smoke</h3>
+        <div class="code-shell">
+          <button class="copy" type="button" data-copy>복사</button>
+          <pre><code>curl --fail --silent --show-error http://127.0.0.1:8080/healthz
+curl --fail --silent --show-error http://127.0.0.1:8080/readyz
+curl --fail --silent --show-error http://127.0.0.1:8080/api/auth/providers</code></pre>
+        </div>
+
+        <h3>전체 repository gate</h3>
+        <div class="code-shell">
+          <button class="copy" type="button" data-copy>복사</button>
+          <pre><code>./ralph/scripts/run_checks.sh --full</code></pre>
+        </div>
+        <p>이 gate는 Ruff, Pytest, frontend typecheck/build, dependency consistency, deployment contract, 문서, Mission Control, Bats 회귀를 실행한다.</p>
+        <div class="notice">
+          <strong>PostgreSQL 주의:</strong> 로컬에 <code>initdb</code>가 없으면 DB Bats는 skip될 수 있다.
+          CI의 app/staging workflow는 PostgreSQL 16에서 정확히 <code>1..70</code>, 70 pass, 0 skip을 요구한다.
+        </div>
+      </section>
+
+      <section id="environment">
+        <h2><span class="num">09</span>주요 환경변수</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>변수</th><th>로컬 권장</th><th>계약</th></tr></thead>
+            <tbody>
+              <tr><td><code>SHINDANG_ENV</code></td><td><code>development</code></td><td>development/test/staging/production만 허용</td></tr>
+              <tr><td><code>SESSION_SECRET</code></td><td>로컬 전용 문자열</td><td>staging/production은 32자 이상 필수</td></tr>
+              <tr><td><code>SHINDANG_PUBLIC_BASE_URL</code></td><td>접속 origin</td><td>OAuth callback 기준, 배포 환경은 HTTPS 필수</td></tr>
+              <tr><td><code>TTS_BACKEND</code></td><td><code>mock</code></td><td><code>openai</code>는 API key와 실제 과금 가능성 존재</td></tr>
+              <tr><td><code>SHINDANG_DEV_LOGIN</code></td><td>필요할 때 <code>1</code></td><td>staging/production에서 기동 거부</td></tr>
+              <tr><td><code>DATABASE_URL</code></td><td>unset</td><td>runtime adapter 구현 전 설정하면 readiness 503</td></tr>
+              <tr><td><code>TRUST_PROXY</code></td><td>직접 실행 시 unset</td><td>신뢰된 Caddy 뒤에서만 1</td></tr>
+              <tr><td><code>GOOGLE_*</code>, <code>KAKAO_*</code></td><td>선택</td><td>실 OAuth smoke에서만 별도 주입</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="troubleshooting">
+        <h2><span class="num">10</span>문제 해결</h2>
+        <details>
+          <summary>프런트엔드는 열리지만 API가 실패한다</summary>
+          <div>FastAPI가 정확히 8788에서 실행 중인지 <code>lsof -nP -iTCP:8788 -sTCP:LISTEN</code>과 <code>curl http://127.0.0.1:8788/healthz</code>로 확인한다.</div>
+        </details>
+        <details>
+          <summary><code>/readyz</code>가 503을 반환한다</summary>
+          <div>응답이 <code>adapter-unavailable</code>이면 현재 shell의 <code>DATABASE_URL</code>을 unset하고 FastAPI를 재시작한다.</div>
+        </details>
+        <details>
+          <summary>FastAPI 포트의 <code>/</code>가 404다</summary>
+          <div>Vite 개발 모드에서는 5173으로 접속한다. FastAPI가 SPA까지 제공해야 하면 <code>npm --prefix frontend run build</code> 후 서버를 재시작한다.</div>
+        </details>
+        <details>
+          <summary>OpenAI key 오류로 기동하지 않는다</summary>
+          <div>일반 QA는 <code>export TTS_BACKEND=mock</code>과 <code>unset OPENAI_API_KEY</code>로 되돌린다. 실 TTS는 승인된 비용 범위에서만 실행한다.</div>
+        </details>
+        <details>
+          <summary>5173·8788·7474 포트가 이미 사용 중이다</summary>
+          <div><code>lsof -nP -iTCP:&lt;port&gt; -sTCP:LISTEN</code>으로 owner process를 확인한다. Vite/FastAPI는 proxy 계약 때문에 5173/8788 유지가 안전하다.</div>
+        </details>
+      </section>
+
+      <section id="limits">
+        <h2><span class="num">11</span>현재 제약과 확장 경계</h2>
+        <div class="grid">
+          <article class="card"><h3>인메모리 session/rate limit</h3><p>재시작 내구성과 다중 instance 일관성이 없다. 수평 확장 전에 PostgreSQL/Redis adapter로 교체한다.</p></article>
+          <article class="card"><h3>Runtime DB adapter 미구현</h3><p>migration 안전성은 구현됐지만 application persistence는 T029 범위다. DB 값을 먼저 연결하지 않는다.</p></article>
+          <article class="card"><h3>단일 EC2 topology</h3><p>클로즈드 베타의 의도적 trade-off다. 자동 복구·부하·가용성 요구가 확인되면 managed runtime을 재평가한다.</p></article>
+          <article class="card"><h3>TTS cache와 event file</h3><p>현재 local volume/JSONL 경계다. multi-instance나 장기 보존 요구가 생기면 object storage·analytics pipeline으로 교체한다.</p></article>
+        </div>
+        <div class="notice ok"><strong>확장 원칙:</strong> 먼저 application port 뒤 adapter를 교체한다. 조직·배포·부하 증거가 생기기 전에는 domain 기능을 별도 네트워크 서비스로 분리하지 않는다.</div>
+      </section>
+
+      <section id="sources">
+        <h2><span class="num">12</span>저장소 정본 문서</h2>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>문서</th><th>용도</th></tr></thead>
+            <tbody>
+              <tr><td><a href="./decisions/0006-modular-monolith-src-layout.md">ADR-0006</a></td><td>모듈러 모놀리스와 src layout 결정</td></tr>
+              <tr><td><a href="./project-structure.md">project-structure.md</a></td><td>디렉터리와 파일 배치 규칙</td></tr>
+              <tr><td><a href="./runbooks/local-server.md">local-server.md</a></td><td>로컬 서버의 상세 실행 절차</td></tr>
+              <tr><td><a href="./decisions/0005-closed-beta-deployment-and-staging-contract.md">ADR-0005</a></td><td>AWS staging, same-origin, rollback 계약</td></tr>
+              <tr><td><a href="./deployments/T028-staging-apply-packet.md">T028 apply packet</a></td><td>외부 입력 준비 후 staging 적용 절차</td></tr>
+              <tr><td><a href="../README.md">README.md</a></td><td>저장소 진입점</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <footer class="footer">
+    ProjectK-Shaman · 오늘신당 구현 아키텍처와 실행 가이드 · 정적 단일 HTML
+  </footer>
+
+  <script>
+    document.querySelectorAll("[data-copy]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const text = button.parentElement.querySelector("code").innerText;
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          const area = document.createElement("textarea");
+          area.value = text;
+          area.style.position = "fixed";
+          area.style.opacity = "0";
+          document.body.appendChild(area);
+          area.select();
+          document.execCommand("copy");
+          area.remove();
+        }
+        const previous = button.textContent;
+        button.textContent = "복사됨";
+        window.setTimeout(() => { button.textContent = previous; }, 1200);
+      });
+    });
+  </script>
+</body>
+</html>
