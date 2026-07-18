@@ -79,6 +79,8 @@ role membership의 SET/INHERIT/ADMIN 능력도 0인지 검증한다.
 ## 4. image와 app 배포 검증
 
 T028 이후 CI가 산출한 **digest**를 기록한다. mutable tag만 기록하면 실패다.
+T028의 실제 CloudFormation, GitHub environment, OAuth, rollback 실행 순서는
+`docs/deployments/T028-staging-apply-packet.md`를 따른다.
 
 ```bash
 export IMAGE_DIGEST="sha256:<approved-digest>"

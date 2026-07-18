@@ -7,9 +7,15 @@ credential, OAuth secret, or personal test account.
 ## Immutable inputs
 
 - repo revision: `pending`
+- GitHub workflow run ID / attempt: `pending`
+- workflow head SHA matches repo revision: `pending`
+- clean ARM64 `buildx --push`: `pending`
 - infrastructure revision: `pending`
+- infrastructure template SHA-256: `pending`
 - image digest (`sha256:...`, repository URI omitted): `pending`
+- previous healthy release: `none | pending`
 - previous healthy digest (`sha256:...`): `none | pending`
+- previous digest differs from candidate: `pending`
 - deployment bundle key: `pending`
 - deployment bundle VersionId: `pending`
 - deployment bundle SHA-256: `pending`
@@ -36,13 +42,20 @@ credential, OAuth secret, or personal test account.
 - remote forward smoke (`healthz`, `readyz`, `api/auth/providers`): `pending`
 - Google callback result (test identity omitted): `not-configured | pending | pass`
 - Kakao callback result (test identity omitted): `not-configured | pending | pass`
+- OAuth state cookie removed after callback: `pending`
+- session cookie (`Secure`, `HttpOnly`, `SameSite=Lax`): `pending`
+- auth code/token/provider subject absent from record and logs: `pending`
 
 ## Rollback drill
 
+- previous release is not `none`: `pending`
+- previous digest differs from candidate: `pending`
 - candidate digest: `pending`
 - restored digest: `pending`
+- rollback SSM command ID: `pending`
 - rollback start/end (UTC): `pending`
 - post-rollback health/readiness/API smoke: `pending`
+- post-rollback OAuth smoke: `pending`
 - automatic rollback status recorded by workflow: `not-required | healthy | failed`
 
 ## Scope assertion
